@@ -3,7 +3,8 @@
 
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
-import 'api/simple.dart';
+import 'api/chat_api.dart';
+import 'api/data_models.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'frb_generated.dart';
@@ -54,9 +55,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
       RustLibWire.fromExternalLibrary;
 
   @override
-  Future<void> executeRustInitializers() async {
-    await api.crateApiSimpleInitApp();
-  }
+  Future<void> executeRustInitializers() async {}
 
   @override
   ExternalLibraryLoaderConfig get defaultExternalLibraryLoaderConfig =>
@@ -66,7 +65,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => -1918914929;
+  int get rustContentHash => -21643838;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -77,9 +76,97 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
 }
 
 abstract class RustLibApi extends BaseApi {
-  String crateApiSimpleGreet({required String name});
+  Future<bool> crateApiChatApiAddAssistantMessage({
+    required String conversationId,
+    required String content,
+  });
 
-  Future<void> crateApiSimpleInitApp();
+  Future<bool> crateApiChatApiAddSystemMessage({
+    required String conversationId,
+    required String content,
+  });
+
+  Future<AppSettings> crateApiDataModelsAppSettingsDefault();
+
+  Future<Conversation> crateApiChatApiCreateConversation();
+
+  Future<bool> crateApiChatApiDeleteConversation({required String id});
+
+  Future<bool> crateApiChatApiDeleteMessage({
+    required String conversationId,
+    required String messageId,
+  });
+
+  Future<MessageType> crateApiChatApiDetectMessageType({
+    required String content,
+  });
+
+  Future<DialogueStyle> crateApiDataModelsDialogueStyleDefault();
+
+  Future<bool> crateApiChatApiEditMessage({
+    required String conversationId,
+    required String messageId,
+    required String newContent,
+  });
+
+  Future<List<ModelInfo>> crateApiChatApiGetAvailableModels();
+
+  Future<Conversation?> crateApiChatApiGetConversation({required String id});
+
+  Future<List<ConversationSummary>> crateApiChatApiGetConversationList();
+
+  Future<AppSettings> crateApiChatApiGetSettings();
+
+  Future<int> crateApiChatApiGetTurnCount({required String conversationId});
+
+  Future<void> crateApiChatApiInitApp({required String dataPath});
+
+  Future<MessageType> crateApiDataModelsMessageTypeDefault();
+
+  Stream<ChatStreamEvent> crateApiChatApiRegenerateResponse({
+    required String conversationId,
+    required String model,
+    required bool enableThinking,
+  });
+
+  Future<bool> crateApiChatApiRestartStory({required String conversationId});
+
+  Future<List<String>> crateApiChatApiRollbackToMessage({
+    required String conversationId,
+    required String messageId,
+  });
+
+  Future<bool> crateApiChatApiSaveSettings({required AppSettings settings});
+
+  Future<List<MemorySearchResult>> crateApiChatApiSearchMemories({
+    required String conversationId,
+    required String query,
+    required BigInt topK,
+  });
+
+  Stream<ChatStreamEvent> crateApiChatApiSendMessage({
+    required String conversationId,
+    required String content,
+    required String model,
+    required bool enableThinking,
+  });
+
+  Future<void> crateApiChatApiSetApiKey({required String apiKey});
+
+  Future<bool> crateApiChatApiSetDialogueStyle({
+    required String conversationId,
+    required DialogueStyle style,
+  });
+
+  Future<bool> crateApiChatApiShouldSummarizeMemory({
+    required String conversationId,
+  });
+
+  Stream<ChatStreamEvent> crateApiChatApiTriggerMemorySummarize({
+    required String conversationId,
+  });
+
+  Future<bool> crateApiChatApiValidateApiKey({required String apiKey});
 }
 
 class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
@@ -91,34 +178,51 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   });
 
   @override
-  String crateApiSimpleGreet({required String name}) {
-    return handler.executeSync(
-      SyncTask(
-        callFfi: () {
+  Future<bool> crateApiChatApiAddAssistantMessage({
+    required String conversationId,
+    required String content,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_String(name, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 1)!;
+          sse_encode_String(conversationId, serializer);
+          sse_encode_String(content, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 1,
+            port: port_,
+          );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_String,
+          decodeSuccessData: sse_decode_bool,
           decodeErrorData: null,
         ),
-        constMeta: kCrateApiSimpleGreetConstMeta,
-        argValues: [name],
+        constMeta: kCrateApiChatApiAddAssistantMessageConstMeta,
+        argValues: [conversationId, content],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiSimpleGreetConstMeta =>
-      const TaskConstMeta(debugName: "greet", argNames: ["name"]);
+  TaskConstMeta get kCrateApiChatApiAddAssistantMessageConstMeta =>
+      const TaskConstMeta(
+        debugName: "add_assistant_message",
+        argNames: ["conversationId", "content"],
+      );
 
   @override
-  Future<void> crateApiSimpleInitApp() {
+  Future<bool> crateApiChatApiAddSystemMessage({
+    required String conversationId,
+    required String content,
+  }) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(conversationId, serializer);
+          sse_encode_String(content, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -127,18 +231,821 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
+          decodeSuccessData: sse_decode_bool,
           decodeErrorData: null,
         ),
-        constMeta: kCrateApiSimpleInitAppConstMeta,
+        constMeta: kCrateApiChatApiAddSystemMessageConstMeta,
+        argValues: [conversationId, content],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiChatApiAddSystemMessageConstMeta =>
+      const TaskConstMeta(
+        debugName: "add_system_message",
+        argNames: ["conversationId", "content"],
+      );
+
+  @override
+  Future<AppSettings> crateApiDataModelsAppSettingsDefault() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 3,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_app_settings,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiDataModelsAppSettingsDefaultConstMeta,
         argValues: [],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiSimpleInitAppConstMeta =>
-      const TaskConstMeta(debugName: "init_app", argNames: []);
+  TaskConstMeta get kCrateApiDataModelsAppSettingsDefaultConstMeta =>
+      const TaskConstMeta(debugName: "app_settings_default", argNames: []);
+
+  @override
+  Future<Conversation> crateApiChatApiCreateConversation() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 4,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_conversation,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiChatApiCreateConversationConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiChatApiCreateConversationConstMeta =>
+      const TaskConstMeta(debugName: "create_conversation", argNames: []);
+
+  @override
+  Future<bool> crateApiChatApiDeleteConversation({required String id}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(id, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 5,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bool,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiChatApiDeleteConversationConstMeta,
+        argValues: [id],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiChatApiDeleteConversationConstMeta =>
+      const TaskConstMeta(debugName: "delete_conversation", argNames: ["id"]);
+
+  @override
+  Future<bool> crateApiChatApiDeleteMessage({
+    required String conversationId,
+    required String messageId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(conversationId, serializer);
+          sse_encode_String(messageId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 6,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bool,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiChatApiDeleteMessageConstMeta,
+        argValues: [conversationId, messageId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiChatApiDeleteMessageConstMeta =>
+      const TaskConstMeta(
+        debugName: "delete_message",
+        argNames: ["conversationId", "messageId"],
+      );
+
+  @override
+  Future<MessageType> crateApiChatApiDetectMessageType({
+    required String content,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(content, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 7,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_message_type,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiChatApiDetectMessageTypeConstMeta,
+        argValues: [content],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiChatApiDetectMessageTypeConstMeta =>
+      const TaskConstMeta(
+        debugName: "detect_message_type",
+        argNames: ["content"],
+      );
+
+  @override
+  Future<DialogueStyle> crateApiDataModelsDialogueStyleDefault() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 8,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_dialogue_style,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiDataModelsDialogueStyleDefaultConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDataModelsDialogueStyleDefaultConstMeta =>
+      const TaskConstMeta(debugName: "dialogue_style_default", argNames: []);
+
+  @override
+  Future<bool> crateApiChatApiEditMessage({
+    required String conversationId,
+    required String messageId,
+    required String newContent,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(conversationId, serializer);
+          sse_encode_String(messageId, serializer);
+          sse_encode_String(newContent, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 9,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bool,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiChatApiEditMessageConstMeta,
+        argValues: [conversationId, messageId, newContent],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiChatApiEditMessageConstMeta => const TaskConstMeta(
+    debugName: "edit_message",
+    argNames: ["conversationId", "messageId", "newContent"],
+  );
+
+  @override
+  Future<List<ModelInfo>> crateApiChatApiGetAvailableModels() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 10,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_model_info,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiChatApiGetAvailableModelsConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiChatApiGetAvailableModelsConstMeta =>
+      const TaskConstMeta(debugName: "get_available_models", argNames: []);
+
+  @override
+  Future<Conversation?> crateApiChatApiGetConversation({required String id}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(id, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 11,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_box_autoadd_conversation,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiChatApiGetConversationConstMeta,
+        argValues: [id],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiChatApiGetConversationConstMeta =>
+      const TaskConstMeta(debugName: "get_conversation", argNames: ["id"]);
+
+  @override
+  Future<List<ConversationSummary>> crateApiChatApiGetConversationList() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 12,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_conversation_summary,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiChatApiGetConversationListConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiChatApiGetConversationListConstMeta =>
+      const TaskConstMeta(debugName: "get_conversation_list", argNames: []);
+
+  @override
+  Future<AppSettings> crateApiChatApiGetSettings() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 13,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_app_settings,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiChatApiGetSettingsConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiChatApiGetSettingsConstMeta =>
+      const TaskConstMeta(debugName: "get_settings", argNames: []);
+
+  @override
+  Future<int> crateApiChatApiGetTurnCount({required String conversationId}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(conversationId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 14,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_u_32,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiChatApiGetTurnCountConstMeta,
+        argValues: [conversationId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiChatApiGetTurnCountConstMeta =>
+      const TaskConstMeta(
+        debugName: "get_turn_count",
+        argNames: ["conversationId"],
+      );
+
+  @override
+  Future<void> crateApiChatApiInitApp({required String dataPath}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(dataPath, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 15,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiChatApiInitAppConstMeta,
+        argValues: [dataPath],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiChatApiInitAppConstMeta =>
+      const TaskConstMeta(debugName: "init_app", argNames: ["dataPath"]);
+
+  @override
+  Future<MessageType> crateApiDataModelsMessageTypeDefault() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 16,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_message_type,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiDataModelsMessageTypeDefaultConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDataModelsMessageTypeDefaultConstMeta =>
+      const TaskConstMeta(debugName: "message_type_default", argNames: []);
+
+  @override
+  Stream<ChatStreamEvent> crateApiChatApiRegenerateResponse({
+    required String conversationId,
+    required String model,
+    required bool enableThinking,
+  }) {
+    final sink = RustStreamSink<ChatStreamEvent>();
+    unawaited(
+      handler.executeNormal(
+        NormalTask(
+          callFfi: (port_) {
+            final serializer = SseSerializer(generalizedFrbRustBinding);
+            sse_encode_String(conversationId, serializer);
+            sse_encode_String(model, serializer);
+            sse_encode_bool(enableThinking, serializer);
+            sse_encode_StreamSink_chat_stream_event_Sse(sink, serializer);
+            pdeCallFfi(
+              generalizedFrbRustBinding,
+              serializer,
+              funcId: 17,
+              port: port_,
+            );
+          },
+          codec: SseCodec(
+            decodeSuccessData: sse_decode_unit,
+            decodeErrorData: null,
+          ),
+          constMeta: kCrateApiChatApiRegenerateResponseConstMeta,
+          argValues: [conversationId, model, enableThinking, sink],
+          apiImpl: this,
+        ),
+      ),
+    );
+    return sink.stream;
+  }
+
+  TaskConstMeta get kCrateApiChatApiRegenerateResponseConstMeta =>
+      const TaskConstMeta(
+        debugName: "regenerate_response",
+        argNames: ["conversationId", "model", "enableThinking", "sink"],
+      );
+
+  @override
+  Future<bool> crateApiChatApiRestartStory({required String conversationId}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(conversationId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 18,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bool,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiChatApiRestartStoryConstMeta,
+        argValues: [conversationId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiChatApiRestartStoryConstMeta =>
+      const TaskConstMeta(
+        debugName: "restart_story",
+        argNames: ["conversationId"],
+      );
+
+  @override
+  Future<List<String>> crateApiChatApiRollbackToMessage({
+    required String conversationId,
+    required String messageId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(conversationId, serializer);
+          sse_encode_String(messageId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 19,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_String,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiChatApiRollbackToMessageConstMeta,
+        argValues: [conversationId, messageId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiChatApiRollbackToMessageConstMeta =>
+      const TaskConstMeta(
+        debugName: "rollback_to_message",
+        argNames: ["conversationId", "messageId"],
+      );
+
+  @override
+  Future<bool> crateApiChatApiSaveSettings({required AppSettings settings}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_box_autoadd_app_settings(settings, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 20,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bool,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiChatApiSaveSettingsConstMeta,
+        argValues: [settings],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiChatApiSaveSettingsConstMeta =>
+      const TaskConstMeta(debugName: "save_settings", argNames: ["settings"]);
+
+  @override
+  Future<List<MemorySearchResult>> crateApiChatApiSearchMemories({
+    required String conversationId,
+    required String query,
+    required BigInt topK,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(conversationId, serializer);
+          sse_encode_String(query, serializer);
+          sse_encode_usize(topK, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 21,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_memory_search_result,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiChatApiSearchMemoriesConstMeta,
+        argValues: [conversationId, query, topK],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiChatApiSearchMemoriesConstMeta =>
+      const TaskConstMeta(
+        debugName: "search_memories",
+        argNames: ["conversationId", "query", "topK"],
+      );
+
+  @override
+  Stream<ChatStreamEvent> crateApiChatApiSendMessage({
+    required String conversationId,
+    required String content,
+    required String model,
+    required bool enableThinking,
+  }) {
+    final sink = RustStreamSink<ChatStreamEvent>();
+    unawaited(
+      handler.executeNormal(
+        NormalTask(
+          callFfi: (port_) {
+            final serializer = SseSerializer(generalizedFrbRustBinding);
+            sse_encode_String(conversationId, serializer);
+            sse_encode_String(content, serializer);
+            sse_encode_String(model, serializer);
+            sse_encode_bool(enableThinking, serializer);
+            sse_encode_StreamSink_chat_stream_event_Sse(sink, serializer);
+            pdeCallFfi(
+              generalizedFrbRustBinding,
+              serializer,
+              funcId: 22,
+              port: port_,
+            );
+          },
+          codec: SseCodec(
+            decodeSuccessData: sse_decode_unit,
+            decodeErrorData: null,
+          ),
+          constMeta: kCrateApiChatApiSendMessageConstMeta,
+          argValues: [conversationId, content, model, enableThinking, sink],
+          apiImpl: this,
+        ),
+      ),
+    );
+    return sink.stream;
+  }
+
+  TaskConstMeta get kCrateApiChatApiSendMessageConstMeta => const TaskConstMeta(
+    debugName: "send_message",
+    argNames: ["conversationId", "content", "model", "enableThinking", "sink"],
+  );
+
+  @override
+  Future<void> crateApiChatApiSetApiKey({required String apiKey}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(apiKey, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 23,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiChatApiSetApiKeyConstMeta,
+        argValues: [apiKey],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiChatApiSetApiKeyConstMeta =>
+      const TaskConstMeta(debugName: "set_api_key", argNames: ["apiKey"]);
+
+  @override
+  Future<bool> crateApiChatApiSetDialogueStyle({
+    required String conversationId,
+    required DialogueStyle style,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(conversationId, serializer);
+          sse_encode_dialogue_style(style, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 24,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bool,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiChatApiSetDialogueStyleConstMeta,
+        argValues: [conversationId, style],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiChatApiSetDialogueStyleConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_dialogue_style",
+        argNames: ["conversationId", "style"],
+      );
+
+  @override
+  Future<bool> crateApiChatApiShouldSummarizeMemory({
+    required String conversationId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(conversationId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 25,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bool,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiChatApiShouldSummarizeMemoryConstMeta,
+        argValues: [conversationId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiChatApiShouldSummarizeMemoryConstMeta =>
+      const TaskConstMeta(
+        debugName: "should_summarize_memory",
+        argNames: ["conversationId"],
+      );
+
+  @override
+  Stream<ChatStreamEvent> crateApiChatApiTriggerMemorySummarize({
+    required String conversationId,
+  }) {
+    final sink = RustStreamSink<ChatStreamEvent>();
+    unawaited(
+      handler.executeNormal(
+        NormalTask(
+          callFfi: (port_) {
+            final serializer = SseSerializer(generalizedFrbRustBinding);
+            sse_encode_String(conversationId, serializer);
+            sse_encode_StreamSink_chat_stream_event_Sse(sink, serializer);
+            pdeCallFfi(
+              generalizedFrbRustBinding,
+              serializer,
+              funcId: 26,
+              port: port_,
+            );
+          },
+          codec: SseCodec(
+            decodeSuccessData: sse_decode_unit,
+            decodeErrorData: null,
+          ),
+          constMeta: kCrateApiChatApiTriggerMemorySummarizeConstMeta,
+          argValues: [conversationId, sink],
+          apiImpl: this,
+        ),
+      ),
+    );
+    return sink.stream;
+  }
+
+  TaskConstMeta get kCrateApiChatApiTriggerMemorySummarizeConstMeta =>
+      const TaskConstMeta(
+        debugName: "trigger_memory_summarize",
+        argNames: ["conversationId", "sink"],
+      );
+
+  @override
+  Future<bool> crateApiChatApiValidateApiKey({required String apiKey}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(apiKey, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 27,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bool,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiChatApiValidateApiKeyConstMeta,
+        argValues: [apiKey],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiChatApiValidateApiKeyConstMeta =>
+      const TaskConstMeta(debugName: "validate_api_key", argNames: ["apiKey"]);
+
+  @protected
+  AnyhowException dco_decode_AnyhowException(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return AnyhowException(raw as String);
+  }
+
+  @protected
+  RustStreamSink<ChatStreamEvent> dco_decode_StreamSink_chat_stream_event_Sse(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    throw UnimplementedError();
+  }
 
   @protected
   String dco_decode_String(dynamic raw) {
@@ -147,9 +1054,244 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  AppSettings dco_decode_app_settings(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    return AppSettings(
+      apiKey: dco_decode_opt_String(arr[0]),
+      defaultModel: dco_decode_String(arr[1]),
+      enableThinkingByDefault: dco_decode_bool(arr[2]),
+      chatModel: dco_decode_String(arr[3]),
+      thinkingModel: dco_decode_String(arr[4]),
+    );
+  }
+
+  @protected
+  bool dco_decode_bool(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as bool;
+  }
+
+  @protected
+  AppSettings dco_decode_box_autoadd_app_settings(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_app_settings(raw);
+  }
+
+  @protected
+  Conversation dco_decode_box_autoadd_conversation(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_conversation(raw);
+  }
+
+  @protected
+  ChatStreamEvent dco_decode_chat_stream_event(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    switch (raw[0]) {
+      case 0:
+        return ChatStreamEvent_ContentDelta(dco_decode_String(raw[1]));
+      case 1:
+        return ChatStreamEvent_ThinkingDelta(dco_decode_String(raw[1]));
+      case 2:
+        return ChatStreamEvent_Done();
+      case 3:
+        return ChatStreamEvent_Error(dco_decode_String(raw[1]));
+      default:
+        throw Exception("unreachable");
+    }
+  }
+
+  @protected
+  Conversation dco_decode_conversation(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 9)
+      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
+    return Conversation(
+      id: dco_decode_String(arr[0]),
+      title: dco_decode_String(arr[1]),
+      messages: dco_decode_list_message(arr[2]),
+      model: dco_decode_String(arr[3]),
+      createdAt: dco_decode_i_64(arr[4]),
+      updatedAt: dco_decode_i_64(arr[5]),
+      dialogueStyle: dco_decode_dialogue_style(arr[6]),
+      turnCount: dco_decode_u_32(arr[7]),
+      memorySummaries: dco_decode_list_memory_summary(arr[8]),
+    );
+  }
+
+  @protected
+  ConversationSummary dco_decode_conversation_summary(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    return ConversationSummary(
+      id: dco_decode_String(arr[0]),
+      title: dco_decode_String(arr[1]),
+      lastMessagePreview: dco_decode_String(arr[2]),
+      model: dco_decode_String(arr[3]),
+      updatedAt: dco_decode_i_64(arr[4]),
+    );
+  }
+
+  @protected
+  DialogueStyle dco_decode_dialogue_style(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return DialogueStyle.values[raw as int];
+  }
+
+  @protected
+  double dco_decode_f_64(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as double;
+  }
+
+  @protected
+  int dco_decode_i_32(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as int;
+  }
+
+  @protected
+  PlatformInt64 dco_decode_i_64(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dcoDecodeI64(raw);
+  }
+
+  @protected
+  List<String> dco_decode_list_String(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_String).toList();
+  }
+
+  @protected
+  List<ConversationSummary> dco_decode_list_conversation_summary(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_conversation_summary).toList();
+  }
+
+  @protected
+  List<MemorySearchResult> dco_decode_list_memory_search_result(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_memory_search_result).toList();
+  }
+
+  @protected
+  List<MemorySummary> dco_decode_list_memory_summary(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_memory_summary).toList();
+  }
+
+  @protected
+  List<Message> dco_decode_list_message(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_message).toList();
+  }
+
+  @protected
+  List<ModelInfo> dco_decode_list_model_info(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_model_info).toList();
+  }
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as Uint8List;
+  }
+
+  @protected
+  MemorySearchResult dco_decode_memory_search_result(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return MemorySearchResult(
+      summary: dco_decode_String(arr[0]),
+      coreFacts: dco_decode_list_String(arr[1]),
+      relevanceScore: dco_decode_f_64(arr[2]),
+    );
+  }
+
+  @protected
+  MemorySummary dco_decode_memory_summary(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    return MemorySummary(
+      id: dco_decode_String(arr[0]),
+      summary: dco_decode_String(arr[1]),
+      coreFacts: dco_decode_list_String(arr[2]),
+      turnRangeStart: dco_decode_u_32(arr[3]),
+      turnRangeEnd: dco_decode_u_32(arr[4]),
+      createdAt: dco_decode_i_64(arr[5]),
+      keywords: dco_decode_list_String(arr[6]),
+    );
+  }
+
+  @protected
+  Message dco_decode_message(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    return Message(
+      id: dco_decode_String(arr[0]),
+      role: dco_decode_message_role(arr[1]),
+      content: dco_decode_String(arr[2]),
+      thinkingContent: dco_decode_opt_String(arr[3]),
+      model: dco_decode_String(arr[4]),
+      timestamp: dco_decode_i_64(arr[5]),
+      messageType: dco_decode_message_type(arr[6]),
+    );
+  }
+
+  @protected
+  MessageRole dco_decode_message_role(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return MessageRole.values[raw as int];
+  }
+
+  @protected
+  MessageType dco_decode_message_type(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return MessageType.values[raw as int];
+  }
+
+  @protected
+  ModelInfo dco_decode_model_info(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return ModelInfo(
+      id: dco_decode_String(arr[0]),
+      name: dco_decode_String(arr[1]),
+      contextTokens: dco_decode_usize(arr[2]),
+      supportsThinking: dco_decode_bool(arr[3]),
+    );
+  }
+
+  @protected
+  String? dco_decode_opt_String(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_String(raw);
+  }
+
+  @protected
+  Conversation? dco_decode_opt_box_autoadd_conversation(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_conversation(raw);
+  }
+
+  @protected
+  int dco_decode_u_32(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as int;
   }
 
   @protected
@@ -165,6 +1307,27 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  BigInt dco_decode_usize(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dcoDecodeU64(raw);
+  }
+
+  @protected
+  AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_String(deserializer);
+    return AnyhowException(inner);
+  }
+
+  @protected
+  RustStreamSink<ChatStreamEvent> sse_decode_StreamSink_chat_stream_event_Sse(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    throw UnimplementedError('Unreachable ()');
+  }
+
+  @protected
   String sse_decode_String(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_list_prim_u_8_strict(deserializer);
@@ -172,10 +1335,334 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  AppSettings sse_decode_app_settings(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_apiKey = sse_decode_opt_String(deserializer);
+    var var_defaultModel = sse_decode_String(deserializer);
+    var var_enableThinkingByDefault = sse_decode_bool(deserializer);
+    var var_chatModel = sse_decode_String(deserializer);
+    var var_thinkingModel = sse_decode_String(deserializer);
+    return AppSettings(
+      apiKey: var_apiKey,
+      defaultModel: var_defaultModel,
+      enableThinkingByDefault: var_enableThinkingByDefault,
+      chatModel: var_chatModel,
+      thinkingModel: var_thinkingModel,
+    );
+  }
+
+  @protected
+  bool sse_decode_bool(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getUint8() != 0;
+  }
+
+  @protected
+  AppSettings sse_decode_box_autoadd_app_settings(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_app_settings(deserializer));
+  }
+
+  @protected
+  Conversation sse_decode_box_autoadd_conversation(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_conversation(deserializer));
+  }
+
+  @protected
+  ChatStreamEvent sse_decode_chat_stream_event(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var tag_ = sse_decode_i_32(deserializer);
+    switch (tag_) {
+      case 0:
+        var var_field0 = sse_decode_String(deserializer);
+        return ChatStreamEvent_ContentDelta(var_field0);
+      case 1:
+        var var_field0 = sse_decode_String(deserializer);
+        return ChatStreamEvent_ThinkingDelta(var_field0);
+      case 2:
+        return ChatStreamEvent_Done();
+      case 3:
+        var var_field0 = sse_decode_String(deserializer);
+        return ChatStreamEvent_Error(var_field0);
+      default:
+        throw UnimplementedError('');
+    }
+  }
+
+  @protected
+  Conversation sse_decode_conversation(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_id = sse_decode_String(deserializer);
+    var var_title = sse_decode_String(deserializer);
+    var var_messages = sse_decode_list_message(deserializer);
+    var var_model = sse_decode_String(deserializer);
+    var var_createdAt = sse_decode_i_64(deserializer);
+    var var_updatedAt = sse_decode_i_64(deserializer);
+    var var_dialogueStyle = sse_decode_dialogue_style(deserializer);
+    var var_turnCount = sse_decode_u_32(deserializer);
+    var var_memorySummaries = sse_decode_list_memory_summary(deserializer);
+    return Conversation(
+      id: var_id,
+      title: var_title,
+      messages: var_messages,
+      model: var_model,
+      createdAt: var_createdAt,
+      updatedAt: var_updatedAt,
+      dialogueStyle: var_dialogueStyle,
+      turnCount: var_turnCount,
+      memorySummaries: var_memorySummaries,
+    );
+  }
+
+  @protected
+  ConversationSummary sse_decode_conversation_summary(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_id = sse_decode_String(deserializer);
+    var var_title = sse_decode_String(deserializer);
+    var var_lastMessagePreview = sse_decode_String(deserializer);
+    var var_model = sse_decode_String(deserializer);
+    var var_updatedAt = sse_decode_i_64(deserializer);
+    return ConversationSummary(
+      id: var_id,
+      title: var_title,
+      lastMessagePreview: var_lastMessagePreview,
+      model: var_model,
+      updatedAt: var_updatedAt,
+    );
+  }
+
+  @protected
+  DialogueStyle sse_decode_dialogue_style(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return DialogueStyle.values[inner];
+  }
+
+  @protected
+  double sse_decode_f_64(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getFloat64();
+  }
+
+  @protected
+  int sse_decode_i_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getInt32();
+  }
+
+  @protected
+  PlatformInt64 sse_decode_i_64(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getPlatformInt64();
+  }
+
+  @protected
+  List<String> sse_decode_list_String(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <String>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_String(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<ConversationSummary> sse_decode_list_conversation_summary(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <ConversationSummary>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_conversation_summary(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<MemorySearchResult> sse_decode_list_memory_search_result(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <MemorySearchResult>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_memory_search_result(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<MemorySummary> sse_decode_list_memory_summary(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <MemorySummary>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_memory_summary(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<Message> sse_decode_list_message(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <Message>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_message(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<ModelInfo> sse_decode_list_model_info(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <ModelInfo>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_model_info(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var len_ = sse_decode_i_32(deserializer);
     return deserializer.buffer.getUint8List(len_);
+  }
+
+  @protected
+  MemorySearchResult sse_decode_memory_search_result(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_summary = sse_decode_String(deserializer);
+    var var_coreFacts = sse_decode_list_String(deserializer);
+    var var_relevanceScore = sse_decode_f_64(deserializer);
+    return MemorySearchResult(
+      summary: var_summary,
+      coreFacts: var_coreFacts,
+      relevanceScore: var_relevanceScore,
+    );
+  }
+
+  @protected
+  MemorySummary sse_decode_memory_summary(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_id = sse_decode_String(deserializer);
+    var var_summary = sse_decode_String(deserializer);
+    var var_coreFacts = sse_decode_list_String(deserializer);
+    var var_turnRangeStart = sse_decode_u_32(deserializer);
+    var var_turnRangeEnd = sse_decode_u_32(deserializer);
+    var var_createdAt = sse_decode_i_64(deserializer);
+    var var_keywords = sse_decode_list_String(deserializer);
+    return MemorySummary(
+      id: var_id,
+      summary: var_summary,
+      coreFacts: var_coreFacts,
+      turnRangeStart: var_turnRangeStart,
+      turnRangeEnd: var_turnRangeEnd,
+      createdAt: var_createdAt,
+      keywords: var_keywords,
+    );
+  }
+
+  @protected
+  Message sse_decode_message(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_id = sse_decode_String(deserializer);
+    var var_role = sse_decode_message_role(deserializer);
+    var var_content = sse_decode_String(deserializer);
+    var var_thinkingContent = sse_decode_opt_String(deserializer);
+    var var_model = sse_decode_String(deserializer);
+    var var_timestamp = sse_decode_i_64(deserializer);
+    var var_messageType = sse_decode_message_type(deserializer);
+    return Message(
+      id: var_id,
+      role: var_role,
+      content: var_content,
+      thinkingContent: var_thinkingContent,
+      model: var_model,
+      timestamp: var_timestamp,
+      messageType: var_messageType,
+    );
+  }
+
+  @protected
+  MessageRole sse_decode_message_role(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return MessageRole.values[inner];
+  }
+
+  @protected
+  MessageType sse_decode_message_type(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return MessageType.values[inner];
+  }
+
+  @protected
+  ModelInfo sse_decode_model_info(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_id = sse_decode_String(deserializer);
+    var var_name = sse_decode_String(deserializer);
+    var var_contextTokens = sse_decode_usize(deserializer);
+    var var_supportsThinking = sse_decode_bool(deserializer);
+    return ModelInfo(
+      id: var_id,
+      name: var_name,
+      contextTokens: var_contextTokens,
+      supportsThinking: var_supportsThinking,
+    );
+  }
+
+  @protected
+  String? sse_decode_opt_String(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_String(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  Conversation? sse_decode_opt_box_autoadd_conversation(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_conversation(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  int sse_decode_u_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getUint32();
   }
 
   @protected
@@ -190,21 +1677,213 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  int sse_decode_i_32(SseDeserializer deserializer) {
+  BigInt sse_decode_usize(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    return deserializer.buffer.getInt32();
+    return deserializer.buffer.getBigUint64();
   }
 
   @protected
-  bool sse_decode_bool(SseDeserializer deserializer) {
+  void sse_encode_AnyhowException(
+    AnyhowException self,
+    SseSerializer serializer,
+  ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    return deserializer.buffer.getUint8() != 0;
+    sse_encode_String(self.message, serializer);
+  }
+
+  @protected
+  void sse_encode_StreamSink_chat_stream_event_Sse(
+    RustStreamSink<ChatStreamEvent> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(
+      self.setupAndSerialize(
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_chat_stream_event,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+      ),
+      serializer,
+    );
   }
 
   @protected
   void sse_encode_String(String self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_list_prim_u_8_strict(utf8.encoder.convert(self), serializer);
+  }
+
+  @protected
+  void sse_encode_app_settings(AppSettings self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_opt_String(self.apiKey, serializer);
+    sse_encode_String(self.defaultModel, serializer);
+    sse_encode_bool(self.enableThinkingByDefault, serializer);
+    sse_encode_String(self.chatModel, serializer);
+    sse_encode_String(self.thinkingModel, serializer);
+  }
+
+  @protected
+  void sse_encode_bool(bool self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putUint8(self ? 1 : 0);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_app_settings(
+    AppSettings self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_app_settings(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_conversation(
+    Conversation self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_conversation(self, serializer);
+  }
+
+  @protected
+  void sse_encode_chat_stream_event(
+    ChatStreamEvent self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    switch (self) {
+      case ChatStreamEvent_ContentDelta(field0: final field0):
+        sse_encode_i_32(0, serializer);
+        sse_encode_String(field0, serializer);
+      case ChatStreamEvent_ThinkingDelta(field0: final field0):
+        sse_encode_i_32(1, serializer);
+        sse_encode_String(field0, serializer);
+      case ChatStreamEvent_Done():
+        sse_encode_i_32(2, serializer);
+      case ChatStreamEvent_Error(field0: final field0):
+        sse_encode_i_32(3, serializer);
+        sse_encode_String(field0, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_conversation(Conversation self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.id, serializer);
+    sse_encode_String(self.title, serializer);
+    sse_encode_list_message(self.messages, serializer);
+    sse_encode_String(self.model, serializer);
+    sse_encode_i_64(self.createdAt, serializer);
+    sse_encode_i_64(self.updatedAt, serializer);
+    sse_encode_dialogue_style(self.dialogueStyle, serializer);
+    sse_encode_u_32(self.turnCount, serializer);
+    sse_encode_list_memory_summary(self.memorySummaries, serializer);
+  }
+
+  @protected
+  void sse_encode_conversation_summary(
+    ConversationSummary self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.id, serializer);
+    sse_encode_String(self.title, serializer);
+    sse_encode_String(self.lastMessagePreview, serializer);
+    sse_encode_String(self.model, serializer);
+    sse_encode_i_64(self.updatedAt, serializer);
+  }
+
+  @protected
+  void sse_encode_dialogue_style(DialogueStyle self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_f_64(double self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putFloat64(self);
+  }
+
+  @protected
+  void sse_encode_i_32(int self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putInt32(self);
+  }
+
+  @protected
+  void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putPlatformInt64(self);
+  }
+
+  @protected
+  void sse_encode_list_String(List<String> self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_String(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_conversation_summary(
+    List<ConversationSummary> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_conversation_summary(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_memory_search_result(
+    List<MemorySearchResult> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_memory_search_result(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_memory_summary(
+    List<MemorySummary> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_memory_summary(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_message(List<Message> self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_message(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_model_info(
+    List<ModelInfo> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_model_info(item, serializer);
+    }
   }
 
   @protected
@@ -215,6 +1894,91 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
     serializer.buffer.putUint8List(self);
+  }
+
+  @protected
+  void sse_encode_memory_search_result(
+    MemorySearchResult self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.summary, serializer);
+    sse_encode_list_String(self.coreFacts, serializer);
+    sse_encode_f_64(self.relevanceScore, serializer);
+  }
+
+  @protected
+  void sse_encode_memory_summary(MemorySummary self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.id, serializer);
+    sse_encode_String(self.summary, serializer);
+    sse_encode_list_String(self.coreFacts, serializer);
+    sse_encode_u_32(self.turnRangeStart, serializer);
+    sse_encode_u_32(self.turnRangeEnd, serializer);
+    sse_encode_i_64(self.createdAt, serializer);
+    sse_encode_list_String(self.keywords, serializer);
+  }
+
+  @protected
+  void sse_encode_message(Message self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.id, serializer);
+    sse_encode_message_role(self.role, serializer);
+    sse_encode_String(self.content, serializer);
+    sse_encode_opt_String(self.thinkingContent, serializer);
+    sse_encode_String(self.model, serializer);
+    sse_encode_i_64(self.timestamp, serializer);
+    sse_encode_message_type(self.messageType, serializer);
+  }
+
+  @protected
+  void sse_encode_message_role(MessageRole self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_message_type(MessageType self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_model_info(ModelInfo self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.id, serializer);
+    sse_encode_String(self.name, serializer);
+    sse_encode_usize(self.contextTokens, serializer);
+    sse_encode_bool(self.supportsThinking, serializer);
+  }
+
+  @protected
+  void sse_encode_opt_String(String? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_String(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_conversation(
+    Conversation? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_conversation(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_u_32(int self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putUint32(self);
   }
 
   @protected
@@ -229,14 +1993,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_i_32(int self, SseSerializer serializer) {
+  void sse_encode_usize(BigInt self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    serializer.buffer.putInt32(self);
-  }
-
-  @protected
-  void sse_encode_bool(bool self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    serializer.buffer.putUint8(self ? 1 : 0);
+    serializer.buffer.putBigUint64(self);
   }
 }

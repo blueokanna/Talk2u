@@ -3,7 +3,8 @@
 
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
-import 'api/simple.dart';
+import 'api/chat_api.dart';
+import 'api/data_models.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi' as ffi;
@@ -19,10 +20,96 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   });
 
   @protected
+  AnyhowException dco_decode_AnyhowException(dynamic raw);
+
+  @protected
+  RustStreamSink<ChatStreamEvent> dco_decode_StreamSink_chat_stream_event_Sse(
+    dynamic raw,
+  );
+
+  @protected
   String dco_decode_String(dynamic raw);
 
   @protected
+  AppSettings dco_decode_app_settings(dynamic raw);
+
+  @protected
+  bool dco_decode_bool(dynamic raw);
+
+  @protected
+  AppSettings dco_decode_box_autoadd_app_settings(dynamic raw);
+
+  @protected
+  Conversation dco_decode_box_autoadd_conversation(dynamic raw);
+
+  @protected
+  ChatStreamEvent dco_decode_chat_stream_event(dynamic raw);
+
+  @protected
+  Conversation dco_decode_conversation(dynamic raw);
+
+  @protected
+  ConversationSummary dco_decode_conversation_summary(dynamic raw);
+
+  @protected
+  DialogueStyle dco_decode_dialogue_style(dynamic raw);
+
+  @protected
+  double dco_decode_f_64(dynamic raw);
+
+  @protected
+  int dco_decode_i_32(dynamic raw);
+
+  @protected
+  PlatformInt64 dco_decode_i_64(dynamic raw);
+
+  @protected
+  List<String> dco_decode_list_String(dynamic raw);
+
+  @protected
+  List<ConversationSummary> dco_decode_list_conversation_summary(dynamic raw);
+
+  @protected
+  List<MemorySearchResult> dco_decode_list_memory_search_result(dynamic raw);
+
+  @protected
+  List<MemorySummary> dco_decode_list_memory_summary(dynamic raw);
+
+  @protected
+  List<Message> dco_decode_list_message(dynamic raw);
+
+  @protected
+  List<ModelInfo> dco_decode_list_model_info(dynamic raw);
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  MemorySearchResult dco_decode_memory_search_result(dynamic raw);
+
+  @protected
+  MemorySummary dco_decode_memory_summary(dynamic raw);
+
+  @protected
+  Message dco_decode_message(dynamic raw);
+
+  @protected
+  MessageRole dco_decode_message_role(dynamic raw);
+
+  @protected
+  MessageType dco_decode_message_type(dynamic raw);
+
+  @protected
+  ModelInfo dco_decode_model_info(dynamic raw);
+
+  @protected
+  String? dco_decode_opt_String(dynamic raw);
+
+  @protected
+  Conversation? dco_decode_opt_box_autoadd_conversation(dynamic raw);
+
+  @protected
+  int dco_decode_u_32(dynamic raw);
 
   @protected
   int dco_decode_u_8(dynamic raw);
@@ -31,10 +118,113 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void dco_decode_unit(dynamic raw);
 
   @protected
+  BigInt dco_decode_usize(dynamic raw);
+
+  @protected
+  AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
+
+  @protected
+  RustStreamSink<ChatStreamEvent> sse_decode_StreamSink_chat_stream_event_Sse(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   String sse_decode_String(SseDeserializer deserializer);
 
   @protected
+  AppSettings sse_decode_app_settings(SseDeserializer deserializer);
+
+  @protected
+  bool sse_decode_bool(SseDeserializer deserializer);
+
+  @protected
+  AppSettings sse_decode_box_autoadd_app_settings(SseDeserializer deserializer);
+
+  @protected
+  Conversation sse_decode_box_autoadd_conversation(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ChatStreamEvent sse_decode_chat_stream_event(SseDeserializer deserializer);
+
+  @protected
+  Conversation sse_decode_conversation(SseDeserializer deserializer);
+
+  @protected
+  ConversationSummary sse_decode_conversation_summary(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DialogueStyle sse_decode_dialogue_style(SseDeserializer deserializer);
+
+  @protected
+  double sse_decode_f_64(SseDeserializer deserializer);
+
+  @protected
+  int sse_decode_i_32(SseDeserializer deserializer);
+
+  @protected
+  PlatformInt64 sse_decode_i_64(SseDeserializer deserializer);
+
+  @protected
+  List<String> sse_decode_list_String(SseDeserializer deserializer);
+
+  @protected
+  List<ConversationSummary> sse_decode_list_conversation_summary(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<MemorySearchResult> sse_decode_list_memory_search_result(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<MemorySummary> sse_decode_list_memory_summary(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<Message> sse_decode_list_message(SseDeserializer deserializer);
+
+  @protected
+  List<ModelInfo> sse_decode_list_model_info(SseDeserializer deserializer);
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  MemorySearchResult sse_decode_memory_search_result(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  MemorySummary sse_decode_memory_summary(SseDeserializer deserializer);
+
+  @protected
+  Message sse_decode_message(SseDeserializer deserializer);
+
+  @protected
+  MessageRole sse_decode_message_role(SseDeserializer deserializer);
+
+  @protected
+  MessageType sse_decode_message_type(SseDeserializer deserializer);
+
+  @protected
+  ModelInfo sse_decode_model_info(SseDeserializer deserializer);
+
+  @protected
+  String? sse_decode_opt_String(SseDeserializer deserializer);
+
+  @protected
+  Conversation? sse_decode_opt_box_autoadd_conversation(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  int sse_decode_u_32(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_8(SseDeserializer deserializer);
@@ -43,13 +233,97 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_decode_unit(SseDeserializer deserializer);
 
   @protected
-  int sse_decode_i_32(SseDeserializer deserializer);
+  BigInt sse_decode_usize(SseDeserializer deserializer);
 
   @protected
-  bool sse_decode_bool(SseDeserializer deserializer);
+  void sse_encode_AnyhowException(
+    AnyhowException self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_StreamSink_chat_stream_event_Sse(
+    RustStreamSink<ChatStreamEvent> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_String(String self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_app_settings(AppSettings self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_bool(bool self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_app_settings(
+    AppSettings self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_conversation(
+    Conversation self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_chat_stream_event(
+    ChatStreamEvent self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_conversation(Conversation self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_conversation_summary(
+    ConversationSummary self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_dialogue_style(DialogueStyle self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_f_64(double self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_i_32(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_String(List<String> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_conversation_summary(
+    List<ConversationSummary> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_memory_search_result(
+    List<MemorySearchResult> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_memory_summary(
+    List<MemorySummary> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_message(List<Message> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_model_info(
+    List<ModelInfo> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_prim_u_8_strict(
@@ -58,16 +332,46 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_memory_search_result(
+    MemorySearchResult self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_memory_summary(MemorySummary self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_message(Message self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_message_role(MessageRole self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_message_type(MessageType self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_model_info(ModelInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_String(String? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_conversation(
+    Conversation? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_u_32(int self, SseSerializer serializer);
+
+  @protected
   void sse_encode_u_8(int self, SseSerializer serializer);
 
   @protected
   void sse_encode_unit(void self, SseSerializer serializer);
 
   @protected
-  void sse_encode_i_32(int self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_bool(bool self, SseSerializer serializer);
+  void sse_encode_usize(BigInt self, SseSerializer serializer);
 }
 
 // Section: wire_class
