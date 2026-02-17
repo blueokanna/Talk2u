@@ -2,6 +2,7 @@ pub mod chat_api;
 pub mod data_models;
 
 pub(crate) mod chat_engine;
+pub(crate) mod cognitive_engine;
 pub(crate) mod streaming_handler;
 pub(crate) mod jwt_auth;
 pub(crate) mod conversation_store;

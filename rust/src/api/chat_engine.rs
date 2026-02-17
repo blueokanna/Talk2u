@@ -1,3 +1,4 @@
+use super::cognitive_engine::CognitiveEngine;
 use super::conversation_store::ConversationStore;
 use super::data_models::*;
 use super::error_handler::ChatError;
@@ -203,39 +204,23 @@ impl ChatEngine {
             }
         }
 
-        // 层3: 情感状态追踪
+        // 层3: 认知思维引擎（替代简单的情感关键词匹配和连贯性检测）
+        // 整合了：情感感知、语言模式检测、意图推断、关系分析、共情策略
         let non_system: Vec<&Message> = conv
             .messages
             .iter()
             .filter(|m| m.role != MessageRole::System)
             .collect();
 
-        if non_system.len() >= 4 {
-            let emotional_context = Self::build_emotional_context(&non_system);
-            if !emotional_context.is_empty() {
-                system_token_budget += emotional_context.len() / 2;
-                enhanced_messages.push(Message {
-                    id: String::new(),
-                    role: MessageRole::System,
-                    content: emotional_context,
-                    thinking_content: None,
-                    model: "system".to_string(),
-                    timestamp: 0,
-                    message_type: MessageType::Say,
-                });
-            }
-        }
-
-        // 层3.5: 对话连贯性与上下文指代消歧
-        // 分析最近几条消息中的指代关系，防止张冠李戴
         if non_system.len() >= 2 {
-            let coherence_context = Self::build_coherence_context(&non_system);
-            if !coherence_context.is_empty() {
-                system_token_budget += coherence_context.len() / 2;
+            let cognitive_analysis = CognitiveEngine::analyze(&non_system);
+            let cognitive_prompt = cognitive_analysis.cognitive_prompt;
+            if !cognitive_prompt.is_empty() {
+                system_token_budget += cognitive_prompt.len() / 2;
                 enhanced_messages.push(Message {
                     id: String::new(),
                     role: MessageRole::System,
-                    content: coherence_context,
+                    content: cognitive_prompt,
                     thinking_content: None,
                     model: "system".to_string(),
                     timestamp: 0,
@@ -360,285 +345,6 @@ impl ChatEngine {
             ));
         }
         hint
-    }
-
-    /// 构建对话连贯性上下文，防止张冠李戴和上下文断裂
-    /// 提取最近对话中的关键话题、指代关系和未完成的话题线索
-    fn build_coherence_context(recent_messages: &[&Message]) -> String {
-        let last_n: Vec<&&Message> = recent_messages.iter().rev().take(6).collect();
-        if last_n.len() < 2 {
-            return String::new();
-        }
-
-        let mut context = String::new();
-
-        // 1. 提取最近的话题焦点（最后2-3条消息的核心内容）
-        let last_user_msgs: Vec<&str> = last_n.iter()
-            .filter(|m| m.role == MessageRole::User)
-            .take(2)
-            .map(|m| m.content.as_str())
-            .collect();
-
-        let last_ai_msgs: Vec<&str> = last_n.iter()
-            .filter(|m| m.role == MessageRole::Assistant)
-            .take(2)
-            .map(|m| m.content.as_str())
-            .collect();
-
-        // 2. 检测话题转换信号
-        if last_user_msgs.len() >= 2 {
-            let current = last_user_msgs[0];
-            let previous = last_user_msgs[1];
-
-            // 检测是否在延续同一话题（通过共享关键词）
-            let current_chars: std::collections::HashSet<String> = current.chars()
-                .collect::<Vec<_>>()
-                .windows(2)
-                .map(|w| w.iter().collect::<String>())
-                .filter(|s| s.chars().any(|c| c > '\u{4e00}'))
-                .collect();
-            let previous_chars: std::collections::HashSet<String> = previous.chars()
-                .collect::<Vec<_>>()
-                .windows(2)
-                .map(|w| w.iter().collect::<String>())
-                .filter(|s| s.chars().any(|c| c > '\u{4e00}'))
-                .collect();
-
-            let overlap = current_chars.intersection(&previous_chars).count();
-            let topic_continuity = if current_chars.is_empty() || previous_chars.is_empty() {
-                0.0
-            } else {
-                overlap as f64 / current_chars.len().min(previous_chars.len()) as f64
-            };
-
-            if topic_continuity < 0.1 && !current.trim().is_empty() && !previous.trim().is_empty() {
-                context.push_str("【上下文提示】对方刚换了话题，注意不要还在聊之前的内容。\n");
-            } else if topic_continuity > 0.3 {
-                context.push_str("【上下文提示】对方在延续之前的话题，保持连贯，记住之前聊的内容。\n");
-            }
-        }
-
-        // 3. 检测问句未回答（防止忽略对方的问题）
-        if let Some(last_user) = last_user_msgs.first() {
-            let has_question = last_user.contains('？') || last_user.contains('?')
-                || last_user.contains("吗") || last_user.contains("呢")
-                || last_user.contains("什么") || last_user.contains("怎么")
-                || last_user.contains("为什么") || last_user.contains("哪")
-                || last_user.contains("谁") || last_user.contains("几");
-
-            if has_question {
-                context.push_str("【上下文提示】对方在问你问题，要回应（但可以用角色的方式回应，不一定要正面回答）。\n");
-            }
-        }
-
-        // 4. 检测情绪转折（防止情绪不连贯）
-        if last_ai_msgs.len() >= 1 && last_user_msgs.len() >= 1 {
-            let user_text = last_user_msgs[0];
-            let ai_text = last_ai_msgs[0];
-
-            // 检测用户是否在表达负面情绪但AI之前回复很积极（情绪错位）
-            let user_negative = ["难过", "伤心", "不开心", "烦", "累", "算了", "没意思", "唉"]
-                .iter().any(|kw| user_text.contains(kw));
-            let ai_was_cheerful = ["哈哈", "嘿嘿", "好开心", "太好了", "耶"]
-                .iter().any(|kw| ai_text.contains(kw));
-
-            if user_negative && ai_was_cheerful {
-                context.push_str("【上下文提示】对方情绪转低了，你需要感知到这个变化，调整你的语气和态度。\n");
-            }
-        }
-
-        context
-    }
-
-    fn build_emotional_context(recent_messages: &[&Message]) -> String {
-        // 基于 Plutchik 情感轮模型的 8 维情感空间 + 扩展维度
-        // 每个维度对应一组关键词，使用指数衰减加权
-        let emotion_lexicon: &[(&str, &str, &[&str])] = &[
-            ("喜悦", "joy", &["开心", "高兴", "快乐", "笑", "哈哈", "嘻嘻", "好的", "太好了", "喜欢", "爱", "幸福", "温暖", "感谢", "谢谢", "棒", "赞", "耶", "嘿嘿", "甜", "嘿嘿嘿", "哈哈哈", "噗", "好耶", "绝了", "爽", "舒服", "满足", "开心死了", "乐", "美", "妙"]),
-            ("悲伤", "sadness", &["难过", "伤心", "痛苦", "哭", "呜呜", "失望", "沮丧", "孤独", "寂寞", "心疼", "遗憾", "可惜", "唉", "叹", "泪", "委屈", "心酸", "难受", "不开心", "丧", "emo", "崩溃", "受不了", "好累", "算了", "无所谓了", "没意思"]),
-            ("愤怒", "anger", &["生气", "愤怒", "气死", "混蛋", "可恶", "滚", "烦死", "受够", "讨厌", "烦", "恼", "怒", "闭嘴", "够了", "你行", "随便你", "爱咋咋", "呵呵", "哦", "行吧", "切", "啧"]),
-            ("恐惧", "fear", &["害怕", "恐惧", "担心", "紧张", "不安", "慌", "怕", "焦虑", "忐忑", "心虚", "发抖", "不敢", "完了", "怎么办", "糟了", "慌了"]),
-            ("惊讶", "surprise", &["惊讶", "天哪", "什么", "不会吧", "真的吗", "居然", "竟然", "没想到", "啊", "哇", "诶", "卧槽", "我靠", "天呐", "不是吧", "啊？", "嗯？", "等等"]),
-            ("亲密", "intimacy", &["抱", "靠", "牵手", "依偎", "亲", "蹭", "贴", "挽", "搂", "窝", "枕", "偎", "想你", "在吗", "陪我", "别走", "过来", "靠近", "抱抱", "摸摸头", "宝", "亲爱的", "乖"]),
-            ("信赖", "trust", &["相信", "信任", "放心", "安心", "依赖", "靠谱", "踏实", "陪", "懂", "理解", "知道", "明白", "你说的对", "听你的", "交给你"]),
-            ("期待", "anticipation", &["期待", "想", "盼", "等", "希望", "要是", "如果能", "好想", "什么时候", "快点", "等不及", "明天", "下次", "以后", "一起"]),
-        ];
-
-        let total = recent_messages.len();
-        if total == 0 {
-            return String::new();
-        }
-
-        // 指数衰减半衰期 = 3 条消息
-        // 权重公式: w(d) = 0.5^(d / τ), τ = 3.0
-        let decay_half_life: f64 = 3.0;
-        let mut emotion_scores: Vec<(&str, &str, f64)> = emotion_lexicon
-            .iter()
-            .map(|(cn, en, _)| (*cn, *en, 0.0))
-            .collect();
-
-        for (i, msg) in recent_messages.iter().enumerate() {
-            let distance = (total - 1 - i) as f64;
-            let weight = (0.5_f64).powf(distance / decay_half_life);
-
-            // 区分用户消息和AI消息的权重：用户消息权重 ×1.2（用户情绪更重要）
-            let role_factor = if msg.role == MessageRole::User { 1.2 } else { 0.8 };
-
-            for (emo_idx, (_cn, _en, keywords)) in emotion_lexicon.iter().enumerate() {
-                let mut hit_count = 0u32;
-                for kw in *keywords {
-                    if msg.content.contains(kw) {
-                        hit_count += 1;
-                    }
-                }
-                if hit_count > 0 {
-                    // 对数饱和：避免单条消息中多次命中导致分数爆炸
-                    // score += w * role_factor * ln(1 + hits)
-                    let contribution = weight * role_factor * (1.0 + hit_count as f64).ln();
-                    emotion_scores[emo_idx].2 += contribution;
-                }
-            }
-        }
-
-        // 筛选显著情感（得分 > 0.3 的维度）
-        let significant: Vec<(&str, &str, f64)> = emotion_scores
-            .into_iter()
-            .filter(|(_, _, score)| *score > 0.3)
-            .collect();
-
-        if significant.is_empty() {
-            return String::new();
-        }
-
-        // Softmax 归一化：将原始分数转换为概率分布
-        // P(i) = exp(s_i) / Σ exp(s_j)
-        let max_score = significant.iter().map(|(_, _, s)| *s).fold(f64::NEG_INFINITY, f64::max);
-        let exp_sum: f64 = significant.iter().map(|(_, _, s)| (s - max_score).exp()).sum();
-
-        let mut context = String::from("【情感状态向量（Plutchik 8维模型）】\n");
-        context.push_str("当前对话的情绪分布：");
-        for (i, (cn, _en, score)) in significant.iter().enumerate() {
-            let prob = ((score - max_score).exp() / exp_sum * 100.0).round() as u32;
-            if i > 0 {
-                context.push(',');
-            }
-            context.push_str(&format!("{}:{}%", cn, prob));
-        }
-
-        // 计算情绪变化趋势（最近 2 条 vs 之前的消息）
-        if total >= 4 {
-            let mid = total / 2;
-            let recent_half = &recent_messages[mid..];
-            let earlier_half = &recent_messages[..mid];
-
-            let recent_valence = Self::compute_valence(recent_half, emotion_lexicon);
-            let earlier_valence = Self::compute_valence(earlier_half, emotion_lexicon);
-            let delta = recent_valence - earlier_valence;
-
-            if delta.abs() > 0.15 {
-                let trend = if delta > 0.0 { "↑趋向积极" } else { "↓趋向消极" };
-                context.push_str(&format!("\n情绪趋势：{}（Δ={:.2}）", trend, delta));
-            }
-        }
-
-        // 推断心理状态（基于情绪组合模式）
-        let joy_score = significant.iter().find(|(cn, _, _)| *cn == "喜悦").map(|(_, _, s)| *s).unwrap_or(0.0);
-        let sad_score = significant.iter().find(|(cn, _, _)| *cn == "悲伤").map(|(_, _, s)| *s).unwrap_or(0.0);
-        let anger_score = significant.iter().find(|(cn, _, _)| *cn == "愤怒").map(|(_, _, s)| *s).unwrap_or(0.0);
-        let intimacy_score = significant.iter().find(|(cn, _, _)| *cn == "亲密").map(|(_, _, s)| *s).unwrap_or(0.0);
-        let fear_score = significant.iter().find(|(cn, _, _)| *cn == "恐惧").map(|(_, _, s)| *s).unwrap_or(0.0);
-        let anticipation_score = significant.iter().find(|(cn, _, _)| *cn == "期待").map(|(_, _, s)| *s).unwrap_or(0.0);
-
-        // 复合心理状态推断
-        let mut psych_states: Vec<&str> = Vec::new();
-        if intimacy_score > 0.5 && fear_score > 0.3 {
-            psych_states.push("又想靠近又怕受伤的矛盾心理");
-        }
-        if anger_score > 0.5 && sad_score > 0.3 {
-            psych_states.push("生气背后藏着委屈和受伤");
-        }
-        if joy_score > 0.5 && intimacy_score > 0.3 {
-            psych_states.push("因为对方而感到幸福和安全感");
-        }
-        if sad_score > 0.5 && anticipation_score > 0.3 {
-            psych_states.push("虽然难过但还抱有期待");
-        }
-        if anger_score > 0.3 && intimacy_score > 0.3 {
-            psych_states.push("因为在乎所以才生气（撒娇式愤怒）");
-        }
-        if fear_score > 0.5 && anticipation_score > 0.3 {
-            psych_states.push("对未知既紧张又期待");
-        }
-
-        if !psych_states.is_empty() {
-            context.push_str(&format!("\n深层心理：{}", psych_states.join("；")));
-        }
-
-        // 推断情景氛围
-        let last_few: Vec<&&Message> = recent_messages.iter().rev().take(4).collect();
-        let combined_text: String = last_few.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join(" ");
-
-        let mut scene_hints: Vec<&str> = Vec::new();
-        // 检测对话节奏（短消息密集 = 即时聊天氛围）
-        let avg_len = last_few.iter().map(|m| m.content.chars().count()).sum::<usize>() as f64 / last_few.len().max(1) as f64;
-        if avg_len < 10.0 {
-            scene_hints.push("对话节奏很快，像在即时聊天");
-        } else if avg_len > 50.0 {
-            scene_hints.push("对话节奏较慢，在认真交流");
-        }
-
-        // 检测亲密度信号
-        if combined_text.contains("晚安") || combined_text.contains("睡了") || combined_text.contains("困") || combined_text.contains("深夜") {
-            scene_hints.push("深夜/睡前氛围，语气应更柔软私密");
-        }
-        if combined_text.contains("对不起") || combined_text.contains("抱歉") || combined_text.contains("我错了") {
-            scene_hints.push("道歉/和解场景，情绪敏感需要小心回应");
-        }
-        if combined_text.contains("再见") || combined_text.contains("走了") || combined_text.contains("要走") || combined_text.contains("离开") {
-            scene_hints.push("离别/分开场景，可能有不舍或释然");
-        }
-
-        if !scene_hints.is_empty() {
-            context.push_str(&format!("\n情景感知：{}", scene_hints.join("；")));
-        }
-
-        context.push_str("\n请自然体现这种情绪和心理状态，不要刻意点明情绪名称。回复的语气、用词、节奏、长短都应与当前心理状态一致。情绪低落时话要少，兴奋时可以多说。\n");
-
-        context
-    }
-
-    /// 计算情感效价（valence）：积极情感为正，消极情感为负
-    /// valence = (joy + trust + anticipation + intimacy - sadness - anger - fear) / total
-    fn compute_valence(messages: &[&Message], lexicon: &[(&str, &str, &[&str])]) -> f64 {
-        let positive_indices = [0usize, 5, 6, 7]; // joy, intimacy, trust, anticipation
-        let negative_indices = [1usize, 2, 3];     // sadness, anger, fear
-
-        let mut pos_score = 0.0f64;
-        let mut neg_score = 0.0f64;
-
-        for msg in messages {
-            for &idx in &positive_indices {
-                for kw in lexicon[idx].2 {
-                    if msg.content.contains(kw) {
-                        pos_score += 1.0;
-                    }
-                }
-            }
-            for &idx in &negative_indices {
-                for kw in lexicon[idx].2 {
-                    if msg.content.contains(kw) {
-                        neg_score += 1.0;
-                    }
-                }
-            }
-        }
-
-        let total = pos_score + neg_score;
-        if total == 0.0 {
-            0.0
-        } else {
-            (pos_score - neg_score) / total
-        }
     }
 
     /// Send a message: validate → detect type → persist user msg → build request → get JWT → stream SSE → persist assistant msg → check memory.
