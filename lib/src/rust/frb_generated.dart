@@ -1087,6 +1087,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  MemoryContextCard dco_decode_box_autoadd_memory_context_card(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_memory_context_card(raw);
+  }
+
+  @protected
   ChatStreamEvent dco_decode_chat_stream_event(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     switch (raw[0]) {
@@ -1186,6 +1192,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<MemoryTier> dco_decode_list_memory_tier(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_memory_tier).toList();
+  }
+
+  @protected
   List<Message> dco_decode_list_message(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_message).toList();
@@ -1201,6 +1213,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as Uint8List;
+  }
+
+  @protected
+  MemoryContextCard dco_decode_memory_context_card(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    return MemoryContextCard(
+      sourceRange: dco_decode_String(arr[0]),
+      topicTags: dco_decode_list_String(arr[1]),
+      keyEntities: dco_decode_list_String(arr[2]),
+      emotionalTone: dco_decode_String(arr[3]),
+      causalLinks: dco_decode_list_String(arr[4]),
+    );
   }
 
   @protected
@@ -1220,8 +1247,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   MemorySummary dco_decode_memory_summary(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 7)
-      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    if (arr.length != 10)
+      throw Exception('unexpected arr length: expect 10 but see ${arr.length}');
     return MemorySummary(
       id: dco_decode_String(arr[0]),
       summary: dco_decode_String(arr[1]),
@@ -1230,7 +1257,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       turnRangeEnd: dco_decode_u_32(arr[4]),
       createdAt: dco_decode_i_64(arr[5]),
       keywords: dco_decode_list_String(arr[6]),
+      compressionGeneration: dco_decode_u_32(arr[7]),
+      contextCard: dco_decode_opt_box_autoadd_memory_context_card(arr[8]),
+      factTiers: dco_decode_list_memory_tier(arr[9]),
     );
+  }
+
+  @protected
+  MemoryTier dco_decode_memory_tier(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return MemoryTier.values[raw as int];
   }
 
   @protected
@@ -1266,13 +1302,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ModelInfo dco_decode_model_info(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 4)
-      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
     return ModelInfo(
       id: dco_decode_String(arr[0]),
       name: dco_decode_String(arr[1]),
       contextTokens: dco_decode_usize(arr[2]),
-      supportsThinking: dco_decode_bool(arr[3]),
+      maxOutputTokens: dco_decode_usize(arr[3]),
+      supportsThinking: dco_decode_bool(arr[4]),
     );
   }
 
@@ -1286,6 +1323,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Conversation? dco_decode_opt_box_autoadd_conversation(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_conversation(raw);
+  }
+
+  @protected
+  MemoryContextCard? dco_decode_opt_box_autoadd_memory_context_card(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_memory_context_card(raw);
   }
 
   @protected
@@ -1371,6 +1416,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_conversation(deserializer));
+  }
+
+  @protected
+  MemoryContextCard sse_decode_box_autoadd_memory_context_card(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_memory_context_card(deserializer));
   }
 
   @protected
@@ -1519,6 +1572,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<MemoryTier> sse_decode_list_memory_tier(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <MemoryTier>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_memory_tier(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
   List<Message> sse_decode_list_message(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
@@ -1550,6 +1615,25 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  MemoryContextCard sse_decode_memory_context_card(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_sourceRange = sse_decode_String(deserializer);
+    var var_topicTags = sse_decode_list_String(deserializer);
+    var var_keyEntities = sse_decode_list_String(deserializer);
+    var var_emotionalTone = sse_decode_String(deserializer);
+    var var_causalLinks = sse_decode_list_String(deserializer);
+    return MemoryContextCard(
+      sourceRange: var_sourceRange,
+      topicTags: var_topicTags,
+      keyEntities: var_keyEntities,
+      emotionalTone: var_emotionalTone,
+      causalLinks: var_causalLinks,
+    );
+  }
+
+  @protected
   MemorySearchResult sse_decode_memory_search_result(
     SseDeserializer deserializer,
   ) {
@@ -1574,6 +1658,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_turnRangeEnd = sse_decode_u_32(deserializer);
     var var_createdAt = sse_decode_i_64(deserializer);
     var var_keywords = sse_decode_list_String(deserializer);
+    var var_compressionGeneration = sse_decode_u_32(deserializer);
+    var var_contextCard = sse_decode_opt_box_autoadd_memory_context_card(
+      deserializer,
+    );
+    var var_factTiers = sse_decode_list_memory_tier(deserializer);
     return MemorySummary(
       id: var_id,
       summary: var_summary,
@@ -1582,7 +1671,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       turnRangeEnd: var_turnRangeEnd,
       createdAt: var_createdAt,
       keywords: var_keywords,
+      compressionGeneration: var_compressionGeneration,
+      contextCard: var_contextCard,
+      factTiers: var_factTiers,
     );
+  }
+
+  @protected
+  MemoryTier sse_decode_memory_tier(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return MemoryTier.values[inner];
   }
 
   @protected
@@ -1626,11 +1725,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_id = sse_decode_String(deserializer);
     var var_name = sse_decode_String(deserializer);
     var var_contextTokens = sse_decode_usize(deserializer);
+    var var_maxOutputTokens = sse_decode_usize(deserializer);
     var var_supportsThinking = sse_decode_bool(deserializer);
     return ModelInfo(
       id: var_id,
       name: var_name,
       contextTokens: var_contextTokens,
+      maxOutputTokens: var_maxOutputTokens,
       supportsThinking: var_supportsThinking,
     );
   }
@@ -1654,6 +1755,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_conversation(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  MemoryContextCard? sse_decode_opt_box_autoadd_memory_context_card(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_memory_context_card(deserializer));
     } else {
       return null;
     }
@@ -1746,6 +1860,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_conversation(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_memory_context_card(
+    MemoryContextCard self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_memory_context_card(self, serializer);
   }
 
   @protected
@@ -1866,6 +1989,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_list_memory_tier(
+    List<MemoryTier> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_memory_tier(item, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_list_message(List<Message> self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
@@ -1897,6 +2032,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_memory_context_card(
+    MemoryContextCard self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.sourceRange, serializer);
+    sse_encode_list_String(self.topicTags, serializer);
+    sse_encode_list_String(self.keyEntities, serializer);
+    sse_encode_String(self.emotionalTone, serializer);
+    sse_encode_list_String(self.causalLinks, serializer);
+  }
+
+  @protected
   void sse_encode_memory_search_result(
     MemorySearchResult self,
     SseSerializer serializer,
@@ -1917,6 +2065,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_32(self.turnRangeEnd, serializer);
     sse_encode_i_64(self.createdAt, serializer);
     sse_encode_list_String(self.keywords, serializer);
+    sse_encode_u_32(self.compressionGeneration, serializer);
+    sse_encode_opt_box_autoadd_memory_context_card(
+      self.contextCard,
+      serializer,
+    );
+    sse_encode_list_memory_tier(self.factTiers, serializer);
+  }
+
+  @protected
+  void sse_encode_memory_tier(MemoryTier self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
   }
 
   @protected
@@ -1949,6 +2109,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.id, serializer);
     sse_encode_String(self.name, serializer);
     sse_encode_usize(self.contextTokens, serializer);
+    sse_encode_usize(self.maxOutputTokens, serializer);
     sse_encode_bool(self.supportsThinking, serializer);
   }
 
@@ -1972,6 +2133,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_conversation(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_memory_context_card(
+    MemoryContextCard? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_memory_context_card(self, serializer);
     }
   }
 

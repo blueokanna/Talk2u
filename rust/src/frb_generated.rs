@@ -1252,6 +1252,20 @@ impl SseDecode for Vec<crate::api::data_models::MemorySummary> {
     }
 }
 
+impl SseDecode for Vec<crate::api::data_models::MemoryTier> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = vec![];
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::data_models::MemoryTier>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for Vec<crate::api::data_models::Message> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1290,6 +1304,24 @@ impl SseDecode for Vec<u8> {
     }
 }
 
+impl SseDecode for crate::api::data_models::MemoryContextCard {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_sourceRange = <String>::sse_decode(deserializer);
+        let mut var_topicTags = <Vec<String>>::sse_decode(deserializer);
+        let mut var_keyEntities = <Vec<String>>::sse_decode(deserializer);
+        let mut var_emotionalTone = <String>::sse_decode(deserializer);
+        let mut var_causalLinks = <Vec<String>>::sse_decode(deserializer);
+        return crate::api::data_models::MemoryContextCard {
+            source_range: var_sourceRange,
+            topic_tags: var_topicTags,
+            key_entities: var_keyEntities,
+            emotional_tone: var_emotionalTone,
+            causal_links: var_causalLinks,
+        };
+    }
+}
+
 impl SseDecode for crate::api::data_models::MemorySearchResult {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1314,6 +1346,11 @@ impl SseDecode for crate::api::data_models::MemorySummary {
         let mut var_turnRangeEnd = <u32>::sse_decode(deserializer);
         let mut var_createdAt = <i64>::sse_decode(deserializer);
         let mut var_keywords = <Vec<String>>::sse_decode(deserializer);
+        let mut var_compressionGeneration = <u32>::sse_decode(deserializer);
+        let mut var_contextCard =
+            <Option<crate::api::data_models::MemoryContextCard>>::sse_decode(deserializer);
+        let mut var_factTiers =
+            <Vec<crate::api::data_models::MemoryTier>>::sse_decode(deserializer);
         return crate::api::data_models::MemorySummary {
             id: var_id,
             summary: var_summary,
@@ -1322,6 +1359,24 @@ impl SseDecode for crate::api::data_models::MemorySummary {
             turn_range_end: var_turnRangeEnd,
             created_at: var_createdAt,
             keywords: var_keywords,
+            compression_generation: var_compressionGeneration,
+            context_card: var_contextCard,
+            fact_tiers: var_factTiers,
+        };
+    }
+}
+
+impl SseDecode for crate::api::data_models::MemoryTier {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::data_models::MemoryTier::Identity,
+            1 => crate::api::data_models::MemoryTier::CriticalEvent,
+            2 => crate::api::data_models::MemoryTier::RelationshipDynamic,
+            3 => crate::api::data_models::MemoryTier::CurrentState,
+            4 => crate::api::data_models::MemoryTier::SceneDetail,
+            _ => unreachable!("Invalid variant for MemoryTier: {}", inner),
         };
     }
 }
@@ -1380,11 +1435,13 @@ impl SseDecode for crate::api::data_models::ModelInfo {
         let mut var_id = <String>::sse_decode(deserializer);
         let mut var_name = <String>::sse_decode(deserializer);
         let mut var_contextTokens = <usize>::sse_decode(deserializer);
+        let mut var_maxOutputTokens = <usize>::sse_decode(deserializer);
         let mut var_supportsThinking = <bool>::sse_decode(deserializer);
         return crate::api::data_models::ModelInfo {
             id: var_id,
             name: var_name,
             context_tokens: var_contextTokens,
+            max_output_tokens: var_maxOutputTokens,
             supports_thinking: var_supportsThinking,
         };
     }
@@ -1406,6 +1463,19 @@ impl SseDecode for Option<crate::api::data_models::Conversation> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<crate::api::data_models::Conversation>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::data_models::MemoryContextCard> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::data_models::MemoryContextCard>::sse_decode(
                 deserializer,
             ));
         } else {
@@ -1674,6 +1744,30 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::data_models::DialogueStyle>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::data_models::MemoryContextCard {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.source_range.into_into_dart().into_dart(),
+            self.topic_tags.into_into_dart().into_dart(),
+            self.key_entities.into_into_dart().into_dart(),
+            self.emotional_tone.into_into_dart().into_dart(),
+            self.causal_links.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::data_models::MemoryContextCard
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::data_models::MemoryContextCard>
+    for crate::api::data_models::MemoryContextCard
+{
+    fn into_into_dart(self) -> crate::api::data_models::MemoryContextCard {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::data_models::MemorySearchResult {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -1706,6 +1800,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::data_models::MemorySummary {
             self.turn_range_end.into_into_dart().into_dart(),
             self.created_at.into_into_dart().into_dart(),
             self.keywords.into_into_dart().into_dart(),
+            self.compression_generation.into_into_dart().into_dart(),
+            self.context_card.into_into_dart().into_dart(),
+            self.fact_tiers.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1718,6 +1815,30 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::data_models::MemorySummary>
     for crate::api::data_models::MemorySummary
 {
     fn into_into_dart(self) -> crate::api::data_models::MemorySummary {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::data_models::MemoryTier {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Identity => 0.into_dart(),
+            Self::CriticalEvent => 1.into_dart(),
+            Self::RelationshipDynamic => 2.into_dart(),
+            Self::CurrentState => 3.into_dart(),
+            Self::SceneDetail => 4.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::data_models::MemoryTier
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::data_models::MemoryTier>
+    for crate::api::data_models::MemoryTier
+{
+    fn into_into_dart(self) -> crate::api::data_models::MemoryTier {
         self
     }
 }
@@ -1798,6 +1919,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::data_models::ModelInfo {
             self.id.into_into_dart().into_dart(),
             self.name.into_into_dart().into_dart(),
             self.context_tokens.into_into_dart().into_dart(),
+            self.max_output_tokens.into_into_dart().into_dart(),
             self.supports_thinking.into_into_dart().into_dart(),
         ]
         .into_dart()
@@ -1993,6 +2115,16 @@ impl SseEncode for Vec<crate::api::data_models::MemorySummary> {
     }
 }
 
+impl SseEncode for Vec<crate::api::data_models::MemoryTier> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::data_models::MemoryTier>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for Vec<crate::api::data_models::Message> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -2023,6 +2155,17 @@ impl SseEncode for Vec<u8> {
     }
 }
 
+impl SseEncode for crate::api::data_models::MemoryContextCard {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.source_range, serializer);
+        <Vec<String>>::sse_encode(self.topic_tags, serializer);
+        <Vec<String>>::sse_encode(self.key_entities, serializer);
+        <String>::sse_encode(self.emotional_tone, serializer);
+        <Vec<String>>::sse_encode(self.causal_links, serializer);
+    }
+}
+
 impl SseEncode for crate::api::data_models::MemorySearchResult {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -2042,6 +2185,31 @@ impl SseEncode for crate::api::data_models::MemorySummary {
         <u32>::sse_encode(self.turn_range_end, serializer);
         <i64>::sse_encode(self.created_at, serializer);
         <Vec<String>>::sse_encode(self.keywords, serializer);
+        <u32>::sse_encode(self.compression_generation, serializer);
+        <Option<crate::api::data_models::MemoryContextCard>>::sse_encode(
+            self.context_card,
+            serializer,
+        );
+        <Vec<crate::api::data_models::MemoryTier>>::sse_encode(self.fact_tiers, serializer);
+    }
+}
+
+impl SseEncode for crate::api::data_models::MemoryTier {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::data_models::MemoryTier::Identity => 0,
+                crate::api::data_models::MemoryTier::CriticalEvent => 1,
+                crate::api::data_models::MemoryTier::RelationshipDynamic => 2,
+                crate::api::data_models::MemoryTier::CurrentState => 3,
+                crate::api::data_models::MemoryTier::SceneDetail => 4,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
     }
 }
 
@@ -2098,6 +2266,7 @@ impl SseEncode for crate::api::data_models::ModelInfo {
         <String>::sse_encode(self.id, serializer);
         <String>::sse_encode(self.name, serializer);
         <usize>::sse_encode(self.context_tokens, serializer);
+        <usize>::sse_encode(self.max_output_tokens, serializer);
         <bool>::sse_encode(self.supports_thinking, serializer);
     }
 }
@@ -2118,6 +2287,16 @@ impl SseEncode for Option<crate::api::data_models::Conversation> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <crate::api::data_models::Conversation>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::data_models::MemoryContextCard> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::data_models::MemoryContextCard>::sse_encode(value, serializer);
         }
     }
 }

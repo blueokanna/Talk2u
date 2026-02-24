@@ -56,8 +56,6 @@ impl JwtAuth {
         parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty()
     }
 
-    /// Generate a JWT token using HMAC-SHA256, reusing the same algorithm
-    /// as custom_jwt.rs: base64url(header).base64url(payload).base64url(signature).
     fn generate_jwt(user_id: &str, user_secret: &str) -> String {
         let header = r#"{"alg":"HS256","sign_type":"SIGN"}"#;
         let time_now = Utc::now().timestamp_millis();
@@ -77,7 +75,6 @@ impl JwtAuth {
         format!("{}.{}", to_sign, encoded_signature)
     }
 
-    /// Verify a JWT token using the stored secret.
     #[allow(dead_code)]
     pub fn verify_jwt(&self, jwt: &str) -> bool {
         let jwt = jwt.trim();
@@ -90,14 +87,12 @@ impl JwtAuth {
         calculated == parts[2]
     }
 
-    /// Invalidate the cached token, forcing regeneration on next get_token() call.
     #[allow(dead_code)]
     pub fn invalidate_token(&mut self) {
         self.cached_token = None;
         self.token_expiry = None;
     }
 
-    /// Expose user_id for request building.
     #[allow(dead_code)]
     pub fn user_id(&self) -> &str {
         &self.user_id
@@ -118,8 +113,6 @@ fn encode_base64_url(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── API key format validation ──
 
     #[test]
     fn test_valid_api_key() {
@@ -148,8 +141,6 @@ mod tests {
         assert!(!JwtAuth::validate_api_key_format(""));
     }
 
-    // ── JwtAuth::new ──
-
     #[test]
     fn test_new_valid_key() {
         let auth = JwtAuth::new("myid.mysecret");
@@ -164,8 +155,6 @@ mod tests {
         assert!(JwtAuth::new("a.b.c").is_err());
         assert!(JwtAuth::new("").is_err());
     }
-
-    // ── Token generation & verification ──
 
     #[test]
     fn test_generate_and_verify_jwt() {
@@ -195,8 +184,6 @@ mod tests {
         assert_eq!(token.split('.').count(), 3);
     }
 
-    // ── Token caching & expiry ──
-
     #[test]
     fn test_get_token_caches() {
         let mut auth = JwtAuth::new("user.secret").unwrap();
@@ -224,27 +211,20 @@ mod tests {
         let t1 = auth.get_token();
         auth.invalidate_token();
         assert!(auth.is_token_expired());
-        // After invalidation, next get_token generates a new one
-        // (may be identical content-wise if called within same ms, but cache was cleared)
         let t2 = auth.get_token();
-        // The token should be valid
         assert!(auth.verify_jwt(&t2));
-        // Cache should be repopulated
         assert!(!auth.is_token_expired());
-        let _ = t1; // suppress unused warning
+        let _ = t1;
     }
 
     #[test]
     fn test_expired_token_triggers_refresh() {
         let mut auth = JwtAuth::new("user.secret").unwrap();
         let t1 = auth.get_token();
-        // Simulate expiry by setting token_expiry to the past
         auth.token_expiry = Some(0);
         assert!(auth.is_token_expired());
-        // Sleep 2ms to guarantee a different timestamp in the payload
         std::thread::sleep(std::time::Duration::from_millis(2));
         let t2 = auth.get_token();
-        // New token should be generated (different because timestamp changed)
         assert_ne!(t1, t2, "Expired token should be replaced with a new one");
         assert!(auth.verify_jwt(&t2));
     }

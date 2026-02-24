@@ -59,7 +59,6 @@ impl ChatError {
     }
 }
 
-/// 重试处理器
 #[frb(opaque)]
 pub struct RetryHandler {
     max_retries: u32,
@@ -91,8 +90,6 @@ impl RetryHandler {
                     }
 
                     last_error = Some(err.clone());
-
-                    // Don't sleep after the last attempt
                     if attempt < self.max_retries {
                         let wait_ms = if let ChatError::RateLimitError { retry_after_secs } = &err
                         {

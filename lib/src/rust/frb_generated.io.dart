@@ -43,6 +43,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Conversation dco_decode_box_autoadd_conversation(dynamic raw);
 
   @protected
+  MemoryContextCard dco_decode_box_autoadd_memory_context_card(dynamic raw);
+
+  @protected
   ChatStreamEvent dco_decode_chat_stream_event(dynamic raw);
 
   @protected
@@ -76,6 +79,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<MemorySummary> dco_decode_list_memory_summary(dynamic raw);
 
   @protected
+  List<MemoryTier> dco_decode_list_memory_tier(dynamic raw);
+
+  @protected
   List<Message> dco_decode_list_message(dynamic raw);
 
   @protected
@@ -85,10 +91,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
+  MemoryContextCard dco_decode_memory_context_card(dynamic raw);
+
+  @protected
   MemorySearchResult dco_decode_memory_search_result(dynamic raw);
 
   @protected
   MemorySummary dco_decode_memory_summary(dynamic raw);
+
+  @protected
+  MemoryTier dco_decode_memory_tier(dynamic raw);
 
   @protected
   Message dco_decode_message(dynamic raw);
@@ -107,6 +119,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Conversation? dco_decode_opt_box_autoadd_conversation(dynamic raw);
+
+  @protected
+  MemoryContextCard? dco_decode_opt_box_autoadd_memory_context_card(
+    dynamic raw,
+  );
 
   @protected
   int dco_decode_u_32(dynamic raw);
@@ -142,6 +159,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Conversation sse_decode_box_autoadd_conversation(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  MemoryContextCard sse_decode_box_autoadd_memory_context_card(
     SseDeserializer deserializer,
   );
 
@@ -187,6 +209,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<MemoryTier> sse_decode_list_memory_tier(SseDeserializer deserializer);
+
+  @protected
   List<Message> sse_decode_list_message(SseDeserializer deserializer);
 
   @protected
@@ -196,12 +221,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
+  MemoryContextCard sse_decode_memory_context_card(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   MemorySearchResult sse_decode_memory_search_result(
     SseDeserializer deserializer,
   );
 
   @protected
   MemorySummary sse_decode_memory_summary(SseDeserializer deserializer);
+
+  @protected
+  MemoryTier sse_decode_memory_tier(SseDeserializer deserializer);
 
   @protected
   Message sse_decode_message(SseDeserializer deserializer);
@@ -220,6 +253,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Conversation? sse_decode_opt_box_autoadd_conversation(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  MemoryContextCard? sse_decode_opt_box_autoadd_memory_context_card(
     SseDeserializer deserializer,
   );
 
@@ -265,6 +303,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_conversation(
     Conversation self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_memory_context_card(
+    MemoryContextCard self,
     SseSerializer serializer,
   );
 
@@ -317,6 +361,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_memory_tier(
+    List<MemoryTier> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_message(List<Message> self, SseSerializer serializer);
 
   @protected
@@ -332,6 +382,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_memory_context_card(
+    MemoryContextCard self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_memory_search_result(
     MemorySearchResult self,
     SseSerializer serializer,
@@ -339,6 +395,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_memory_summary(MemorySummary self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_memory_tier(MemoryTier self, SseSerializer serializer);
 
   @protected
   void sse_encode_message(Message self, SseSerializer serializer);
@@ -358,6 +417,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_conversation(
     Conversation? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_memory_context_card(
+    MemoryContextCard? self,
     SseSerializer serializer,
   );
 

@@ -58,6 +58,25 @@ dev_dependencies:
     sdk: flutter
   freezed: ^3.2.5
   build_runner: ^2.11.1
+  flutter_launcher_icons: ^0.14.4
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  remove_alpha_ios: true
+  web:
+    generate: true
+    image_path: assets/Talk2U.png
+    background_color: "#ffffff"
+    theme_color: "#ffffff"
+  windows:
+    generate: true
+    image_path: assets/Talk2U.png
+    icon_size: 48
+  macos:
+    generate: true
+    image_path: assets/Talk2U.png
+  image_path: assets/Talk2U.png
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

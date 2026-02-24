@@ -76,10 +76,9 @@ class ChatState extends ChangeNotifier {
     if (model == thinkingModel) {
       _enableThinking = true;
     } else if (model == flashModel) {
-      // flash 模型不支持思考
-      _enableThinking = false;
+      // flash 模型支持思考，保持用户当前偏好
     }
-    // glm-4.7 保持用户当前的思考偏好不变
+    // glm-4.7 支持思考（官方确认），保持用户当前的思考偏好不变
     notifyListeners();
   }
 
@@ -355,6 +354,9 @@ class ChatState extends ChangeNotifier {
               });
             },
             error: (msg) {
+              if (_isStreaming) {
+                endStreaming();
+              }
               _errorMessage = msg;
               notifyListeners();
             },
@@ -398,8 +400,11 @@ class ChatState extends ChangeNotifier {
 
   void setEnableThinking(bool enabled) {
     _enableThinking = enabled;
-    // glm-4.7 本身支持思考模式，不需要切换模型
-    // 只有在使用 flash 模型时，开启思考需要切换到支持思考的模型
+    // 关闭思考时：如果当前选的是推理模型，切回对话模型
+    if (!enabled && _selectedModel == thinkingModel) {
+      _selectedModel = chatModel;
+    }
+    // 开启思考时：如果当前选的是 flash 模型（不支持思考），切回对话模型
     if (enabled && _selectedModel == flashModel) {
       _selectedModel = chatModel;
     }
@@ -493,8 +498,9 @@ class ChatState extends ChangeNotifier {
               });
             },
             error: (msg) {
-              // 记录错误消息，等 Done 事件来统一结束流式状态
-              // 如果 Done 事件不来（异常断开），onDone 会兜底
+              if (_isStreaming) {
+                endStreaming();
+              }
               _errorMessage = msg;
               notifyListeners();
             },
@@ -601,6 +607,9 @@ class ChatState extends ChangeNotifier {
               });
             },
             error: (msg) {
+              if (_isStreaming) {
+                endStreaming();
+              }
               _errorMessage = msg;
               notifyListeners();
             },

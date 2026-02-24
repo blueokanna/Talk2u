@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'data_models.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `get_config_manager`, `get_conversation_store`, `get_data_path`
+// These functions are ignored because they are not marked as `pub`: `get_config_manager`, `get_conversation_store`, `get_data_path`, `resolve_chat_model`, `resolve_thinking_model`
 
 Future<void> initApp({required String dataPath}) =>
     RustLib.instance.api.crateApiChatApiInitApp(dataPath: dataPath);
@@ -24,7 +24,6 @@ Future<Conversation?> getConversation({required String id}) =>
 Future<bool> deleteConversation({required String id}) =>
     RustLib.instance.api.crateApiChatApiDeleteConversation(id: id);
 
-/// Delete a single message from a conversation.
 Future<bool> deleteMessage({
   required String conversationId,
   required String messageId,
@@ -33,7 +32,6 @@ Future<bool> deleteMessage({
   messageId: messageId,
 );
 
-/// Edit a message's content in a conversation.
 Future<bool> editMessage({
   required String conversationId,
   required String messageId,
@@ -44,8 +42,6 @@ Future<bool> editMessage({
   newContent: newContent,
 );
 
-/// Rollback: delete the target user message and all messages after it.
-/// Returns the list of deleted message IDs.
 Future<List<String>> rollbackToMessage({
   required String conversationId,
   required String messageId,
@@ -54,7 +50,6 @@ Future<List<String>> rollbackToMessage({
   messageId: messageId,
 );
 
-/// Add a system message to a conversation (used for character system prompts).
 Future<bool> addSystemMessage({
   required String conversationId,
   required String content,
@@ -63,7 +58,6 @@ Future<bool> addSystemMessage({
   content: content,
 );
 
-/// Add an assistant message to a conversation (used for character greetings).
 Future<bool> addAssistantMessage({
   required String conversationId,
   required String content,
@@ -72,13 +66,11 @@ Future<bool> addAssistantMessage({
   content: content,
 );
 
-/// 重启剧情：清除对话消息但保留角色设定和开场白
 Future<bool> restartStory({required String conversationId}) => RustLib
     .instance
     .api
     .crateApiChatApiRestartStory(conversationId: conversationId);
 
-/// 设置对话风格
 Future<bool> setDialogueStyle({
   required String conversationId,
   required DialogueStyle style,
@@ -87,23 +79,19 @@ Future<bool> setDialogueStyle({
   style: style,
 );
 
-/// 检测消息的 say/do 类型
 Future<MessageType> detectMessageType({required String content}) =>
     RustLib.instance.api.crateApiChatApiDetectMessageType(content: content);
 
-/// 获取对话的轮次计数
 Future<int> getTurnCount({required String conversationId}) => RustLib
     .instance
     .api
     .crateApiChatApiGetTurnCount(conversationId: conversationId);
 
-/// 检查是否需要触发记忆总结
 Future<bool> shouldSummarizeMemory({required String conversationId}) => RustLib
     .instance
     .api
     .crateApiChatApiShouldSummarizeMemory(conversationId: conversationId);
 
-/// 搜索相关记忆
 Future<List<MemorySearchResult>> searchMemories({
   required String conversationId,
   required String query,
@@ -129,7 +117,6 @@ Future<bool> validateApiKey({required String apiKey}) =>
 Future<List<ModelInfo>> getAvailableModels() =>
     RustLib.instance.api.crateApiChatApiGetAvailableModels();
 
-/// Send a message and stream SSE events back to Flutter.
 Stream<ChatStreamEvent> sendMessage({
   required String conversationId,
   required String content,
@@ -142,8 +129,6 @@ Stream<ChatStreamEvent> sendMessage({
   enableThinking: enableThinking,
 );
 
-/// Regenerate AI response without re-adding user message.
-/// Used when user clicks "regenerate" on an AI message.
 Stream<ChatStreamEvent> regenerateResponse({
   required String conversationId,
   required String model,
@@ -154,7 +139,6 @@ Stream<ChatStreamEvent> regenerateResponse({
   enableThinking: enableThinking,
 );
 
-/// 触发记忆总结（在 send_message 完成后由 Flutter 端异步调用）
 Stream<ChatStreamEvent> triggerMemorySummarize({
   required String conversationId,
 }) => RustLib.instance.api.crateApiChatApiTriggerMemorySummarize(

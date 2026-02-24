@@ -258,9 +258,13 @@ class _SettingsPageState extends State<SettingsPage> {
             _buildInfoRow(
               theme,
               '总结模型',
-              '自动选择（≤128K: GLM-4.7-Flash, >128K: GLM-4-Long）',
+              '自动选择（≤100K: GLM-4.7-Flash, >100K: GLM-4-Long）',
             ),
-            _buildInfoRow(theme, '上下文', '128K tokens'),
+            _buildInfoRow(
+              theme,
+              '上下文',
+              'GLM-4.7: 200K / GLM-4-Air: 128K / GLM-4-Long: 1M',
+            ),
             const SizedBox(height: 12),
             Container(
               width: double.infinity,
@@ -283,7 +287,8 @@ class _SettingsPageState extends State<SettingsPage> {
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    '每10轮对话自动总结，使用 BM25 + 语义检索 + RRF 融合排序，防止语义漂移',
+                    '每8轮对话自动总结，使用 BM25 + 语义检索 + RRF 融合排序。'
+                    '压缩代数追踪：核心事实无损保留，边缘信息随压缩次数渐进退化',
                     style: theme.textTheme.bodySmall?.copyWith(
                       color: theme.colorScheme.onSurfaceVariant,
                     ),

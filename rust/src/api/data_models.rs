@@ -105,6 +105,36 @@ pub struct MemorySummary {
     pub created_at: i64,
     /// BM25 关键词索引
     pub keywords: Vec<String>,
+    /// 压缩代数：每次被合并/压缩时 +1，代数越高信息损耗风险越大
+    #[serde(default)]
+    pub compression_generation: u32,
+    /// 上下文增强卡片 — 结构化元信息，提升检索精度
+    #[serde(default)]
+    pub context_card: Option<MemoryContextCard>,
+    /// 每条核心事实的排级分类，与 core_facts 一一对应
+    #[serde(default)]
+    pub fact_tiers: Vec<MemoryTier>,
+}
+
+/// 压缩影响等级 — 随压缩代数递增，逐步影响不同维度
+/// Gen 0-1: 无损（完整保留所有信息）
+/// Gen 2-3: 语气/表达风格可能轻微偏移
+/// Gen 4-5: 性格细节可能模糊（如口癖频率降低）
+/// Gen 6-7: 次要关系/金钱等数值细节可能丢失
+/// Gen 8+:  身份设定的边缘属性可能受影响（核心身份仍保留）
+#[frb]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum CompressionImpactLevel {
+    /// 无损：所有信息完整保留
+    Lossless,
+    /// 风格微调：语气、表达习惯可能轻微变化
+    StyleDrift,
+    /// 性格模糊：性格细节开始模糊
+    PersonalityFade,
+    /// 细节丢失：金钱数值、次要关系等可能不精确
+    DetailLoss,
+    /// 深度退化：身份边缘属性可能受影响
+    IdentityErosion,
 }
 
 /// 对话摘要（用于列表展示）
@@ -157,8 +187,46 @@ impl Default for AppSettings {
 pub struct ModelInfo {
     pub id: String,
     pub name: String,
+    /// 最大输入上下文 token 数
     pub context_tokens: usize,
+    /// 最大输出 token 数
+    pub max_output_tokens: usize,
     pub supports_thinking: bool,
+}
+
+/// 记忆上下文增强卡片 — 为每条记忆附加结构化元信息
+/// 参考智谱上下文增强技术：为知识切片"恢复记忆"
+/// 包含来源信息、主题概括、关键实体、歧义消除
+#[frb]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoryContextCard {
+    /// 来源：涵盖的轮次范围描述
+    pub source_range: String,
+    /// 主题标签（1-3个关键词）
+    pub topic_tags: Vec<String>,
+    /// 关键实体（人物、地点、物品等）
+    pub key_entities: Vec<String>,
+    /// 情感基调（正/负/中性 + 强度）
+    pub emotional_tone: String,
+    /// 因果关联：与其他记忆的关联描述
+    pub causal_links: Vec<String>,
+}
+
+/// 分级压缩排级 — 类似军队排级的信息优先级
+/// 当记忆条目过多需要二次压缩时，按排级决定保留优先级
+#[frb]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum MemoryTier {
+    /// 最高级：身份锚点（姓名、核心设定、与用户关系）— 永不丢弃
+    Identity,
+    /// 高级：不可逆事件（关键转折、承诺、约定）— 极少丢弃
+    CriticalEvent,
+    /// 中级：关系动态（亲密度变化、信任变化）— 可合并但不丢弃
+    RelationshipDynamic,
+    /// 普通：状态信息（当前情绪、物理状态）— 可被最新状态覆盖
+    CurrentState,
+    /// 低级：场景细节（氛围、环境描写）— 可安全丢弃
+    SceneDetail,
 }
 
 /// 记忆检索结果
