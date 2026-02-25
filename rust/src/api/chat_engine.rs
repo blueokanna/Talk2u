@@ -85,6 +85,8 @@ impl ChatEngine {
             }
         };
 
+        let estimated_tokens = Self::estimate_token_count(enhanced_messages);
+
         // ── 第1次尝试：完整上下文 + 用户请求的思考模式 ──
         let request_body = Self::build_request_body(enhanced_messages, model, actual_thinking);
         match StreamingHandler::stream_chat(BIGMODEL_API_URL, &token, request_body, &filtered_event)
@@ -116,11 +118,18 @@ impl ChatEngine {
                 }
             }
             Ok(_) => {}  // 内容和思考都为空，继续到精简重试
-            Err(_) => {} // API 错误（可能上下文超长），跳到精简重试
+            Err(e) => {
+                // 记录具体错误信息，帮助诊断
+                on_event(ChatStreamEvent::Error(format!(
+                    "[降级] 第1次尝试失败({}，约{}token): {}",
+                    model, estimated_tokens, e
+                )));
+            }
         }
 
         // ── 第3次尝试：精简上下文（首条系统提示 + 最近6条对话），关闭思考 ──
         // 最终重试：不再屏蔽 Error 事件，让前端能看到具体失败原因
+        on_event(ChatStreamEvent::ContentDelta(String::new())); // keepalive: 通知前端仍在工作
         let compact = Self::build_compact_retry_messages(enhanced_messages, 6);
         let compact_body = Self::build_request_body(&compact, model, false);
         StreamingHandler::stream_chat(BIGMODEL_API_URL, &token, compact_body, on_event).await
@@ -457,6 +466,122 @@ impl ChatEngine {
         }
     }
 
+    /// ══ GLM-4.7-Flash 二次精修（Phase 4）══
+    /// 对 GLM-4.7 的初始回复进行二次检查和精修：
+    ///   1. 检查表达是否自然、是否有机器感
+    ///   2. 检查是否准确呼应了用户消息和历史上下文
+    ///   3. 修正不自然的表达，让语言更像真人
+    ///   4. 保持角色一致性，不改变核心内容和事实
+    ///
+    /// 设计原则：
+    /// - 轻量快速：Flash 模型响应快，不显著增加延迟
+    /// - 只修不改：修正表达方式，不改变语义和事实
+    /// - 静默执行：不向前端推送精修过程
+    async fn request_flash_refinement(
+        &self,
+        original_reply: &str,
+        user_content: &str,
+        enhanced_messages: &[Message],
+        on_event: &impl Fn(ChatStreamEvent),
+    ) -> String {
+        // 短回复（<30字）或纯动作描写不需要精修
+        if original_reply.chars().count() < 30 {
+            return original_reply.to_string();
+        }
+
+        let token = {
+            let mut auth = self.jwt_auth.lock().unwrap();
+            auth.get_token()
+        };
+
+        // 提取最近几条对话作为上下文参考
+        let recent_context: String = enhanced_messages.iter()
+            .filter(|m| m.role != MessageRole::System)
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|m| {
+                let role = match m.role {
+                    MessageRole::User => "用户",
+                    MessageRole::Assistant => "AI",
+                    MessageRole::System => "系统",
+                };
+                format!("{}: {}", role, m.content.chars().take(100).collect::<String>())
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let refine_messages = vec![
+            Message {
+                id: String::new(),
+                role: MessageRole::System,
+                content: "你是一个语言精修专家。你的任务是让AI的回复更像真人说话，更有情感温度，更自然流畅。\n\
+                         规则：\n\
+                         1. 不改变核心内容、事实、情节走向\n\
+                         2. 不改变角色身份和性格特征\n\
+                         3. 修正机器感表达（如过于工整的排比、不自然的转折、客服式回应）\n\
+                         4. 让语气更贴合当前情境（开心就活泼、难过就低沉、生气就冲）\n\
+                         5. 确保回复与用户消息有具体的呼应点\n\
+                         6. 如果原文已经足够好，直接原样输出，不要强行修改\n\
+                         7. 只输出修改后的回复文本，不要输出任何解释".to_string(),
+                thinking_content: None,
+                model: "system".to_string(),
+                timestamp: 0,
+                message_type: MessageType::Say,
+            },
+            Message {
+                id: String::new(),
+                role: MessageRole::User,
+                content: format!(
+                    "【最近对话上下文】\n{}\n\n\
+                     【用户最新消息】\n{}\n\n\
+                     【AI的初始回复】\n{}\n\n\
+                     请精修以上AI回复，让它更自然、更有人味、更贴合真实语境。如果已经足够好就原样输出。",
+                    recent_context, user_content, original_reply
+                ),
+                thinking_content: None,
+                model: "glm-4.7-flash".to_string(),
+                timestamp: 0,
+                message_type: MessageType::Say,
+            },
+        ];
+
+        let request_body = Self::build_request_body(&refine_messages, "glm-4.7-flash", false);
+
+        // 静默执行，不向前端推送事件
+        let silent_event = |_event: ChatStreamEvent| {};
+        let _ = on_event;
+
+        match StreamingHandler::stream_chat(BIGMODEL_API_URL, &token, request_body, &silent_event).await {
+            Ok((refined, _)) => {
+                let refined = refined.trim();
+                // 精修结果有效性检查：
+                // 1. 不能为空
+                // 2. 不能比原文短太多（防止截断）
+                // 3. 不能包含元指令（如"以下是修改后的"）
+                if refined.is_empty() {
+                    return original_reply.to_string();
+                }
+                let original_len = original_reply.chars().count();
+                let refined_len = refined.chars().count();
+                if refined_len < original_len / 3 {
+                    return original_reply.to_string(); // 精修结果太短，可能出错
+                }
+                let meta_markers = ["以下是", "修改后", "精修后", "原样输出", "不需要修改"];
+                if meta_markers.iter().any(|m| refined.starts_with(m)) {
+                    return original_reply.to_string(); // 包含元指令，返回原文
+                }
+                refined.to_string()
+            }
+            Err(_) => {
+                // Flash 精修失败是非致命的，返回原始回复
+                original_reply.to_string()
+            }
+        }
+    }
+
     pub fn new(api_key: &str, data_path: &str) -> Result<Self, String> {
         let jwt_auth = JwtAuth::new(api_key)?;
         let conversation_store = ConversationStore::new(data_path);
@@ -713,12 +838,13 @@ impl ChatEngine {
         }
 
         // 根据模型设置合理的 max_tokens
-        // GLM-4.7/GLM-4.7-flash: 上下文 200K，最大输出 128K（官方示例用 65536）
-        // GLM-4-AIR: 上下文 128K，最大输出 4K（推理模型，输出预算有限）
-        // GLM-4-LONG: 上下文 1M，最大输出 4K（蒸馏/总结专用）
+        // GLM-4.7/GLM-4.7-flash: 上下文 200K，最大输出 128K
+        //   → 设为 80% = 102400（官方示例用 65536，对话场景不需要全部输出预算）
+        // GLM-4-AIR: 上下文 128K，推理分析输出（500-800字），8192 足够
+        // GLM-4-LONG: 上下文 1M，蒸馏/总结专用，4096 足够
         let max_tokens: u32 = match model {
-            "glm-4.7" | "glm-4.7-flash" => 8192,
-            "glm-4-air" => 4096,
+            "glm-4.7" | "glm-4.7-flash" => 102400,
+            "glm-4-air" => 8192,
             "glm-4-long" => 4096,
             _ => 4096,
         };
@@ -767,7 +893,7 @@ impl ChatEngine {
     ///   层5: 风格约束（say/do 模式提示）— 由调用方在外部注入
     ///
     /// Token 预算分配策略（GLM-4.7 上下文 200K，GLM-4-AIR 上下文 128K）：
-    ///   - 使用 180K 作为 GLM-4.7 的安全上限（留余量给 max_tokens 8192 + 结构开销）
+    ///   - 使用 128K 作为输入安全上限（留余量给 max_tokens 输出 + 结构开销）
     ///   - system 层（层1-3+层5）：动态计算实际占用
     ///   - 对话历史（层4）：剩余预算全部分配
     pub fn build_context_enhanced_messages(
@@ -920,11 +1046,12 @@ impl ChatEngine {
 
         // 层4: 添加最近的对话消息，动态调整数量以适应上下文窗口
         // GLM-4.7: 200K 上下文，GLM-4-AIR: 128K 上下文
-        // 使用 180K 作为 GLM-4.7 的安全上限（预留 max_tokens 8192 + 结构开销）
+        // 使用 128K 作为安全上限（预留 max_tokens 输出预算 + 结构开销）
         // 对 GLM-4-AIR 管线，推理阶段会单独控制预算
-        let max_context_tokens: usize = 180_000;
-        // 预留：已用 system token + 输出 max_tokens(8192) + style/quality/diversity hints 估算(~3000) + 安全余量(1000)
-        let reserved_tokens = system_token_budget + 8192 + 3000 + 1000;
+        let max_context_tokens: usize = 128_000;
+        // 预留：已用 system token + style/quality/diversity hints 估算(~3000) + 安全余量(2000)
+        // 注意：max_tokens 是输出预算，不占用输入上下文窗口，但 API 要求 input+output ≤ 200K
+        let reserved_tokens = system_token_budget + 3000 + 2000;
         let available_for_history = if max_context_tokens > reserved_tokens {
             max_context_tokens - reserved_tokens
         } else {
@@ -934,7 +1061,7 @@ impl ChatEngine {
 
         let mut selected_messages: Vec<Message> = Vec::new();
         let mut accumulated_tokens: usize = 0;
-        let max_messages = 20usize; // 最多保留 20 条
+        let max_messages = 30usize; // 最多保留 30 条（10轮对话 = 20条 + 余量）
 
         for msg in non_system.iter().rev() {
             let msg_tokens = Self::estimate_str_tokens(&msg.content).ceil() as usize + 4;
@@ -1278,13 +1405,13 @@ impl ChatEngine {
 
         // ══ Token 预算最终守卫 — 渐进式裁剪 ══
         // 不再一刀切，而是分级逐步减少上下文：
-        //   Level 1 (>180K): 合并相似的 system 消息，减少重复
-        //   Level 2 (>180K after L1): 裁剪对话历史到最近 14 条
-        //   Level 3 (>180K after L2): 裁剪对话历史到最近 8 条
-        //   Level 4 (>180K after L3): 极端模式，只保留核心 system + 最近 6 条
+        //   Level 1 (>128K): 合并相似的 system 消息，减少重复
+        //   Level 2 (>128K after L1): 裁剪对话历史到最近 14 条
+        //   Level 3 (>128K after L2): 裁剪对话历史到最近 8 条
+        //   Level 4 (>128K after L3): 极端模式，只保留核心 system + 最近 6 条
         let total_tokens = Self::estimate_token_count(&enhanced_messages);
-        if total_tokens > 180_000 {
-            enhanced_messages = Self::gradual_context_trim(enhanced_messages, 180_000);
+        if total_tokens > 128_000 {
+            enhanced_messages = Self::gradual_context_trim(enhanced_messages, 128_000);
         }
 
         // ══ 三级模型管线：长上下文蒸馏 → 深度推理 → 自然对话 ══
@@ -1299,6 +1426,7 @@ impl ChatEngine {
 
             // ── Phase 0.5: 长上下文蒸馏（GLM-4-LONG，仅在上下文超长时触发）──
             if needs_long_context {
+                on_event(ChatStreamEvent::ContentDelta(String::new())); // keepalive
                 let distilled = self
                     .request_long_context_distillation(
                         &enhanced_messages,
@@ -1332,6 +1460,7 @@ impl ChatEngine {
             }
 
             // ── Phase 1: 推理模型（GLM-4-AIR）深度分析 ──
+            on_event(ChatStreamEvent::ContentDelta(String::new())); // keepalive
             let (reasoning_conclusion, thinking_text) = self
                 .request_reasoning(thinking_model, &enhanced_messages, &on_event)
                 .await;
@@ -1340,6 +1469,7 @@ impl ChatEngine {
             let auxiliary_supplement = if Self::should_use_auxiliary_thinking(
                 content, &reasoning_conclusion, &conv
             ) {
+                on_event(ChatStreamEvent::ContentDelta(String::new())); // keepalive
                 self.request_auxiliary_thinking(
                     &enhanced_messages, &reasoning_conclusion, &on_event
                 ).await
@@ -1391,11 +1521,12 @@ impl ChatEngine {
 
             // ── Phase 3: 对话模型（GLM-4.7）生成自然回复 ──
             // 对话模型始终关闭思考，由推理模型专责思考
-            let (content, _) = self
+            on_event(ChatStreamEvent::ContentDelta(String::new())); // keepalive
+            let (content_text, _) = self
                 .request_with_fallback(chat_model, false, &enhanced_messages, &on_event)
                 .await?;
 
-            (content, thinking_text)
+            (content_text, thinking_text)
         } else {
             // ── 单模型模式：直接使用对话模型，无推理 ──
             self.request_with_fallback(chat_model, false, &enhanced_messages, &on_event)
@@ -1418,10 +1549,12 @@ impl ChatEngine {
             Some(full_thinking)
         };
 
+        // ══ 先持久化原始回复，确保内容不丢失 ══
+        let assistant_msg_id = uuid::Uuid::new_v4().to_string();
         let assistant_msg = Message {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: assistant_msg_id.clone(),
             role: MessageRole::Assistant,
-            content: full_content,
+            content: full_content.clone(),
             thinking_content: thinking,
             model: chat_model.to_string(),
             timestamp: chrono::Utc::now().timestamp_millis(),
@@ -1430,8 +1563,22 @@ impl ChatEngine {
         self.conversation_store
             .add_message(conversation_id, assistant_msg)?;
 
-        // Send Done after message is persisted so Flutter reloads the saved data
+        // ══ Phase 4: GLM-4.7-Flash 二次精修（后置，不阻塞 Done）══
+        // 先发送 Done 让前端恢复交互，再异步精修
         on_event(ChatStreamEvent::Done);
+
+        // Flash 精修：静默执行，成功则更新已保存的消息
+        if enable_thinking && full_content.chars().count() >= 30 {
+            let refined = self.request_flash_refinement(
+                &full_content, content, &enhanced_messages, &on_event
+            ).await;
+            if refined != full_content && !refined.trim().is_empty() {
+                // 更新已保存的消息内容
+                let _ = self.conversation_store.edit_message(
+                    conversation_id, &assistant_msg_id, &refined
+                );
+            }
+        }
 
         Ok(())
     }
@@ -1522,8 +1669,8 @@ impl ChatEngine {
 
         // ══ Token 预算最终守卫 — 渐进式裁剪（与 send_message 相同逻辑）══
         let total_tokens = Self::estimate_token_count(&enhanced_messages);
-        if total_tokens > 180_000 {
-            enhanced_messages = Self::gradual_context_trim(enhanced_messages, 180_000);
+        if total_tokens > 128_000 {
+            enhanced_messages = Self::gradual_context_trim(enhanced_messages, 128_000);
         }
 
         // ══ 三级模型管线（与 send_message 相同逻辑）══
@@ -1538,6 +1685,7 @@ impl ChatEngine {
 
             // ── Phase 0.5: 长上下文蒸馏（GLM-4-LONG，仅在需要时触发）──
             if needs_long_context {
+                on_event(ChatStreamEvent::ContentDelta(String::new())); // keepalive
                 let distilled = self
                     .request_long_context_distillation(
                         &enhanced_messages,
@@ -1571,6 +1719,7 @@ impl ChatEngine {
             }
 
             // ── Phase 1: 推理模型（GLM-4-AIR）深度分析 ──
+            on_event(ChatStreamEvent::ContentDelta(String::new())); // keepalive
             let (reasoning_conclusion, thinking_text) = self
                 .request_reasoning(thinking_model, &enhanced_messages, &on_event)
                 .await;
@@ -1579,6 +1728,7 @@ impl ChatEngine {
             let auxiliary_supplement = if Self::should_use_auxiliary_thinking(
                 &last_user_content, &reasoning_conclusion, &conv
             ) {
+                on_event(ChatStreamEvent::ContentDelta(String::new())); // keepalive
                 self.request_auxiliary_thinking(
                     &enhanced_messages, &reasoning_conclusion, &on_event
                 ).await
@@ -1628,11 +1778,12 @@ impl ChatEngine {
             }
 
             // ── Phase 3: 对话模型（GLM-4.7）生成自然回复 ──
-            let (content, _) = self
+            on_event(ChatStreamEvent::ContentDelta(String::new())); // keepalive
+            let (content_text, _) = self
                 .request_with_fallback(chat_model, false, &enhanced_messages, &on_event)
                 .await?;
 
-            (content, thinking_text)
+            (content_text, thinking_text)
         } else {
             self.request_with_fallback(chat_model, false, &enhanced_messages, &on_event)
                 .await?
@@ -1654,10 +1805,12 @@ impl ChatEngine {
             Some(full_thinking)
         };
 
+        // ══ 先持久化原始回复，确保内容不丢失 ══
+        let assistant_msg_id = uuid::Uuid::new_v4().to_string();
         let assistant_msg = Message {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: assistant_msg_id.clone(),
             role: MessageRole::Assistant,
-            content: full_content,
+            content: full_content.clone(),
             thinking_content: thinking,
             model: chat_model.to_string(),
             timestamp: chrono::Utc::now().timestamp_millis(),
@@ -1666,8 +1819,22 @@ impl ChatEngine {
         self.conversation_store
             .add_message(conversation_id, assistant_msg)?;
 
-        // Send Done after message is persisted so Flutter reloads the saved data
+        // ══ Phase 4: GLM-4.7-Flash 二次精修（后置，不阻塞 Done）══
+        // 先发送 Done 让前端恢复交互，再异步精修
         on_event(ChatStreamEvent::Done);
+
+        // Flash 精修：静默执行，成功则更新已保存的消息
+        if enable_thinking && full_content.chars().count() >= 30 {
+            let refined = self.request_flash_refinement(
+                &full_content, &last_user_content, &enhanced_messages, &on_event
+            ).await;
+            if refined != full_content && !refined.trim().is_empty() {
+                // 更新已保存的消息内容
+                let _ = self.conversation_store.edit_message(
+                    conversation_id, &assistant_msg_id, &refined
+                );
+            }
+        }
 
         Ok(())
     }

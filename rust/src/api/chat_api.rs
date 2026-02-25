@@ -228,6 +228,7 @@ pub async fn send_message(
             let _ = sink.add(ChatStreamEvent::Error(
                 "API key not configured. Please set your API key in Settings.".to_string(),
             ));
+            let _ = sink.add(ChatStreamEvent::Done);
             return;
         }
     };
@@ -239,6 +240,7 @@ pub async fn send_message(
         Ok(e) => e,
         Err(err) => {
             let _ = sink.add(ChatStreamEvent::Error(err));
+            let _ = sink.add(ChatStreamEvent::Done);
             return;
         }
     };
@@ -256,9 +258,17 @@ pub async fn send_message(
         )
         .await;
 
-    if let Err(e) = result {
-        let _ = sink.add(ChatStreamEvent::Error(e.to_string()));
-        let _ = sink.add(ChatStreamEvent::Done);
+    match result {
+        Ok(()) => {
+            // send_message 内部已发送 Done，但为防止 flutter_rust_bridge
+            // 在函数返回时关闭流导致 Done 事件丢失，再补发一次。
+            // Flutter 端 done: handler 会通过 _isStreaming 标志去重。
+            let _ = sink.add(ChatStreamEvent::Done);
+        }
+        Err(e) => {
+            let _ = sink.add(ChatStreamEvent::Error(e.to_string()));
+            let _ = sink.add(ChatStreamEvent::Done);
+        }
     }
 }
 
@@ -275,6 +285,7 @@ pub async fn regenerate_response(
             let _ = sink.add(ChatStreamEvent::Error(
                 "API key not configured. Please set your API key in Settings.".to_string(),
             ));
+            let _ = sink.add(ChatStreamEvent::Done);
             return;
         }
     };
@@ -286,6 +297,7 @@ pub async fn regenerate_response(
         Ok(e) => e,
         Err(err) => {
             let _ = sink.add(ChatStreamEvent::Error(err));
+            let _ = sink.add(ChatStreamEvent::Done);
             return;
         }
     };
@@ -302,9 +314,14 @@ pub async fn regenerate_response(
         )
         .await;
 
-    if let Err(e) = result {
-        let _ = sink.add(ChatStreamEvent::Error(e.to_string()));
-        let _ = sink.add(ChatStreamEvent::Done);
+    match result {
+        Ok(()) => {
+            let _ = sink.add(ChatStreamEvent::Done);
+        }
+        Err(e) => {
+            let _ = sink.add(ChatStreamEvent::Error(e.to_string()));
+            let _ = sink.add(ChatStreamEvent::Done);
+        }
     }
 }
 

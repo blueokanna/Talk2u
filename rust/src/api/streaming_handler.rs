@@ -18,6 +18,14 @@ impl StreamingHandler {
         let token_owned = token.to_string();
         let body_clone = request_body.clone();
 
+        // 记录请求模型和 token 预算，便于调试
+        let model_name = request_body.get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let max_tokens = request_body.get("max_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
         let response = retry_handler
             .execute_with_retry(|| {
                 let u = url_owned.clone();
@@ -25,8 +33,11 @@ impl StreamingHandler {
                 let b = body_clone.clone();
                 async move {
                     let client = reqwest::Client::builder()
-                        .timeout(std::time::Duration::from_secs(120))
-                        .connect_timeout(std::time::Duration::from_secs(15))
+                        // 不设置 timeout（总超时）— 对 SSE 流式响应，总超时会在
+                        // 响应还在正常传输时误杀连接。
+                        // 只设置连接超时和读取超时（两次数据块之间的最大间隔）。
+                        .connect_timeout(std::time::Duration::from_secs(30))
+                        .read_timeout(std::time::Duration::from_secs(120))
                         .build()
                         .map_err(|e| ChatError::NetworkError {
                             message: e.to_string(),
@@ -68,7 +79,8 @@ impl StreamingHandler {
             })
             .await
             .map_err(|e| {
-                on_event(ChatStreamEvent::Error(e.to_string()));
+                let err_msg = format!("[{}] 请求失败: {}", model_name, e);
+                on_event(ChatStreamEvent::Error(err_msg));
                 e
             })?;
 
@@ -158,9 +170,20 @@ impl StreamingHandler {
 
         if full_content.is_empty() && full_thinking.is_empty() && !raw_response_preview.is_empty() {
             let debug_msg = format!(
-                "API 返回了空内容（共{}个数据块）。响应预览: {}",
+                "[{}] API 返回了空内容（共{}个数据块，max_tokens={}）。响应预览: {}",
+                model_name,
                 chunk_count,
-                raw_response_preview.chars().take(300).collect::<String>()
+                max_tokens,
+                raw_response_preview.chars().take(500).collect::<String>()
+            );
+            on_event(ChatStreamEvent::Error(debug_msg));
+        }
+
+        // 流正常结束但没有任何数据块（连接可能被静默断开）
+        if chunk_count == 0 {
+            let debug_msg = format!(
+                "[{}] 未收到任何数据块，连接可能被中断。请检查网络或重试。",
+                model_name
             );
             on_event(ChatStreamEvent::Error(debug_msg));
         }

@@ -672,42 +672,55 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
           borderRadius: BorderRadius.circular(12),
           child: Padding(
             padding: const EdgeInsets.all(12),
-            child: Row(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(
-                  Icons.error_outline,
-                  color: theme.colorScheme.error,
-                  size: 20,
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    chatState.errorMessage ?? '',
-                    style: theme.textTheme.bodySmall?.copyWith(
+                Row(
+                  children: [
+                    Icon(
+                      Icons.error_outline,
+                      color: theme.colorScheme.error,
+                      size: 20,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        chatState.errorMessage ?? '',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.onErrorContainer,
+                        ),
+                        maxLines: 4,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, size: 18),
+                      onPressed: () => context.read<ChatState>().clearError(),
                       color: theme.colorScheme.onErrorContainer,
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
                     ),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
+                  ],
                 ),
-                if (chatState.errorMessage != null &&
-                    chatState.currentConversationId != null)
-                  TextButton.icon(
-                    onPressed: _handleRetry,
-                    icon: const Icon(Icons.refresh, size: 18),
-                    label: const Text('重试'),
-                    style: TextButton.styleFrom(
-                      foregroundColor: theme.colorScheme.error,
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                if (chatState.currentConversationId != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        TextButton.icon(
+                          onPressed: _handleRetry,
+                          icon: const Icon(Icons.refresh, size: 18),
+                          label: const Text('重试'),
+                          style: TextButton.styleFrom(
+                            foregroundColor: theme.colorScheme.error,
+                            padding: const EdgeInsets.symmetric(horizontal: 12),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
-                IconButton(
-                  icon: const Icon(Icons.close, size: 18),
-                  onPressed: () => context.read<ChatState>().clearError(),
-                  color: theme.colorScheme.onErrorContainer,
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(),
-                ),
               ],
             ),
           ),

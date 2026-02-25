@@ -7,12 +7,10 @@ use flutter_rust_bridge::frb;
 use super::data_models::*;
 use super::error_handler::ChatError;
 
-const SUMMARIZE_INTERVAL: u32 = 8;
+const SUMMARIZE_INTERVAL: u32 = 10;
 
 /// 触发分级合并的摘要数量阈值
 const TIERED_MERGE_THRESHOLD: usize = 8;
-/// 合并后目标保留的摘要数量
-const TIERED_MERGE_TARGET: usize = 3;
 
 const BM25_K1: f64 = 1.2;
 const BM25_B: f64 = 0.75;
@@ -1019,11 +1017,11 @@ mod tests {
     fn test_should_summarize() {
         assert!(!MemoryEngine::should_summarize(0));
         assert!(!MemoryEngine::should_summarize(5));
-        assert!(MemoryEngine::should_summarize(8));
-        assert!(MemoryEngine::should_summarize(16));
-        assert!(MemoryEngine::should_summarize(24));
-        assert!(!MemoryEngine::should_summarize(10));
+        assert!(!MemoryEngine::should_summarize(8));
         assert!(!MemoryEngine::should_summarize(15));
+        assert!(MemoryEngine::should_summarize(10));
+        assert!(MemoryEngine::should_summarize(20));
+        assert!(MemoryEngine::should_summarize(30));
     }
 
     #[test]
