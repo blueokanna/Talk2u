@@ -267,7 +267,7 @@ pub async fn send_message(
                 }
                 let _ = sink.add(event);
             },
-        )
+        ),
     )
     .await;
 
@@ -283,12 +283,10 @@ pub async fn send_message(
         }
     }
 
-    // 确保 Done 事件一定被发送（兜底机制）
     if !done_sent.load(std::sync::atomic::Ordering::Relaxed) {
         let _ = sink.add(ChatStreamEvent::Done);
     }
 
-    // 等待事件缓冲区刷新，防止 sink 被立即 Drop 导致 FRB Done/close 竞态
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 }
 
@@ -324,7 +322,6 @@ pub async fn regenerate_response(
 
     let done_sent = std::sync::atomic::AtomicBool::new(false);
 
-    // 整体管线超时保护（5分钟）
     let pipeline_result = tokio::time::timeout(
         std::time::Duration::from_secs(300),
         engine.regenerate_response(
@@ -338,7 +335,7 @@ pub async fn regenerate_response(
                 }
                 let _ = sink.add(event);
             },
-        )
+        ),
     )
     .await;
 
@@ -354,12 +351,10 @@ pub async fn regenerate_response(
         }
     }
 
-    // 确保 Done 事件一定被发送（兜底机制）
     if !done_sent.load(std::sync::atomic::Ordering::Relaxed) {
         let _ = sink.add(ChatStreamEvent::Done);
     }
 
-    // 等待事件缓冲区刷新
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 }
 
