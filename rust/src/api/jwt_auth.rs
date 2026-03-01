@@ -1,8 +1,10 @@
 use base64url::encode;
-use chrono::Utc;
 use flutter_rust_bridge::frb;
 use hmac::{Hmac, Mac};
+use rsntp::SntpClient;
 use sha2::Sha256;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[frb(opaque)]
 pub struct JwtAuth {
@@ -12,8 +14,18 @@ pub struct JwtAuth {
     token_expiry: Option<i64>,
 }
 
-const TOKEN_VALIDITY_MS: i64 = 30 * 60 * 1000;
-const EXPIRY_MARGIN_MS: i64 = 60 * 1000;
+const TOKEN_VALIDITY_SECONDS: i64 = 3600;
+const EXPIRY_MARGIN_SECONDS: i64 = 60;
+const NTP_SERVERS: [&str; 4] = [
+    "ntp.aliyun.com",
+    "ntp1.aliyun.com",
+    "ntp.ntsc.ac.cn",
+    "cn.pool.ntp.org",
+];
+static LAST_JWT_TIMESTAMP: AtomicI64 = AtomicI64::new(0);
+/// 缓存 NTP 时间偏移量，避免每次 get_token() 都发起阻塞网络请求
+static NTP_OFFSET_SECS: AtomicI64 = AtomicI64::new(0);
+static NTP_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 impl JwtAuth {
     pub fn new(api_key: &str) -> Result<Self, String> {
@@ -37,8 +49,11 @@ impl JwtAuth {
                 return token.clone();
             }
         }
-        let token = Self::generate_jwt(&self.user_id, &self.user_secret);
-        let expiry = Utc::now().timestamp_millis() + TOKEN_VALIDITY_MS;
+        self.invalidate_token();
+        let token = Self::generate_jwt(self.user_id(), &self.user_secret);
+        debug_assert!(self.verify_jwt(&token));
+        let issued_at = LAST_JWT_TIMESTAMP.load(Ordering::Relaxed);
+        let expiry = issued_at + TOKEN_VALIDITY_SECONDS;
         self.cached_token = Some(token.clone());
         self.token_expiry = Some(expiry);
         token
@@ -46,7 +61,7 @@ impl JwtAuth {
 
     pub fn is_token_expired(&self) -> bool {
         match self.token_expiry {
-            Some(expiry) => Utc::now().timestamp_millis() >= expiry - EXPIRY_MARGIN_MS,
+            Some(expiry) => current_unix_seconds() >= expiry - EXPIRY_MARGIN_SECONDS,
             None => true,
         }
     }
@@ -57,9 +72,13 @@ impl JwtAuth {
     }
 
     fn generate_jwt(user_id: &str, user_secret: &str) -> String {
+        let time_now = next_monotonic_jwt_timestamp_seconds();
+        Self::generate_jwt_with_issued_at(user_id, user_secret, time_now)
+    }
+
+    fn generate_jwt_with_issued_at(user_id: &str, user_secret: &str, time_now: i64) -> String {
         let header = r#"{"alg":"HS256","sign_type":"SIGN"}"#;
-        let time_now = Utc::now().timestamp_millis();
-        let exp_time = time_now + TOKEN_VALIDITY_MS;
+        let exp_time = time_now + TOKEN_VALIDITY_SECONDS;
         let payload = format!(
             r#"{{"api_key":"{}","exp":{},"timestamp":{}}}"#,
             user_id, exp_time, time_now
@@ -75,7 +94,6 @@ impl JwtAuth {
         format!("{}.{}", to_sign, encoded_signature)
     }
 
-    #[allow(dead_code)]
     pub fn verify_jwt(&self, jwt: &str) -> bool {
         let jwt = jwt.trim();
         let parts: Vec<&str> = jwt.split('.').collect();
@@ -87,13 +105,11 @@ impl JwtAuth {
         calculated == parts[2]
     }
 
-    #[allow(dead_code)]
     pub fn invalidate_token(&mut self) {
         self.cached_token = None;
         self.token_expiry = None;
     }
 
-    #[allow(dead_code)]
     pub fn user_id(&self) -> &str {
         &self.user_id
     }
@@ -108,6 +124,52 @@ fn hmac_sha256_sign(secret: &str, data: &str) -> Vec<u8> {
 
 fn encode_base64_url(data: &[u8]) -> String {
     encode(data)
+}
+
+fn current_unix_seconds() -> i64 {
+    let system_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    // 如果已经初始化过 NTP 偏移量，直接使用缓存值
+    // 避免每次调用都发起阻塞的 NTP 网络请求
+    if NTP_INITIALIZED.load(Ordering::Relaxed) {
+        let offset = NTP_OFFSET_SECS.load(Ordering::Relaxed);
+        return system_time + offset;
+    }
+
+    // 首次调用，尝试 NTP 同步（仅执行一次）
+    let client = SntpClient::new();
+    for server in NTP_SERVERS {
+        if let Ok(result) = client.synchronize(server) {
+            if let Ok(chrono_time) = result.datetime().into_chrono_datetime() {
+                let ntp_time = chrono_time.timestamp();
+                let offset = ntp_time - system_time;
+                NTP_OFFSET_SECS.store(offset, Ordering::Relaxed);
+                NTP_INITIALIZED.store(true, Ordering::Relaxed);
+                return ntp_time;
+            }
+        }
+    }
+
+    // NTP 全部失败，使用系统时间并缓存零偏移
+    NTP_INITIALIZED.store(true, Ordering::Relaxed);
+    system_time
+}
+
+fn next_monotonic_jwt_timestamp_seconds() -> i64 {
+    let now = current_unix_seconds();
+    loop {
+        let prev = LAST_JWT_TIMESTAMP.load(Ordering::Relaxed);
+        let next = if now > prev { now } else { prev + 1 };
+        if LAST_JWT_TIMESTAMP
+            .compare_exchange(prev, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return next;
+        }
+    }
 }
 
 #[cfg(test)]

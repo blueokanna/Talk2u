@@ -9,10 +9,9 @@ import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'data_models.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `default_chat_model`, `default_thinking_model`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `CompressionImpactLevel`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `CompressionImpactLevel`, `DistilledSystemState`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
-/// 应用设置
 class AppSettings {
   final String? apiKey;
   final String defaultModel;
@@ -55,18 +54,11 @@ class AppSettings {
 sealed class ChatStreamEvent with _$ChatStreamEvent {
   const ChatStreamEvent._();
 
-  /// 正常内容增量
   const factory ChatStreamEvent.contentDelta(String field0) =
       ChatStreamEvent_ContentDelta;
-
-  /// 思考内容增量
   const factory ChatStreamEvent.thinkingDelta(String field0) =
       ChatStreamEvent_ThinkingDelta;
-
-  /// 流结束
   const factory ChatStreamEvent.done() = ChatStreamEvent_Done;
-
-  /// 错误
   const factory ChatStreamEvent.error(String field0) = ChatStreamEvent_Error;
 }
 
@@ -158,41 +150,21 @@ class ConversationSummary {
           updatedAt == other.updatedAt;
 }
 
-/// 对话风格
 enum DialogueStyle {
-  /// 默认自由对话
   free,
-
-  /// 纯对话模式（say only）
   sayOnly,
-
-  /// 纯动作/旁白模式（do only）
   doOnly,
-
-  /// 混合模式（say + do 自动识别）
   mixed;
 
   static Future<DialogueStyle> default_() =>
       RustLib.instance.api.crateApiDataModelsDialogueStyleDefault();
 }
 
-/// 记忆上下文增强卡片 — 为每条记忆附加结构化元信息
-/// 参考智谱上下文增强技术：为知识切片"恢复记忆"
-/// 包含来源信息、主题概括、关键实体、歧义消除
 class MemoryContextCard {
-  /// 来源：涵盖的轮次范围描述
   final String sourceRange;
-
-  /// 主题标签（1-3个关键词）
   final List<String> topicTags;
-
-  /// 关键实体（人物、地点、物品等）
   final List<String> keyEntities;
-
-  /// 情感基调（正/负/中性 + 强度）
   final String emotionalTone;
-
-  /// 因果关联：与其他记忆的关联描述
   final List<String> causalLinks;
 
   const MemoryContextCard({
@@ -223,7 +195,6 @@ class MemoryContextCard {
           causalLinks == other.causalLinks;
 }
 
-/// 记忆检索结果
 class MemorySearchResult {
   final String summary;
   final List<String> coreFacts;
@@ -249,29 +220,16 @@ class MemorySearchResult {
           relevanceScore == other.relevanceScore;
 }
 
-/// 记忆摘要条目
 class MemorySummary {
   final String id;
   final String summary;
-
-  /// 核心身份/事件等不可变信息
   final List<String> coreFacts;
-
-  /// 涵盖的消息范围 [start_turn, end_turn]
   final int turnRangeStart;
   final int turnRangeEnd;
   final PlatformInt64 createdAt;
-
-  /// BM25 关键词索引
   final List<String> keywords;
-
-  /// 压缩代数：每次被合并/压缩时 +1，代数越高信息损耗风险越大
   final int compressionGeneration;
-
-  /// 上下文增强卡片 — 结构化元信息，提升检索精度
   final MemoryContextCard? contextCard;
-
-  /// 每条核心事实的排级分类，与 core_facts 一一对应
   final List<MemoryTier> factTiers;
 
   const MemorySummary({
@@ -317,26 +275,14 @@ class MemorySummary {
           factTiers == other.factTiers;
 }
 
-/// 分级压缩排级 — 类似军队排级的信息优先级
-/// 当记忆条目过多需要二次压缩时，按排级决定保留优先级
 enum MemoryTier {
-  /// 最高级：身份锚点（姓名、核心设定、与用户关系）— 永不丢弃
   identity,
-
-  /// 高级：不可逆事件（关键转折、承诺、约定）— 极少丢弃
   criticalEvent,
-
-  /// 中级：关系动态（亲密度变化、信任变化）— 可合并但不丢弃
   relationshipDynamic,
-
-  /// 普通：状态信息（当前情绪、物理状态）— 可被最新状态覆盖
   currentState,
-
-  /// 低级：场景细节（氛围、环境描写）— 可安全丢弃
   sceneDetail,
 }
 
-/// 单条消息
 class Message {
   final String id;
   final MessageRole role;
@@ -380,10 +326,8 @@ class Message {
           messageType == other.messageType;
 }
 
-/// 消息角色
 enum MessageRole { user, assistant, system }
 
-/// 消息类型标记：say（对话）或 do（动作/旁白）
 enum MessageType {
   say,
   do_,
@@ -393,15 +337,10 @@ enum MessageType {
       RustLib.instance.api.crateApiDataModelsMessageTypeDefault();
 }
 
-/// 模型信息
 class ModelInfo {
   final String id;
   final String name;
-
-  /// 最大输入上下文 token 数
   final BigInt contextTokens;
-
-  /// 最大输出 token 数
   final BigInt maxOutputTokens;
   final bool supportsThinking;
 

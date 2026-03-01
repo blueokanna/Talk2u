@@ -19,6 +19,9 @@ class ChatState extends ChangeNotifier {
   List<ConversationSummary> _conversations = [];
   StreamSubscription<ChatStreamEvent>? _streamSubscription;
 
+  // 流式超时安全机制
+  Timer? _streamTimeoutTimer;
+
   // 角色关联
   Map<String, String> _conversationCharacterMap = {};
   Character? _currentCharacter;
@@ -35,13 +38,6 @@ class ChatState extends ChangeNotifier {
   // 流式显示节流控制
   Timer? _streamThrottleTimer;
   bool _streamDirty = false;
-
-  // 流式超时保护：如果长时间没有收到任何数据，自动恢复
-  Timer? _streamTimeoutTimer;
-  // 多模型管线（蒸馏→推理→辅助→对话）可能需要多次 HTTP 请求，
-  // 每次最多 180s，加上重试最多 3 次 = 单阶段最长 ~540s。
-  // 设为 600s 确保不会误杀正常的长管线执行。
-  static const Duration _streamTimeout = Duration(seconds: 600);
 
   // Getters
   String? get currentConversationId => _currentConversationId;
@@ -83,9 +79,10 @@ class ChatState extends ChangeNotifier {
     if (model == thinkingModel) {
       _enableThinking = true;
     } else if (model == flashModel) {
-      // flash 模型支持思考，保持用户当前偏好
+      // flash 模型不支持思考
+      _enableThinking = false;
     }
-    // glm-4.7 支持思考（官方确认），保持用户当前的思考偏好不变
+    // glm-4.7 保持用户当前的思考偏好不变
     notifyListeners();
   }
 
@@ -197,13 +194,17 @@ class ChatState extends ChangeNotifier {
     }
   }
 
-  Future<void> loadConversation(String id) async {
+  Future<void> loadConversation(String id, {bool preserveError = false}) async {
     try {
       final conv = await rust_api.getConversation(id: id);
       if (conv != null) {
         _currentConversationId = conv.id;
         _messages = conv.messages;
-        _errorMessage = null;
+        // 仅在非 preserveError 模式下清除错误
+        // 流式完成后的 loadConversation 应保留错误信息
+        if (!preserveError) {
+          _errorMessage = null;
+        }
         _currentStreamingContent = '';
         _currentThinkingContent = '';
         _dialogueStyle = conv.dialogueStyle;
@@ -339,72 +340,83 @@ class ChatState extends ChangeNotifier {
 
       final conversationId = _currentConversationId!;
 
+      // 【关键修复】取消旧的流式订阅，防止僵尸回调
+      _cancelExistingSubscription();
+
       // 使用 regenerateResponse API，不会重新添加用户消息
-      _errorMessage = null;
       startStreaming();
 
-      debugPrint(
-        '[ChatState] 重新生成: model=$_selectedModel, thinking=$_enableThinking',
-      );
       final stream = rust_api.regenerateResponse(
         conversationId: conversationId,
         model: _selectedModel,
         enableThinking: _enableThinking,
       );
 
-      _streamSubscription?.cancel();
       _streamSubscription = stream.listen(
         (event) {
-          event.when(
-            contentDelta: (delta) => appendStreamingContent(delta),
-            thinkingDelta: (delta) => appendThinkingContent(delta),
-            done: () {
-              debugPrint(
-                '[ChatState] 重新生成完成: content_len=${_currentStreamingContent.length}',
-              );
-              endStreaming();
-              loadConversation(conversationId).then((_) {
-                refreshConversationList();
-                _checkAndTriggerMemorySummarize(conversationId);
-              });
-            },
-            error: (msg) {
-              debugPrint('[ChatState] 重新生成错误: $msg');
-              _errorMessage = msg;
-              if (_currentStreamingContent.isEmpty &&
-                  _currentThinkingContent.isEmpty) {
+          try {
+            event.when(
+              contentDelta: (delta) => appendStreamingContent(delta),
+              thinkingDelta: (delta) => appendThinkingContent(delta),
+              done: () {
+                final activeError = _errorMessage;
+                endStreaming();
+                loadConversation(conversationId, preserveError: true).then((_) {
+                  if (activeError != null && _errorMessage == null) {
+                    _errorMessage = activeError;
+                  }
+                  refreshConversationList();
+                  if (_errorMessage == null) {
+                    _checkAndTriggerMemorySummarize(conversationId);
+                  }
+                  notifyListeners();
+                });
+              },
+              error: (msg) {
+                if (msg == '__RETRY_RESET__') {
+                  _currentStreamingContent = '';
+                  _currentThinkingContent = '';
+                  _streamDirty = true;
+                  return;
+                }
+                _errorMessage = msg;
+                debugPrint('[ChatState] Regenerate error event: $msg');
                 notifyListeners();
-              }
-            },
-          );
+              },
+            );
+          } catch (e) {
+            debugPrint('[ChatState] Error in regenerate stream event: $e');
+            if (_isStreaming) endStreaming();
+          }
         },
         onError: (e) {
-          debugPrint('[ChatState] 重新生成流错误: $e');
+          debugPrint('[ChatState] Regenerate stream error: $e');
           if (_isStreaming) endStreaming();
-          setError(e.toString());
+          _errorMessage = e.toString();
+          notifyListeners();
         },
         onDone: () {
-          debugPrint('[ChatState] 重新生成流关闭: isStreaming=$_isStreaming');
           if (_isStreaming) {
+            final activeError = _errorMessage;
             endStreaming();
-            loadConversation(conversationId).then((_) {
-              final hasNewAssistantMsg =
-                  _messages.isNotEmpty &&
-                  _messages.last.role == MessageRole.assistant;
-              if (!hasNewAssistantMsg && _errorMessage == null) {
-                _errorMessage = 'AI 响应中断，请重试。';
+            loadConversation(conversationId, preserveError: true).then((_) {
+              if (activeError != null && _errorMessage == null) {
+                _errorMessage = activeError;
               }
-              refreshConversationList();
+              // 检查已保存的消息而非流式内容（loadConversation 会清空 _currentStreamingContent）
+              final hasAssistantResponse = _messages.isNotEmpty &&
+                  _messages.last.role == MessageRole.assistant;
+              if (_errorMessage == null && !hasAssistantResponse) {
+                _errorMessage = 'AI 响应中断，请点击重试';
+              }
               notifyListeners();
             });
           }
         },
       );
     } catch (e) {
-      debugPrint('[ChatState] regenerateResponse 异常: $e');
+      debugPrint('Failed to regenerate response: $e');
       if (_isStreaming) endStreaming();
-      _errorMessage = '重新生成失败: $e';
-      notifyListeners();
     }
   }
 
@@ -433,8 +445,17 @@ class ChatState extends ChangeNotifier {
     if (!enabled && _selectedModel == thinkingModel) {
       _selectedModel = chatModel;
     }
-    // flash 模型支持思考（官方确认），无需切换
+    // 开启思考时：如果当前选的是 flash 模型（不支持思考），切回对话模型
+    if (enabled && _selectedModel == flashModel) {
+      _selectedModel = chatModel;
+    }
     notifyListeners();
+  }
+
+  /// 取消旧的流式订阅，防止僵尸回调干扰新的流式会话
+  void _cancelExistingSubscription() {
+    _streamSubscription?.cancel();
+    _streamSubscription = null;
   }
 
   void startStreaming() {
@@ -453,21 +474,26 @@ class ChatState extends ChangeNotifier {
         notifyListeners();
       }
     });
-    // 启动超时保护：如果长时间没有数据，自动恢复
-    _resetStreamTimeout();
+    // 安全超时：10分钟后自动结束流式状态，防止永久卡死
+    _streamTimeoutTimer?.cancel();
+    _streamTimeoutTimer = Timer(const Duration(minutes: 10), () {
+      if (_isStreaming) {
+        debugPrint('[ChatState] Streaming timeout after 10 minutes, force ending');
+        endStreaming();
+      }
+    });
     notifyListeners();
   }
 
   void appendStreamingContent(String delta) {
     _currentStreamingContent += delta;
     _streamDirty = true;
-    _resetStreamTimeout(); // 收到数据，重置超时
+    // 不直接 notifyListeners，由节流定时器统一刷新
   }
 
   void appendThinkingContent(String delta) {
     _currentThinkingContent += delta;
     _streamDirty = true;
-    _resetStreamTimeout(); // 收到数据，重置超时
   }
 
   void endStreaming() {
@@ -483,35 +509,16 @@ class ChatState extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 重置流式超时计时器
-  /// 每次收到数据时调用，如果超时未收到数据则自动恢复
-  void _resetStreamTimeout() {
-    _streamTimeoutTimer?.cancel();
-    _streamTimeoutTimer = Timer(_streamTimeout, () {
-      if (_isStreaming) {
-        debugPrint('[ChatState] 流式响应超时（${_streamTimeout.inSeconds}s 无数据），自动恢复');
-        endStreaming();
-        if (_currentConversationId != null) {
-          loadConversation(_currentConversationId!).then((_) {
-            // 检查 Rust 端是否已保存了回复
-            final hasNewAssistantMsg =
-                _messages.isNotEmpty &&
-                _messages.last.role == MessageRole.assistant;
-            if (!hasNewAssistantMsg) {
-              _errorMessage = 'AI 响应超时，请重试。如果问题持续，尝试缩短对话或切换模型。';
-            }
-            notifyListeners();
-          });
-        } else {
-          _errorMessage = 'AI 响应超时，请重试。';
-          notifyListeners();
-        }
-      }
-    });
-  }
-
   Future<void> sendMessage(String content) async {
     if (content.trim().isEmpty || _isStreaming) return;
+
+    // 【关键修复】取消旧的流式订阅，防止旧流的 onDone 回调
+    // 在新流运行时触发 endStreaming()，导致新流被意外终止
+    _cancelExistingSubscription();
+
+    // 新消息开始时清除之前的错误状态
+    _errorMessage = null;
+    _lastFailedContent = null;
 
     if (_currentConversationId == null) {
       await createNewConversation();
@@ -520,8 +527,6 @@ class ChatState extends ChangeNotifier {
     final conversationId = _currentConversationId;
     if (conversationId == null) return;
 
-    // 清除之前的错误
-    _errorMessage = null;
     startStreaming();
 
     _messages = List.from(_messages)
@@ -538,9 +543,6 @@ class ChatState extends ChangeNotifier {
     notifyListeners();
 
     try {
-      debugPrint(
-        '[ChatState] 发送消息: model=$_selectedModel, thinking=$_enableThinking, len=${content.length}',
-      );
       final stream = rust_api.sendMessage(
         conversationId: conversationId,
         content: content,
@@ -548,72 +550,90 @@ class ChatState extends ChangeNotifier {
         enableThinking: _enableThinking,
       );
 
-      _streamSubscription?.cancel();
       _streamSubscription = stream.listen(
         (event) {
-          event.when(
-            contentDelta: (delta) => appendStreamingContent(delta),
-            thinkingDelta: (delta) => appendThinkingContent(delta),
-            done: () {
-              debugPrint(
-                '[ChatState] 流式完成: content_len=${_currentStreamingContent.length}',
-              );
-              endStreaming();
-              loadConversation(conversationId).then((_) {
-                refreshConversationList();
-                _checkAndTriggerMemorySummarize(conversationId);
-              });
-            },
-            error: (msg) {
-              debugPrint('[ChatState] 流式错误: $msg');
-              // 记录错误，但不立即结束流式状态
-              // Done 事件或 onDone 回调会负责结束
-              _errorMessage = msg;
-              // 如果没有任何内容且没有在等待后续事件，立即通知 UI 显示错误
-              if (_currentStreamingContent.isEmpty &&
-                  _currentThinkingContent.isEmpty) {
+          try {
+            event.when(
+              contentDelta: (delta) => appendStreamingContent(delta),
+              thinkingDelta: (delta) => appendThinkingContent(delta),
+              done: () {
+                // 保存当前错误状态，loadConversation 不应清除流式过程中产生的错误
+                final activeError = _errorMessage;
+                endStreaming();
+                loadConversation(conversationId, preserveError: true).then((_) {
+                  // 恢复流式过程中的错误（loadConversation 可能已清除）
+                  if (activeError != null && _errorMessage == null) {
+                    _errorMessage = activeError;
+                  }
+                  refreshConversationList();
+                  // 仅在无错误时触发记忆总结
+                  if (_errorMessage == null) {
+                    _checkAndTriggerMemorySummarize(conversationId);
+                  }
+                  notifyListeners();
+                });
+              },
+              error: (msg) {
+                // 重试重置信号：Rust 端发起了降级重试，清空已累积的旧内容
+                if (msg == '__RETRY_RESET__') {
+                  _currentStreamingContent = '';
+                  _currentThinkingContent = '';
+                  _streamDirty = true;
+                  return;
+                }
+                _errorMessage = msg;
+                debugPrint('[ChatState] Stream error event: $msg');
+                // 不立即 endStreaming，等待 Done 事件统一收尾
+                // 如果只有 Error 没有 Done，靠 onDone 兜底
                 notifyListeners();
-              }
-            },
-          );
+              },
+            );
+          } catch (e) {
+            debugPrint('[ChatState] Error processing stream event: $e');
+            if (_isStreaming) {
+              endStreaming();
+            }
+            _errorMessage = '消息处理异常: $e';
+            notifyListeners();
+          }
         },
         onError: (e) {
-          debugPrint('[ChatState] 流监听错误: $e');
-          // 流本身出错（不是业务错误），必须恢复
-          if (_isStreaming) endStreaming();
-          loadConversation(conversationId).then((_) {
-            _errorMessage = '连接异常: $e';
+          debugPrint('[ChatState] Stream error: $e');
+          if (_isStreaming) {
+            endStreaming();
+          }
+          _errorMessage = e.toString();
+          loadConversation(conversationId, preserveError: true).then((_) {
             notifyListeners();
           });
         },
         onDone: () {
-          // 流关闭 = Rust 函数已返回，无论如何都必须结束流式状态
-          debugPrint(
-            '[ChatState] 流关闭: isStreaming=$_isStreaming, content_len=${_currentStreamingContent.length}',
-          );
           if (_isStreaming) {
+            // 流结束但没收到 Done 事件（异常断开），兜底处理
+            debugPrint('[ChatState] Stream closed without Done event, fallback cleanup');
+            final activeError = _errorMessage;
             endStreaming();
-            // 始终重新加载对话：Rust 可能已经保存了消息，但 Done 事件
-            // 因 flutter_rust_bridge 流关闭竞态而丢失
-            loadConversation(conversationId).then((_) {
-              // 检查对话中是否已有新的 AI 回复（Rust 端已持久化）
-              final hasNewAssistantMsg =
-                  _messages.isNotEmpty &&
-                  _messages.last.role == MessageRole.assistant;
-              if (!hasNewAssistantMsg && _errorMessage == null) {
-                _errorMessage = 'AI 响应中断，请重试。';
+            loadConversation(conversationId, preserveError: true).then((_) {
+              if (activeError != null && _errorMessage == null) {
+                _errorMessage = activeError;
               }
-              refreshConversationList();
+              // 检查已保存的消息而非流式内容（loadConversation 会清空 _currentStreamingContent）
+              // 如果 Rust 成功保存了 AI 回复，说明实际上是 FRB Done/close 竞态，不应报错
+              final hasAssistantResponse = _messages.isNotEmpty &&
+                  _messages.last.role == MessageRole.assistant;
+              if (_errorMessage == null && !hasAssistantResponse) {
+                _errorMessage = 'AI 响应中断，请点击重试';
+              }
               notifyListeners();
             });
           }
         },
       );
     } catch (e) {
-      debugPrint('[ChatState] sendMessage 异常: $e');
+      debugPrint('[ChatState] Failed to create stream: $e');
       endStreaming();
       loadConversation(conversationId).then((_) {
-        _errorMessage = '发送失败: $e';
+        _errorMessage = e.toString();
         notifyListeners();
       });
     }
@@ -653,8 +673,6 @@ class ChatState extends ChangeNotifier {
     _isStreaming = false;
     _streamThrottleTimer?.cancel();
     _streamThrottleTimer = null;
-    _streamTimeoutTimer?.cancel();
-    _streamTimeoutTimer = null;
     if (failedContent != null) {
       _lastFailedContent = failedContent;
     }
@@ -672,77 +690,90 @@ class ChatState extends ChangeNotifier {
     if (_currentConversationId == null || _isStreaming) return;
     final conversationId = _currentConversationId!;
 
+    // 【关键修复】取消旧的流式订阅
+    _cancelExistingSubscription();
+
     _errorMessage = null;
     _lastFailedContent = null;
     startStreaming();
 
     try {
-      debugPrint(
-        '[ChatState] 重试: model=$_selectedModel, thinking=$_enableThinking',
-      );
       final stream = rust_api.regenerateResponse(
         conversationId: conversationId,
         model: _selectedModel,
         enableThinking: _enableThinking,
       );
 
-      _streamSubscription?.cancel();
       _streamSubscription = stream.listen(
         (event) {
-          event.when(
-            contentDelta: (delta) => appendStreamingContent(delta),
-            thinkingDelta: (delta) => appendThinkingContent(delta),
-            done: () {
-              debugPrint(
-                '[ChatState] 重试完成: content_len=${_currentStreamingContent.length}',
-              );
-              endStreaming();
-              loadConversation(conversationId).then((_) {
-                refreshConversationList();
-                _checkAndTriggerMemorySummarize(conversationId);
-              });
-            },
-            error: (msg) {
-              debugPrint('[ChatState] 重试错误: $msg');
-              _errorMessage = msg;
-              if (_currentStreamingContent.isEmpty &&
-                  _currentThinkingContent.isEmpty) {
+          try {
+            event.when(
+              contentDelta: (delta) => appendStreamingContent(delta),
+              thinkingDelta: (delta) => appendThinkingContent(delta),
+              done: () {
+                final activeError = _errorMessage;
+                endStreaming();
+                loadConversation(conversationId, preserveError: true).then((_) {
+                  if (activeError != null && _errorMessage == null) {
+                    _errorMessage = activeError;
+                  }
+                  refreshConversationList();
+                  if (_errorMessage == null) {
+                    _checkAndTriggerMemorySummarize(conversationId);
+                  }
+                  notifyListeners();
+                });
+              },
+              error: (msg) {
+                if (msg == '__RETRY_RESET__') {
+                  _currentStreamingContent = '';
+                  _currentThinkingContent = '';
+                  _streamDirty = true;
+                  return;
+                }
+                _errorMessage = msg;
+                debugPrint('[ChatState] Retry error event: $msg');
                 notifyListeners();
-              }
-            },
-          );
+              },
+            );
+          } catch (e) {
+            debugPrint('[ChatState] Error in retry stream event: $e');
+            if (_isStreaming) endStreaming();
+          }
         },
         onError: (e) {
-          debugPrint('[ChatState] 重试流错误: $e');
+          debugPrint('[ChatState] Retry stream error: $e');
           if (_isStreaming) endStreaming();
-          setError(e.toString());
+          _errorMessage = e.toString();
+          notifyListeners();
         },
         onDone: () {
-          debugPrint('[ChatState] 重试流关闭: isStreaming=$_isStreaming');
           if (_isStreaming) {
+            final activeError = _errorMessage;
             endStreaming();
-            loadConversation(conversationId).then((_) {
-              final hasNewAssistantMsg =
-                  _messages.isNotEmpty &&
-                  _messages.last.role == MessageRole.assistant;
-              if (!hasNewAssistantMsg && _errorMessage == null) {
-                _errorMessage = 'AI 响应中断，请重试。';
+            loadConversation(conversationId, preserveError: true).then((_) {
+              if (activeError != null && _errorMessage == null) {
+                _errorMessage = activeError;
               }
-              refreshConversationList();
+              // 检查已保存的消息而非流式内容（loadConversation 会清空 _currentStreamingContent）
+              final hasAssistantResponse = _messages.isNotEmpty &&
+                  _messages.last.role == MessageRole.assistant;
+              if (_errorMessage == null && !hasAssistantResponse) {
+                _errorMessage = 'AI 响应中断，请点击重试';
+              }
               notifyListeners();
             });
           }
         },
       );
     } catch (e) {
-      debugPrint('[ChatState] retryLastMessage 异常: $e');
       setError(e.toString());
     }
   }
 
   @override
   void dispose() {
-    _streamSubscription?.cancel();
+    _cancelExistingSubscription();
     _streamThrottleTimer?.cancel();
     _streamTimeoutTimer?.cancel();
     super.dispose();

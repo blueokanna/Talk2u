@@ -1,5 +1,7 @@
 use super::data_models::{Message, MessageRole};
 
+type EmotionLexiconEntry = (&'static str, usize, &'static [(&'static str, f64)]);
+
 // ═══════════════════════════════════════════════════════════════════
 //  认知思维引擎 (Cognitive Engine)
 //  ─────────────────────────────────────────────────────────────────
@@ -182,7 +184,7 @@ impl CognitiveEngine {
         }
 
         // 扩展情感词典：每个词带有强度权重
-        let emotion_lexicon: &[(&str, usize, &[(&str, f64)])] = &[
+        let emotion_lexicon: &[EmotionLexiconEntry] = &[
             // (情感名, 维度索引, [(关键词, 强度)])
             ("joy", 0, &[
                 ("开心", 0.8), ("高兴", 0.8), ("快乐", 0.9), ("笑", 0.5), ("哈哈", 0.7),
@@ -272,7 +274,7 @@ impl CognitiveEngine {
                 for &(kw, intensity) in *keywords {
                     if let Some(pos) = text.find(kw) {
                         // 检查前面是否有否定词
-                        let prefix_start = if pos >= 6 { pos - 6 } else { 0 };
+                        let prefix_start = pos.saturating_sub(6);
                         let prefix = &text[prefix_start..pos];
                         let is_negated = negation_prefixes.iter().any(|neg| prefix.ends_with(neg));
 
@@ -433,11 +435,10 @@ impl CognitiveEngine {
             patterns.push(LanguagePattern::Hesitation);
         }
         // 消息以省略号结尾也是欲言又止
-        if latest.ends_with("...") || latest.ends_with("…") || latest.ends_with("..") {
-            if !patterns.contains(&LanguagePattern::Hesitation) {
+        if (latest.ends_with("...") || latest.ends_with("…") || latest.ends_with(".."))
+            && !patterns.contains(&LanguagePattern::Hesitation) {
                 patterns.push(LanguagePattern::Hesitation);
             }
-        }
 
         // ── 重复强调检测 ──
         if recent_user.len() >= 2 {
@@ -459,11 +460,10 @@ impl CognitiveEngine {
                     repeat_count = 1;
                 }
             }
-            if repeat_count >= 3 {
-                if !patterns.contains(&LanguagePattern::Repetition) {
+            if repeat_count >= 3
+                && !patterns.contains(&LanguagePattern::Repetition) {
                     patterns.push(LanguagePattern::Repetition);
                 }
-            }
         }
 
         // ── 语气急促检测 ──
@@ -932,7 +932,7 @@ impl CognitiveEngine {
         if !top_emotions.is_empty() {
             prompt.push_str("对方当前情绪：");
             for (i, (name, score)) in top_emotions.iter().enumerate() {
-                if i > 0 { prompt.push_str("、"); }
+                if i > 0 { prompt.push('、'); }
                 let intensity = if *score > 0.7 { "强烈的" } else if *score > 0.4 { "明显的" } else { "轻微的" };
                 prompt.push_str(&format!("{}{}", intensity, name));
             }
@@ -1190,9 +1190,7 @@ mod tests {
 
     #[test]
     fn test_emotion_perception_joy() {
-        let msgs = vec![
-            make_msg(MessageRole::User, "哈哈哈太开心了！"),
-        ];
+        let msgs = [make_msg(MessageRole::User, "哈哈哈太开心了！")];
         let refs: Vec<&Message> = msgs.iter().collect();
         let emotion = CognitiveEngine::perceive_emotion(&refs);
         assert!(emotion.joy > 0.3, "joy should be significant, got {}", emotion.joy);
@@ -1201,9 +1199,7 @@ mod tests {
 
     #[test]
     fn test_emotion_perception_sadness() {
-        let msgs = vec![
-            make_msg(MessageRole::User, "好难过...想哭"),
-        ];
+        let msgs = [make_msg(MessageRole::User, "好难过...想哭")];
         let refs: Vec<&Message> = msgs.iter().collect();
         let emotion = CognitiveEngine::perceive_emotion(&refs);
         assert!(emotion.sadness > 0.3, "sadness should be significant, got {}", emotion.sadness);
@@ -1212,9 +1208,7 @@ mod tests {
 
     #[test]
     fn test_negation_detection() {
-        let msgs = vec![
-            make_msg(MessageRole::User, "我不开心"),
-        ];
+        let msgs = [make_msg(MessageRole::User, "我不开心")];
         let refs: Vec<&Message> = msgs.iter().collect();
         let emotion = CognitiveEngine::perceive_emotion(&refs);
         // "不开心" should reduce joy and potentially increase sadness
@@ -1223,10 +1217,8 @@ mod tests {
 
     #[test]
     fn test_sarcasm_detection() {
-        let msgs = vec![
-            make_msg(MessageRole::User, "行啊你厉害"),
-            make_msg(MessageRole::User, "呵呵随便你"),
-        ];
+        let msgs = [make_msg(MessageRole::User, "行啊你厉害"),
+            make_msg(MessageRole::User, "呵呵随便你")];
         let refs: Vec<&Message> = msgs.iter().collect();
         let patterns = CognitiveEngine::detect_language_patterns(&refs);
         assert!(patterns.contains(&LanguagePattern::Sarcasm), "should detect sarcasm");
@@ -1234,9 +1226,7 @@ mod tests {
 
     #[test]
     fn test_hesitation_detection() {
-        let msgs = vec![
-            make_msg(MessageRole::User, "我...算了不说了"),
-        ];
+        let msgs = [make_msg(MessageRole::User, "我...算了不说了")];
         let refs: Vec<&Message> = msgs.iter().collect();
         let patterns = CognitiveEngine::detect_language_patterns(&refs);
         assert!(patterns.contains(&LanguagePattern::Hesitation), "should detect hesitation");
@@ -1244,9 +1234,7 @@ mod tests {
 
     #[test]
     fn test_coquettish_detection() {
-        let msgs = vec![
-            make_msg(MessageRole::User, "你都不理人家嘛～哼"),
-        ];
+        let msgs = [make_msg(MessageRole::User, "你都不理人家嘛～哼")];
         let refs: Vec<&Message> = msgs.iter().collect();
         let patterns = CognitiveEngine::detect_language_patterns(&refs);
         assert!(patterns.contains(&LanguagePattern::Coquettish), "should detect coquettish tone");
@@ -1254,9 +1242,7 @@ mod tests {
 
     #[test]
     fn test_intent_seeking_comfort() {
-        let msgs = vec![
-            make_msg(MessageRole::User, "好难过...今天被骂了"),
-        ];
+        let msgs = [make_msg(MessageRole::User, "好难过...今天被骂了")];
         let refs: Vec<&Message> = msgs.iter().collect();
         let analysis = CognitiveEngine::analyze(&refs);
         assert_eq!(analysis.intent, DialogueIntent::SeekingComfort);
@@ -1264,9 +1250,7 @@ mod tests {
 
     #[test]
     fn test_intent_playful() {
-        let msgs = vec![
-            make_msg(MessageRole::User, "哈哈哈笑死我了你好笨"),
-        ];
+        let msgs = [make_msg(MessageRole::User, "哈哈哈笑死我了你好笨")];
         let refs: Vec<&Message> = msgs.iter().collect();
         let analysis = CognitiveEngine::analyze(&refs);
         assert_eq!(analysis.intent, DialogueIntent::Playful);
@@ -1274,9 +1258,7 @@ mod tests {
 
     #[test]
     fn test_intent_farewell() {
-        let msgs = vec![
-            make_msg(MessageRole::User, "困了，晚安～"),
-        ];
+        let msgs = [make_msg(MessageRole::User, "困了，晚安～")];
         let refs: Vec<&Message> = msgs.iter().collect();
         let analysis = CognitiveEngine::analyze(&refs);
         assert_eq!(analysis.intent, DialogueIntent::Farewell);
@@ -1284,9 +1266,7 @@ mod tests {
 
     #[test]
     fn test_empathy_strategy_for_sadness() {
-        let msgs = vec![
-            make_msg(MessageRole::User, "我真的好难过好难过..."),
-        ];
+        let msgs = [make_msg(MessageRole::User, "我真的好难过好难过...")];
         let refs: Vec<&Message> = msgs.iter().collect();
         let analysis = CognitiveEngine::analyze(&refs);
         assert!(
@@ -1299,11 +1279,9 @@ mod tests {
 
     #[test]
     fn test_empathy_proactive_care_for_suppressed() {
-        let msgs = vec![
-            make_msg(MessageRole::User, "今天发生了好多事情啊，真的好累好累"),
+        let msgs = [make_msg(MessageRole::User, "今天发生了好多事情啊，真的好累好累"),
             make_msg(MessageRole::Assistant, "怎么了？发生什么事了？"),
-            make_msg(MessageRole::User, "嗯"),
-        ];
+            make_msg(MessageRole::User, "嗯")];
         let refs: Vec<&Message> = msgs.iter().collect();
         let patterns = CognitiveEngine::detect_language_patterns(&refs);
         assert!(patterns.contains(&LanguagePattern::Suppressed), "should detect suppressed emotion");
@@ -1311,11 +1289,9 @@ mod tests {
 
     #[test]
     fn test_full_analysis_generates_prompt() {
-        let msgs = vec![
-            make_msg(MessageRole::User, "你在干嘛呀"),
+        let msgs = [make_msg(MessageRole::User, "你在干嘛呀"),
             make_msg(MessageRole::Assistant, "在想你呀"),
-            make_msg(MessageRole::User, "讨厌～才没有想你呢"),
-        ];
+            make_msg(MessageRole::User, "讨厌～才没有想你呢")];
         let refs: Vec<&Message> = msgs.iter().collect();
         let analysis = CognitiveEngine::analyze(&refs);
         assert!(!analysis.cognitive_prompt.is_empty(), "should generate cognitive prompt");
@@ -1324,12 +1300,10 @@ mod tests {
 
     #[test]
     fn test_relationship_dynamics() {
-        let msgs = vec![
-            make_msg(MessageRole::User, "宝贝我好想你"),
+        let msgs = [make_msg(MessageRole::User, "宝贝我好想你"),
             make_msg(MessageRole::Assistant, "我也想你呀亲爱的"),
             make_msg(MessageRole::User, "抱抱～好暖"),
-            make_msg(MessageRole::Assistant, "（把你搂进怀里）乖"),
-        ];
+            make_msg(MessageRole::Assistant, "（把你搂进怀里）乖")];
         let refs: Vec<&Message> = msgs.iter().collect();
         let emotion = CognitiveEngine::perceive_emotion(&refs);
         let relationship = CognitiveEngine::analyze_relationship(&refs, &emotion);

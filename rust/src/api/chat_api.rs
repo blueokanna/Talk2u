@@ -5,6 +5,7 @@ use super::config_manager::ConfigManager;
 use super::conversation_store::ConversationStore;
 use super::data_models::*;
 use super::jwt_auth::JwtAuth;
+use super::knowledge_store::KnowledgeStore;
 use super::memory_engine::MemoryEngine;
 
 static CONFIG_MANAGER: OnceLock<ConfigManager> = OnceLock::new();
@@ -67,6 +68,8 @@ pub fn get_conversation(id: String) -> Option<Conversation> {
 pub fn delete_conversation(id: String) -> bool {
     let memory = MemoryEngine::new(get_data_path());
     let _ = memory.delete_memory_index(&id);
+    let knowledge = KnowledgeStore::new(get_data_path());
+    let _ = knowledge.delete_knowledge(&id);
     get_conversation_store().delete_conversation(&id).is_ok()
 }
 
@@ -189,27 +192,28 @@ pub fn validate_api_key(api_key: String) -> bool {
 }
 
 pub fn get_available_models() -> Vec<ModelInfo> {
+    // 参考: https://docs.bigmodel.cn/cn/guide/start/concept-param
     vec![
         ModelInfo {
             id: "glm-4.7".to_string(),
-            name: "GLM-4.7（对话）".to_string(),
-            context_tokens: 200_000,
-            max_output_tokens: 65536,
+            name: "GLM-4.7（对话+思考）".to_string(),
+            context_tokens: 128000,
+            max_output_tokens: 131072,
             supports_thinking: true,
         },
         ModelInfo {
             id: "glm-4-air".to_string(),
             name: "GLM-4-Air（深度推理）".to_string(),
-            context_tokens: 128_000,
-            max_output_tokens: 4096,
+            context_tokens: 128000,
+            max_output_tokens: 4095,
             supports_thinking: true,
         },
         ModelInfo {
             id: "glm-4.7-flash".to_string(),
             name: "GLM-4.7-Flash（快速）".to_string(),
-            context_tokens: 200_000,
-            max_output_tokens: 65536,
-            supports_thinking: true,
+            context_tokens: 128000,
+            max_output_tokens: 131072,
+            supports_thinking: false,
         },
     ]
 }
@@ -226,7 +230,7 @@ pub async fn send_message(
         Some(key) => key,
         None => {
             let _ = sink.add(ChatStreamEvent::Error(
-                "API key not configured. Please set your API key in Settings.".to_string(),
+                "未配置 API Key，请在设置中填写您的智谱 API Key".to_string(),
             ));
             let _ = sink.add(ChatStreamEvent::Done);
             return;
@@ -245,31 +249,47 @@ pub async fn send_message(
         }
     };
 
-    let result = engine
-        .send_message(
+    // 使用 done_sent 标记确保 Done 事件只发送一次
+    let done_sent = std::sync::atomic::AtomicBool::new(false);
+
+    // 整体管线超时保护（5分钟）：防止多阶段管线累计超过 Flutter 的 10 分钟安全超时
+    let pipeline_result = tokio::time::timeout(
+        std::time::Duration::from_secs(300),
+        engine.send_message(
             &conversation_id,
             &content,
             &chat_model,
             &thinking_model,
             enable_thinking,
             |event| {
+                if let ChatStreamEvent::Done = &event {
+                    done_sent.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 let _ = sink.add(event);
             },
         )
-        .await;
+    )
+    .await;
 
-    match result {
-        Ok(()) => {
-            // send_message 内部已发送 Done，但为防止 flutter_rust_bridge
-            // 在函数返回时关闭流导致 Done 事件丢失，再补发一次。
-            // Flutter 端 done: handler 会通过 _isStreaming 标志去重。
-            let _ = sink.add(ChatStreamEvent::Done);
-        }
-        Err(e) => {
+    match pipeline_result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
             let _ = sink.add(ChatStreamEvent::Error(e.to_string()));
-            let _ = sink.add(ChatStreamEvent::Done);
+        }
+        Err(_timeout) => {
+            let _ = sink.add(ChatStreamEvent::Error(
+                "处理超时（5分钟），请缩短对话或重试".to_string(),
+            ));
         }
     }
+
+    // 确保 Done 事件一定被发送（兜底机制）
+    if !done_sent.load(std::sync::atomic::Ordering::Relaxed) {
+        let _ = sink.add(ChatStreamEvent::Done);
+    }
+
+    // 等待事件缓冲区刷新，防止 sink 被立即 Drop 导致 FRB Done/close 竞态
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 }
 
 pub async fn regenerate_response(
@@ -283,7 +303,7 @@ pub async fn regenerate_response(
         Some(key) => key,
         None => {
             let _ = sink.add(ChatStreamEvent::Error(
-                "API key not configured. Please set your API key in Settings.".to_string(),
+                "未配置 API Key，请在设置中填写您的智谱 API Key".to_string(),
             ));
             let _ = sink.add(ChatStreamEvent::Done);
             return;
@@ -302,27 +322,45 @@ pub async fn regenerate_response(
         }
     };
 
-    let result = engine
-        .regenerate_response(
+    let done_sent = std::sync::atomic::AtomicBool::new(false);
+
+    // 整体管线超时保护（5分钟）
+    let pipeline_result = tokio::time::timeout(
+        std::time::Duration::from_secs(300),
+        engine.regenerate_response(
             &conversation_id,
             &chat_model,
             &thinking_model,
             enable_thinking,
             |event| {
+                if let ChatStreamEvent::Done = &event {
+                    done_sent.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 let _ = sink.add(event);
             },
         )
-        .await;
+    )
+    .await;
 
-    match result {
-        Ok(()) => {
-            let _ = sink.add(ChatStreamEvent::Done);
-        }
-        Err(e) => {
+    match pipeline_result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
             let _ = sink.add(ChatStreamEvent::Error(e.to_string()));
-            let _ = sink.add(ChatStreamEvent::Done);
+        }
+        Err(_timeout) => {
+            let _ = sink.add(ChatStreamEvent::Error(
+                "处理超时（5分钟），请缩短对话或重试".to_string(),
+            ));
         }
     }
+
+    // 确保 Done 事件一定被发送（兜底机制）
+    if !done_sent.load(std::sync::atomic::Ordering::Relaxed) {
+        let _ = sink.add(ChatStreamEvent::Done);
+    }
+
+    // 等待事件缓冲区刷新
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 }
 
 pub async fn trigger_memory_summarize(

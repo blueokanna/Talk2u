@@ -524,6 +524,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                       },
                       onSelectConversation: (id) {
                         Navigator.pop(context);
+                        chatState.clearError();
                         chatState.loadConversation(id);
                       },
                       onDeleteConversation: (id) {
@@ -662,6 +663,16 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
 
   Widget _buildErrorBanner(ChatState chatState) {
     final theme = Theme.of(context);
+    // 判断是否是 API 返回的详细错误（包含具体信息）
+    final errorMsg = chatState.errorMessage ?? '';
+    final isDetailedError =
+        errorMsg.contains('API') ||
+        errorMsg.contains('token') ||
+        errorMsg.contains('超时') ||
+        errorMsg.contains('连接') ||
+        errorMsg.contains('status') ||
+        errorMsg.contains('尝试') ||
+        errorMsg.contains('网络');
     return AnimatedSize(
       duration: const Duration(milliseconds: 200),
       curve: Curves.easeOutCubic,
@@ -686,11 +697,11 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        chatState.errorMessage ?? '',
+                        errorMsg,
                         style: theme.textTheme.bodySmall?.copyWith(
                           color: theme.colorScheme.onErrorContainer,
                         ),
-                        maxLines: 4,
+                        maxLines: isDetailedError ? 8 : 4,
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),

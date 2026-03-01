@@ -14,6 +14,8 @@ pub enum ChatError {
     StorageError { message: String },
     ValidationError { message: String },
     StreamError { message: String },
+    /// GLM 业务错误（携带业务错误码，便于精确分类）
+    GlmBusinessError { code: String, message: String },
 }
 
 impl fmt::Display for ChatError {
@@ -40,6 +42,9 @@ impl fmt::Display for ChatError {
             ChatError::StreamError { message } => {
                 write!(f, "Stream error: {}", message)
             }
+            ChatError::GlmBusinessError { code, message } => {
+                write!(f, "GLM error (code {}): {}", code, message)
+            }
         }
     }
 }
@@ -49,13 +54,172 @@ impl std::error::Error for ChatError {}
 impl ChatError {
     /// Returns true if this error type should be retried.
     /// Used by RetryHandler for automatic retry logic on transient failures.
+    ///
+    /// 参考 GLM 错误码文档：
+    /// - 5xx 服务端错误：可重试
+    /// - 429 频率/并发限制：可重试（含业务码 1302/1303/1305）
+    /// - 400/401/434/435：不可重试
+    /// - 业务码 1304/1308/1310（配额耗尽）：不可重试
+    /// - 业务码 1113（余额不足）：不可重试
     pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            ChatError::NetworkError { .. }
-                | ChatError::ApiError { .. }
-                | ChatError::RateLimitError { .. }
-        )
+        match self {
+            ChatError::NetworkError { .. } => true,
+            ChatError::ApiError { status, .. } => *status >= 500,
+            ChatError::RateLimitError { .. } => true,
+            ChatError::StreamError { .. } => true,
+            ChatError::GlmBusinessError { code, .. } => {
+                matches!(code.as_str(), "500" | "1302" | "1303" | "1305")
+            }
+            _ => false,
+        }
+    }
+
+    /// 根据 GLM API 响应体解析错误
+    /// 响应格式: {"error": {"code": "1002", "message": "..."}}
+    ///
+    /// 参考: https://docs.bigmodel.cn/cn/api/api-code
+    pub fn from_glm_response(status_code: u16, body_text: &str) -> Self {
+        let parsed = serde_json::from_str::<serde_json::Value>(body_text);
+        if let Ok(json) = parsed {
+            let error_obj = json.get("error");
+            let code = error_obj
+                .and_then(|e| e.get("code"))
+                .and_then(|c| {
+                    c.as_str()
+                        .map(|s| s.to_string())
+                        .or_else(|| c.as_u64().map(|n| n.to_string()))
+                })
+                .unwrap_or_default();
+            let message = error_obj
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("未知错误")
+                .to_string();
+
+            Self::classify_glm_error(status_code, &code, &message)
+        } else {
+            ChatError::ApiError {
+                status: status_code,
+                message: body_text.to_string(),
+            }
+        }
+    }
+
+    /// 根据 GLM 业务错误码分类为具体 ChatError 变体
+    ///
+    /// 错误码映射（参考 https://docs.bigmodel.cn/cn/api/api-code）：
+    /// - 1001~1004: 认证/Token 错误 → AuthError
+    /// - 1110~1121: 账户异常 → AuthError
+    /// - 1113: 余额不足 → GlmBusinessError（不可重试）
+    /// - 1210~1215: API 参数错误 → ValidationError
+    /// - 1301: 内容安全 → ValidationError
+    /// - 1302/1303/1305: 并发/频率/流量限制 → RateLimitError（可重试）
+    /// - 1304/1308/1310: 配额耗尽 → GlmBusinessError（不可重试）
+    /// - 500: 服务端内部错误 → ApiError
+    fn classify_glm_error(status_code: u16, code: &str, message: &str) -> Self {
+        match code {
+            // ── 认证错误 ──
+            "1001" => ChatError::AuthError {
+                message: "请求头中未包含 Authorization 参数，请检查 API Key 配置".to_string(),
+            },
+            "1002" => ChatError::AuthError {
+                message: "Authorization Token 非法，请确认 API Key 正确".to_string(),
+            },
+            "1003" => ChatError::AuthError {
+                message: "Authorization Token 已过期，请重新生成".to_string(),
+            },
+            "1004" => ChatError::AuthError {
+                message: "Authorization Token 验证失败，请检查 API Key".to_string(),
+            },
+            // ── 账户错误 ──
+            "1110" => ChatError::AuthError {
+                message: "账户当前处于非活动状态，请检查账户信息".to_string(),
+            },
+            "1111" => ChatError::AuthError {
+                message: "账户不存在，请确认 API Key 对应的账户".to_string(),
+            },
+            "1112" => ChatError::AuthError {
+                message: "账户已被锁定，请联系智谱客服解锁".to_string(),
+            },
+            "1113" => ChatError::GlmBusinessError {
+                code: code.to_string(),
+                message: "账户余额已用完，请充值后重试".to_string(),
+            },
+            "1120" => ChatError::AuthError {
+                message: "无法访问账户，请稍后重试".to_string(),
+            },
+            "1121" => ChatError::AuthError {
+                message: "账户因违规行为已被锁定，请联系客服".to_string(),
+            },
+            // ── API 参数错误 ──
+            "1210" => ChatError::ValidationError {
+                message: format!("API 调用参数有误: {}", message),
+            },
+            "1211" => ChatError::ValidationError {
+                message: format!("模型不存在，请检查模型名称: {}", message),
+            },
+            "1212" => ChatError::ValidationError {
+                message: format!("当前模型不支持此调用方式: {}", message),
+            },
+            "1213" => ChatError::ValidationError {
+                message: format!("缺少必要参数: {}", message),
+            },
+            "1214" => ChatError::ValidationError {
+                message: format!("参数非法: {}", message),
+            },
+            "1215" => ChatError::ValidationError {
+                message: format!("参数冲突: {}", message),
+            },
+            // ── 内容安全 ──
+            "1301" => ChatError::ValidationError {
+                message: "内容包含不安全或敏感内容，请修改后重试".to_string(),
+            },
+            // ── 频率/并发限制（可重试）──
+            "1302" => ChatError::RateLimitError {
+                retry_after_secs: 3,
+            },
+            "1303" => ChatError::RateLimitError {
+                retry_after_secs: 5,
+            },
+            "1305" => ChatError::RateLimitError {
+                retry_after_secs: 5,
+            },
+            // ── 配额耗尽（不可重试）──
+            "1304" => ChatError::GlmBusinessError {
+                code: code.to_string(),
+                message: "已达今日 API 调用次数限额，请明日再试或联系客服".to_string(),
+            },
+            "1308" => ChatError::GlmBusinessError {
+                code: code.to_string(),
+                message: format!("已达使用上限: {}", message),
+            },
+            "1310" => ChatError::GlmBusinessError {
+                code: code.to_string(),
+                message: format!("已达每周/每月使用上限: {}", message),
+            },
+            // ── 服务端内部错误 ──
+            "500" => ChatError::ApiError {
+                status: 500,
+                message: format!("服务器内部错误，请稍后重试: {}", message),
+            },
+            // ── 未知业务码：按 HTTP 状态码回退 ──
+            _ => match status_code {
+                401 => ChatError::AuthError {
+                    message: message.to_string(),
+                },
+                429 => ChatError::RateLimitError {
+                    retry_after_secs: 2,
+                },
+                s if s >= 500 => ChatError::ApiError {
+                    status: s,
+                    message: message.to_string(),
+                },
+                _ => ChatError::ApiError {
+                    status: status_code,
+                    message: message.to_string(),
+                },
+            },
+        }
     }
 }
 
@@ -137,12 +301,20 @@ mod tests {
     fn test_chat_error_is_retryable() {
         assert!(ChatError::NetworkError { message: "timeout".into() }.is_retryable());
         assert!(ChatError::ApiError { status: 500, message: "err".into() }.is_retryable());
+        assert!(!ChatError::ApiError { status: 400, message: "bad".into() }.is_retryable());
+        assert!(!ChatError::ApiError { status: 401, message: "auth".into() }.is_retryable());
         assert!(ChatError::RateLimitError { retry_after_secs: 1 }.is_retryable());
 
         assert!(!ChatError::ValidationError { message: "bad".into() }.is_retryable());
         assert!(!ChatError::StorageError { message: "io".into() }.is_retryable());
         assert!(!ChatError::AuthError { message: "denied".into() }.is_retryable());
-        assert!(!ChatError::StreamError { message: "broken".into() }.is_retryable());
+        assert!(ChatError::StreamError { message: "broken".into() }.is_retryable());
+
+        // GLM 业务码
+        assert!(ChatError::GlmBusinessError { code: "1302".into(), message: "并发".into() }.is_retryable());
+        assert!(ChatError::GlmBusinessError { code: "1303".into(), message: "频率".into() }.is_retryable());
+        assert!(!ChatError::GlmBusinessError { code: "1304".into(), message: "限额".into() }.is_retryable());
+        assert!(!ChatError::GlmBusinessError { code: "1113".into(), message: "余额".into() }.is_retryable());
     }
 
     #[tokio::test]
@@ -290,7 +462,6 @@ mod tests {
             })
             .await;
 
-        let direct_result: Result<String, ChatError> = Ok("hello".to_string());
-        assert_eq!(retried_result.unwrap(), direct_result.unwrap());
+        assert_eq!(retried_result.unwrap(), "hello".to_string());
     }
 }
