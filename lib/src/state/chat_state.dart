@@ -404,7 +404,8 @@ class ChatState extends ChangeNotifier {
                 _errorMessage = activeError;
               }
               // 检查已保存的消息而非流式内容（loadConversation 会清空 _currentStreamingContent）
-              final hasAssistantResponse = _messages.isNotEmpty &&
+              final hasAssistantResponse =
+                  _messages.isNotEmpty &&
                   _messages.last.role == MessageRole.assistant;
               if (_errorMessage == null && !hasAssistantResponse) {
                 _errorMessage = 'AI 响应中断，请点击重试';
@@ -478,7 +479,9 @@ class ChatState extends ChangeNotifier {
     _streamTimeoutTimer?.cancel();
     _streamTimeoutTimer = Timer(const Duration(minutes: 10), () {
       if (_isStreaming) {
-        debugPrint('[ChatState] Streaming timeout after 10 minutes, force ending');
+        debugPrint(
+          '[ChatState] Streaming timeout after 10 minutes, force ending',
+        );
         endStreaming();
       }
     });
@@ -610,7 +613,9 @@ class ChatState extends ChangeNotifier {
         onDone: () {
           if (_isStreaming) {
             // 流结束但没收到 Done 事件（异常断开），兜底处理
-            debugPrint('[ChatState] Stream closed without Done event, fallback cleanup');
+            debugPrint(
+              '[ChatState] Stream closed without Done event, fallback cleanup',
+            );
             final activeError = _errorMessage;
             endStreaming();
             loadConversation(conversationId, preserveError: true).then((_) {
@@ -619,7 +624,8 @@ class ChatState extends ChangeNotifier {
               }
               // 检查已保存的消息而非流式内容（loadConversation 会清空 _currentStreamingContent）
               // 如果 Rust 成功保存了 AI 回复，说明实际上是 FRB Done/close 竞态，不应报错
-              final hasAssistantResponse = _messages.isNotEmpty &&
+              final hasAssistantResponse =
+                  _messages.isNotEmpty &&
                   _messages.last.role == MessageRole.assistant;
               if (_errorMessage == null && !hasAssistantResponse) {
                 _errorMessage = 'AI 响应中断，请点击重试';
@@ -756,7 +762,8 @@ class ChatState extends ChangeNotifier {
                 _errorMessage = activeError;
               }
               // 检查已保存的消息而非流式内容（loadConversation 会清空 _currentStreamingContent）
-              final hasAssistantResponse = _messages.isNotEmpty &&
+              final hasAssistantResponse =
+                  _messages.isNotEmpty &&
                   _messages.last.role == MessageRole.assistant;
               if (_errorMessage == null && !hasAssistantResponse) {
                 _errorMessage = 'AI 响应中断，请点击重试';
