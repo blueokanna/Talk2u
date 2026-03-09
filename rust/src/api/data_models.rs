@@ -20,7 +20,6 @@ pub enum MessageType {
     Mixed,
 }
 
-
 #[frb]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
@@ -52,7 +51,6 @@ pub enum DialogueStyle {
     #[default]
     Mixed,
 }
-
 
 /// 对话
 #[frb]

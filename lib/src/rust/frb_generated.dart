@@ -79,6 +79,8 @@ abstract class RustLibApi extends BaseApi {
   Future<bool> crateApiChatApiAddAssistantMessage({
     required String conversationId,
     required String content,
+    String? model,
+    String? thinkingContent,
   });
 
   Future<bool> crateApiChatApiAddSystemMessage({
@@ -181,6 +183,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Future<bool> crateApiChatApiAddAssistantMessage({
     required String conversationId,
     required String content,
+    String? model,
+    String? thinkingContent,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -188,6 +192,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(conversationId, serializer);
           sse_encode_String(content, serializer);
+          sse_encode_opt_String(model, serializer);
+          sse_encode_opt_String(thinkingContent, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -200,7 +206,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: null,
         ),
         constMeta: kCrateApiChatApiAddAssistantMessageConstMeta,
-        argValues: [conversationId, content],
+        argValues: [conversationId, content, model, thinkingContent],
         apiImpl: this,
       ),
     );
@@ -209,7 +215,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiChatApiAddAssistantMessageConstMeta =>
       const TaskConstMeta(
         debugName: "add_assistant_message",
-        argNames: ["conversationId", "content"],
+        argNames: ["conversationId", "content", "model", "thinkingContent"],
       );
 
   @override

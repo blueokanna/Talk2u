@@ -69,6 +69,8 @@ fn wire__crate__api__chat_api__add_assistant_message_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_conversation_id = <String>::sse_decode(&mut deserializer);
             let api_content = <String>::sse_decode(&mut deserializer);
+            let api_model = <Option<String>>::sse_decode(&mut deserializer);
+            let api_thinking_content = <Option<String>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, ()>((move || {
@@ -76,6 +78,8 @@ fn wire__crate__api__chat_api__add_assistant_message_impl(
                         Result::<_, ()>::Ok(crate::api::chat_api::add_assistant_message(
                             api_conversation_id,
                             api_content,
+                            api_model,
+                            api_thinking_content,
                         ))?;
                     Ok(output_ok)
                 })())

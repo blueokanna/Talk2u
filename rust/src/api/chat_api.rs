@@ -106,13 +106,23 @@ pub fn add_system_message(conversation_id: String, content: String) -> bool {
         .is_ok()
 }
 
-pub fn add_assistant_message(conversation_id: String, content: String) -> bool {
+pub fn add_assistant_message(
+    conversation_id: String,
+    content: String,
+    model: Option<String>,
+    thinking_content: Option<String>,
+) -> bool {
+    let assistant_model = model
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("glm-4.7")
+        .to_string();
     let msg = Message {
         id: uuid::Uuid::new_v4().to_string(),
         role: MessageRole::Assistant,
         content,
-        thinking_content: None,
-        model: "glm-4.7".to_string(),
+        thinking_content,
+        model: assistant_model,
         timestamp: chrono::Utc::now().timestamp_millis(),
         message_type: MessageType::Say,
     };
@@ -369,4 +379,39 @@ pub async fn trigger_memory_summarize(
             let _ = sink.add(event);
         })
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn add_assistant_message_persists_model_and_thinking_content() {
+        let temp_dir = tempdir().expect("create temp dir");
+        init_app(temp_dir.path().to_string_lossy().to_string());
+
+        let conversation = create_conversation();
+
+        let saved = add_assistant_message(
+            conversation.id.clone(),
+            "partial reply".to_string(),
+            Some("glm-4.7-flash".to_string()),
+            Some("reasoning trace".to_string()),
+        );
+
+        assert!(saved);
+
+        let reloaded = get_conversation(conversation.id)
+            .expect("conversation should exist after saving assistant reply");
+        let message = reloaded
+            .messages
+            .last()
+            .expect("assistant message should be persisted");
+
+        assert_eq!(message.role, MessageRole::Assistant);
+        assert_eq!(message.content, "partial reply");
+        assert_eq!(message.model, "glm-4.7-flash");
+        assert_eq!(message.thinking_content.as_deref(), Some("reasoning trace"));
+    }
 }

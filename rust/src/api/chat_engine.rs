@@ -1,4 +1,4 @@
-﻿use super::cognitive_engine::CognitiveEngine;
+use super::cognitive_engine::CognitiveEngine;
 use super::conversation_store::ConversationStore;
 use super::data_models::*;
 use super::error_handler::ChatError;
@@ -548,11 +548,8 @@ impl ChatEngine {
                     return relevance > 0.1;
                 }
                 // 其他身份事实需要有一定相关性或高置信度
-                let relevance = MemoryEngine::compute_relevance_score(
-                    &f.content,
-                    &active_topics,
-                    user_content,
-                );
+                let relevance =
+                    MemoryEngine::compute_relevance_score(&f.content, &active_topics, user_content);
                 relevance > 0.08 || f.confidence >= 0.95
             })
             .cloned()
@@ -1070,8 +1067,7 @@ impl ChatEngine {
 
             // 情感弧线描述
             if !short_term.emotional_arc.is_empty() {
-                let arc_desc =
-                    MemoryEngine::describe_emotional_arc(&short_term.emotional_arc);
+                let arc_desc = MemoryEngine::describe_emotional_arc(&short_term.emotional_arc);
                 if !arc_desc.is_empty() {
                     short_term_prompt.push_str(&format!("【短期记忆·情绪轨迹】\n{}\n", arc_desc));
                 }
@@ -1138,9 +1134,7 @@ impl ChatEngine {
                             );
                             // 相关性阈值 0.15：足够宽松以捕捉间接关联，
                             // 又足够严格以过滤完全无关的事实
-                            if relevance > 0.15
-                                && !relevant_facts.iter().any(|(f, _)| f == fact)
-                            {
+                            if relevance > 0.15 && !relevant_facts.iter().any(|(f, _)| f == fact) {
                                 relevant_facts.push((fact.clone(), relevance));
                             }
                         }
@@ -1184,8 +1178,7 @@ impl ChatEngine {
 
             // 注入相关性达标的其他事实
             if !relevant_facts.is_empty() {
-                context
-                    .push_str("▸ 可能与当前话题相关的已知信息（仅在话题涉及时自然提及）：\n");
+                context.push_str("▸ 可能与当前话题相关的已知信息（仅在话题涉及时自然提及）：\n");
                 for (fact, _score) in &relevant_facts {
                     context.push_str(&format!("  · {}\n", fact));
                 }
@@ -1433,8 +1426,8 @@ impl ChatEngine {
         if !ai_recent.is_empty() {
             let last_content = &ai_recent[0].content;
             let last_len = last_content.chars().count();
-            let last_ends_question = last_content.trim_end().ends_with('？')
-                || last_content.trim_end().ends_with('?');
+            let last_ends_question =
+                last_content.trim_end().ends_with('？') || last_content.trim_end().ends_with('?');
             let last_has_action = last_content.contains('*') || last_content.contains('（');
             let last_para_count = last_content
                 .split('\n')
@@ -1447,12 +1440,10 @@ impl ChatEngine {
             if last_len > 100 {
                 structure_guide.push_str("上次回复比较长，如果情境不需要就短一些。");
             } else if last_len < 20 {
-                structure_guide
-                    .push_str("上次回复很短，如果这次话题需要展开，可以多说一些。");
+                structure_guide.push_str("上次回复很短，如果这次话题需要展开，可以多说一些。");
             }
             if last_has_action {
-                structure_guide
-                    .push_str("上次用了动作描写，这次试试纯对话或换种动作。");
+                structure_guide.push_str("上次用了动作描写，这次试试纯对话或换种动作。");
             }
             if last_para_count >= 3 {
                 structure_guide.push_str("上次分了好几段，这次试试一口气说完。");

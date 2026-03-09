@@ -61,9 +61,13 @@ Future<bool> addSystemMessage({
 Future<bool> addAssistantMessage({
   required String conversationId,
   required String content,
+  String? model,
+  String? thinkingContent,
 }) => RustLib.instance.api.crateApiChatApiAddAssistantMessage(
   conversationId: conversationId,
   content: content,
+  model: model,
+  thinkingContent: thinkingContent,
 );
 
 Future<bool> restartStory({required String conversationId}) => RustLib

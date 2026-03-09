@@ -7,24 +7,33 @@ use futures::StreamExt;
 struct StreamTimeoutConfig {
     connect_timeout_secs: u64,
     tcp_keepalive_secs: u64,
+    first_chunk_stall_secs: u64,
+    subsequent_chunk_stall_secs: u64,
 }
 
 impl StreamTimeoutConfig {
     /// 根据模型选择合适的连接配置。
-    /// 生成阶段不再施加本地时间上限，只保留建连超时与 keepalive。
+    /// 不设置整段生成总时限，仅对首块/后续块的「长期静默」做宽松保护，
+    /// 防止底层连接静默失活后一直挂起。
     fn for_model(model: &str) -> Self {
         match model {
             "glm-4-air" => Self {
                 connect_timeout_secs: 30,
                 tcp_keepalive_secs: 15,
+                first_chunk_stall_secs: 300,
+                subsequent_chunk_stall_secs: 180,
             },
             "glm-4-long" => Self {
                 connect_timeout_secs: 30,
                 tcp_keepalive_secs: 15,
+                first_chunk_stall_secs: 300,
+                subsequent_chunk_stall_secs: 180,
             },
             _ => Self {
                 connect_timeout_secs: 30,
                 tcp_keepalive_secs: 15,
+                first_chunk_stall_secs: 180,
+                subsequent_chunk_stall_secs: 120,
             },
         }
     }
@@ -37,9 +46,9 @@ impl StreamingHandler {
     /// 流式聊天请求，带完善的中断恢复机制
     ///
     /// 核心改进（解决「AI响应中断」）：
-    /// 1. 按模型分级超时：推理模型(5min) > 长上下文(5min) > 对话(3min)
+    /// 1. 仅对长期静默断流做宽松保护，不再对整段生成设置本地总时限
     /// 2. 流中断时保留已收到的内容（partial recovery）
-    /// 3. 连接级重试（3次）+ 数据块超时容忍
+    /// 3. 连接级重试（3次）+ 长静默 stall timeout 容忍
     /// 4. TCP keepalive防止NAT/代理断开空闲连接
     /// 5. 更细粒度的错误分类，便于上层决策
     pub async fn stream_chat(
@@ -66,15 +75,14 @@ impl StreamingHandler {
         // 根据模型选择超时配置
         let timeout_config = StreamTimeoutConfig::for_model(model_name);
 
-        // ═══ HTTP 客户端：移除 read_timeout，改用手动 per-chunk 超时 ═══
-        // read_timeout 会在 SSE 流中模型推理间歇（两个 chunk 之间）误杀连接，
-        // 这是「AI 响应中断」的主要原因。改用 tokio::time::timeout 对每个 chunk
-        // 单独计时，首 chunk 允许更长等待（模型预热），后续 chunk 更短。
+        // ═══ HTTP 客户端：不设置 read_timeout，由宽松的 stall timeout 接管 ═══
+        // read_timeout 会在 SSE 流的正常推理停顿期间误杀连接。
+        // 这里仅保留建连超时，并在读取流时对「长时间完全无数据」做本地保护。
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(
                 timeout_config.connect_timeout_secs,
             ))
-            // 不设 read_timeout — 由下方 per-chunk tokio::time::timeout 接管
+            // 不设 read_timeout — 由下方宽松的 stall timeout 接管
             // 不设 timeout — 对 SSE 流式响应，总超时会误杀正常传输
             .tcp_keepalive(std::time::Duration::from_secs(
                 timeout_config.tcp_keepalive_secs,
@@ -165,9 +173,40 @@ impl StreamingHandler {
         let mut chunk_count: u32 = 0;
 
         loop {
-            let chunk_result = match stream.next().await {
-                Some(result) => result,
-                None => break,
+            let chunk_timeout_secs = if chunk_count == 0 {
+                timeout_config.first_chunk_stall_secs
+            } else {
+                timeout_config.subsequent_chunk_stall_secs
+            };
+            let chunk_timeout = std::time::Duration::from_secs(chunk_timeout_secs);
+
+            let chunk_result = match tokio::time::timeout(chunk_timeout, stream.next()).await {
+                Ok(Some(result)) => result,
+                Ok(None) => break,
+                Err(_) => {
+                    let has_partial_content = !full_content.is_empty() || !full_thinking.is_empty();
+
+                    if has_partial_content {
+                        let warn_msg = format!(
+                            "[{}] 数据流静默超时（{}秒，无新数据），保留已接收内容（{}字）",
+                            model_name,
+                            chunk_timeout_secs,
+                            full_content.len() + full_thinking.len()
+                        );
+                        eprintln!("{}", warn_msg);
+                        return Ok((full_content, full_thinking));
+                    }
+
+                    let err_msg = format!(
+                        "[{}] 数据流等待超时（{}秒未收到数据），请重试",
+                        model_name, chunk_timeout_secs
+                    );
+                    let err = ChatError::StreamError {
+                        message: err_msg.clone(),
+                    };
+                    on_event(ChatStreamEvent::Error(err_msg));
+                    return Err(err);
+                }
             };
 
             let chunk = match chunk_result {

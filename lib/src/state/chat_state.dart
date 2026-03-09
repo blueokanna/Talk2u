@@ -95,6 +95,13 @@ class ChatState extends ChangeNotifier {
     notifyListeners();
   }
 
+  String _assistantModelForPersistence() {
+    if (_selectedModel == thinkingModel) {
+      return chatModel;
+    }
+    return _selectedModel;
+  }
+
   // ── 对话风格 ──
 
   void setDialogueStyle(DialogueStyle style) {
@@ -404,9 +411,13 @@ class ChatState extends ChangeNotifier {
   void _cancelExistingSubscription() {
     _streamSubscription?.cancel();
     _streamSubscription = null;
+    _retryDoneTimer?.cancel();
+    _retryDoneTimer = null;
   }
 
   void startStreaming() {
+    _retryDoneTimer?.cancel();
+    _retryDoneTimer = null;
     _isStreaming = true;
     _currentStreamingContent = '';
     _currentThinkingContent = '';
@@ -549,6 +560,10 @@ class ChatState extends ChangeNotifier {
       if (_doneEventReceived || !_isStreaming) return;
       if (_currentConversationId != conversationId) return;
 
+      final partialContent = _currentStreamingContent.trim();
+      final partialThinking = _currentThinkingContent.trim();
+      final partialModel = _assistantModelForPersistence();
+
       debugPrint(
         '[ChatState] Stream closed without Done after 2s grace (conv=$conversationId)',
       );
@@ -570,14 +585,16 @@ class ChatState extends ChangeNotifier {
           return;
         }
 
-        final partialContent = _currentStreamingContent.trim();
         if (partialContent.isNotEmpty) {
           final persisted = await _persistPartialAssistantReply(
             conversationId,
             partialContent,
+            model: partialModel,
+            thinkingContent: partialThinking.isEmpty ? null : partialThinking,
           );
           if (persisted) {
             _errorMessage = null;
+            _lastFailedContent = null;
             notifyListeners();
             return;
           }
@@ -602,12 +619,16 @@ class ChatState extends ChangeNotifier {
 
   Future<bool> _persistPartialAssistantReply(
     String conversationId,
-    String content,
-  ) async {
+    String content, {
+    required String model,
+    String? thinkingContent,
+  }) async {
     try {
       final saved = await rust_api.addAssistantMessage(
         conversationId: conversationId,
         content: content,
+        model: model,
+        thinkingContent: thinkingContent,
       );
       if (!saved) return false;
       await loadConversation(conversationId, preserveError: true);
