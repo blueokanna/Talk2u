@@ -6,7 +6,10 @@ use futures::StreamExt;
 /// 流式请求的超时配置（按模型角色分级）
 struct StreamTimeoutConfig {
     connect_timeout_secs: u64,
-    read_timeout_secs: u64,
+    /// 首个数据块的最大等待时间（模型推理预热，可能较长）
+    first_chunk_timeout_secs: u64,
+    /// 后续数据块之间的最大间隔
+    subsequent_chunk_timeout_secs: u64,
     tcp_keepalive_secs: u64,
 }
 
@@ -18,18 +21,21 @@ impl StreamTimeoutConfig {
         match model {
             "glm-4-air" => Self {
                 connect_timeout_secs: 30,
-                read_timeout_secs: 300,   // 推理模型思考时间长，5分钟
-                tcp_keepalive_secs: 20,
+                first_chunk_timeout_secs: 300,     // 推理模型首 token 最长等 5 分钟
+                subsequent_chunk_timeout_secs: 120, // 推理链中间段可能有长停顿
+                tcp_keepalive_secs: 15,
             },
             "glm-4-long" => Self {
                 connect_timeout_secs: 30,
-                read_timeout_secs: 300,   // 长上下文处理需要更多时间
-                tcp_keepalive_secs: 20,
+                first_chunk_timeout_secs: 300,     // 长上下文处理预热长
+                subsequent_chunk_timeout_secs: 120,
+                tcp_keepalive_secs: 15,
             },
             _ => Self {
                 connect_timeout_secs: 30,
-                read_timeout_secs: 180,   // 标准对话模型 3 分钟
-                tcp_keepalive_secs: 20,
+                first_chunk_timeout_secs: 180,     // 标准模型首 token 最长 3 分钟
+                subsequent_chunk_timeout_secs: 90,  // 正常对话块间不应超过 90 秒
+                tcp_keepalive_secs: 15,
             },
         }
     }
@@ -69,29 +75,29 @@ impl StreamingHandler {
         // 根据模型选择超时配置
         let timeout_config = StreamTimeoutConfig::for_model(model_name);
 
+        // ═══ HTTP 客户端：移除 read_timeout，改用手动 per-chunk 超时 ═══
+        // read_timeout 会在 SSE 流中模型推理间歇（两个 chunk 之间）误杀连接，
+        // 这是「AI 响应中断」的主要原因。改用 tokio::time::timeout 对每个 chunk
+        // 单独计时，首 chunk 允许更长等待（模型预热），后续 chunk 更短。
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(timeout_config.connect_timeout_secs))
+            // 不设 read_timeout — 由下方 per-chunk tokio::time::timeout 接管
+            // 不设 timeout — 对 SSE 流式响应，总超时会误杀正常传输
+            .tcp_keepalive(std::time::Duration::from_secs(timeout_config.tcp_keepalive_secs))
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .pool_max_idle_per_host(4)
+            .build()
+            .map_err(|e| ChatError::NetworkError {
+                message: e.to_string(),
+            })?;
+
         let response = retry_handler
             .execute_with_retry(|| {
+                let client = client.clone();
                 let u = url_owned.clone();
                 let t = token_owned.clone();
                 let b = body_clone.clone();
-                let connect_timeout = timeout_config.connect_timeout_secs;
-                let read_timeout = timeout_config.read_timeout_secs;
-                let keepalive = timeout_config.tcp_keepalive_secs;
                 async move {
-                    let client = reqwest::Client::builder()
-                        // 不设置 timeout（总超时）— 对 SSE 流式响应，总超时会在
-                        // 响应还在正常传输时误杀连接。
-                        .connect_timeout(std::time::Duration::from_secs(connect_timeout))
-                        .read_timeout(std::time::Duration::from_secs(read_timeout))
-                        // 启用 TCP keepalive，防止长时间空闲连接被中间代理/NAT 断开
-                        .tcp_keepalive(std::time::Duration::from_secs(keepalive))
-                        // 启用连接池保持，减少重复握手开销
-                        .pool_idle_timeout(std::time::Duration::from_secs(90))
-                        .pool_max_idle_per_host(2)
-                        .build()
-                        .map_err(|e| ChatError::NetworkError {
-                            message: e.to_string(),
-                        })?;
                     let resp = client
                         .post(&u)
                         .header("Authorization", format!("Bearer {}", &t))
@@ -163,7 +169,42 @@ impl StreamingHandler {
         let mut raw_response_preview = String::new();
         let mut chunk_count: u32 = 0;
 
-        while let Some(chunk_result) = stream.next().await {
+        // ═══ Per-chunk 超时：替代 reqwest read_timeout ═══
+        // 首个 chunk 允许更长等待（模型推理预热），后续缩短。
+        // 这比 read_timeout 更精确：read_timeout 会在推理间歇误杀整个流，
+        // 而 per-chunk 超时只在真正无响应时触发。
+        let first_chunk_timeout = std::time::Duration::from_secs(timeout_config.first_chunk_timeout_secs);
+        let subsequent_chunk_timeout = std::time::Duration::from_secs(timeout_config.subsequent_chunk_timeout_secs);
+
+        loop {
+            let chunk_timeout = if chunk_count == 0 { first_chunk_timeout } else { subsequent_chunk_timeout };
+
+            let chunk_result = match tokio::time::timeout(chunk_timeout, stream.next()).await {
+                Ok(Some(result)) => result,
+                Ok(None) => break, // Stream ended normally
+                Err(_elapsed) => {
+                    // ═══ Per-chunk 超时触发 ═══
+                    let has_partial = !full_content.is_empty() || !full_thinking.is_empty();
+                    if has_partial {
+                        let warn_msg = format!(
+                            "[{}] 服务器 {}秒 未返回新数据（已收到 {} 字），保留已接收内容",
+                            model_name, chunk_timeout.as_secs(),
+                            full_content.len() + full_thinking.len()
+                        );
+                        on_event(ChatStreamEvent::Error(warn_msg));
+                        return Ok((full_content, full_thinking));
+                    }
+                    let err_msg = if chunk_count == 0 {
+                        format!("[{}] 等待首个响应超时（{}秒），服务器可能过载，请重试", model_name, chunk_timeout.as_secs())
+                    } else {
+                        format!("[{}] 读取超时（{}秒无新数据），请重试", model_name, chunk_timeout.as_secs())
+                    };
+                    let err = ChatError::StreamError { message: err_msg.clone() };
+                    on_event(ChatStreamEvent::Error(err_msg));
+                    return Err(err);
+                }
+            };
+
             let chunk = match chunk_result {
                 Ok(bytes) => bytes,
                 Err(e) => {

@@ -271,15 +271,21 @@ pub async fn send_message(
     )
     .await;
 
+    // 仅在 Done 未发送时报错：Done 已发送说明回复已成功生成并保存，
+    // 后续步骤（如事实提取）超时不应覆盖成功状态
     match pipeline_result {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
-            let _ = sink.add(ChatStreamEvent::Error(e.to_string()));
+            if !done_sent.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = sink.add(ChatStreamEvent::Error(e.to_string()));
+            }
         }
         Err(_timeout) => {
-            let _ = sink.add(ChatStreamEvent::Error(
-                "处理超时（5分钟），请缩短对话或重试".to_string(),
-            ));
+            if !done_sent.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = sink.add(ChatStreamEvent::Error(
+                    "处理超时（5分钟），请缩短对话或重试".to_string(),
+                ));
+            }
         }
     }
 
@@ -287,7 +293,8 @@ pub async fn send_message(
         let _ = sink.add(ChatStreamEvent::Done);
     }
 
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // 给 FRB 事件队列留出刷新时间，确保 Done 事件在流关闭前送达 Dart
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 }
 
 pub async fn regenerate_response(
@@ -342,12 +349,16 @@ pub async fn regenerate_response(
     match pipeline_result {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
-            let _ = sink.add(ChatStreamEvent::Error(e.to_string()));
+            if !done_sent.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = sink.add(ChatStreamEvent::Error(e.to_string()));
+            }
         }
         Err(_timeout) => {
-            let _ = sink.add(ChatStreamEvent::Error(
-                "处理超时（5分钟），请缩短对话或重试".to_string(),
-            ));
+            if !done_sent.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = sink.add(ChatStreamEvent::Error(
+                    "处理超时（5分钟），请缩短对话或重试".to_string(),
+                ));
+            }
         }
     }
 
@@ -355,7 +366,7 @@ pub async fn regenerate_response(
         let _ = sink.add(ChatStreamEvent::Done);
     }
 
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 }
 
 pub async fn trigger_memory_summarize(

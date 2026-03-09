@@ -39,6 +39,9 @@ class ChatState extends ChangeNotifier {
   Timer? _streamThrottleTimer;
   bool _streamDirty = false;
 
+  // Done 事件追踪：防止 FRB 流关闭与 Done 事件的竞态条件
+  bool _doneEventReceived = false;
+
   // Getters
   String? get currentConversationId => _currentConversationId;
   bool get enableThinking => _enableThinking;
@@ -352,69 +355,7 @@ class ChatState extends ChangeNotifier {
         enableThinking: _enableThinking,
       );
 
-      _streamSubscription = stream.listen(
-        (event) {
-          try {
-            event.when(
-              contentDelta: (delta) => appendStreamingContent(delta),
-              thinkingDelta: (delta) => appendThinkingContent(delta),
-              done: () {
-                final activeError = _errorMessage;
-                endStreaming();
-                loadConversation(conversationId, preserveError: true).then((_) {
-                  if (activeError != null && _errorMessage == null) {
-                    _errorMessage = activeError;
-                  }
-                  refreshConversationList();
-                  if (_errorMessage == null) {
-                    _checkAndTriggerMemorySummarize(conversationId);
-                  }
-                  notifyListeners();
-                });
-              },
-              error: (msg) {
-                if (msg == '__RETRY_RESET__') {
-                  _currentStreamingContent = '';
-                  _currentThinkingContent = '';
-                  _streamDirty = true;
-                  return;
-                }
-                _errorMessage = msg;
-                debugPrint('[ChatState] Regenerate error event: $msg');
-                notifyListeners();
-              },
-            );
-          } catch (e) {
-            debugPrint('[ChatState] Error in regenerate stream event: $e');
-            if (_isStreaming) endStreaming();
-          }
-        },
-        onError: (e) {
-          debugPrint('[ChatState] Regenerate stream error: $e');
-          if (_isStreaming) endStreaming();
-          _errorMessage = e.toString();
-          notifyListeners();
-        },
-        onDone: () {
-          if (_isStreaming) {
-            final activeError = _errorMessage;
-            endStreaming();
-            loadConversation(conversationId, preserveError: true).then((_) {
-              if (activeError != null && _errorMessage == null) {
-                _errorMessage = activeError;
-              }
-              // 检查已保存的消息而非流式内容（loadConversation 会清空 _currentStreamingContent）
-              final hasAssistantResponse =
-                  _messages.isNotEmpty &&
-                  _messages.last.role == MessageRole.assistant;
-              if (_errorMessage == null && !hasAssistantResponse) {
-                _errorMessage = 'AI 响应中断，请点击重试';
-              }
-              notifyListeners();
-            });
-          }
-        },
-      );
+      _listenToChatStream(stream, conversationId);
     } catch (e) {
       debugPrint('Failed to regenerate response: $e');
       if (_isStreaming) endStreaming();
@@ -465,6 +406,7 @@ class ChatState extends ChangeNotifier {
     _currentThinkingContent = '';
     _errorMessage = null;
     _streamDirty = false;
+    _doneEventReceived = false;
     // 启动节流定时器：每 30ms 刷新一次 UI，实现逐字显示效果
     _streamThrottleTimer?.cancel();
     _streamThrottleTimer = Timer.periodic(const Duration(milliseconds: 30), (
@@ -482,6 +424,7 @@ class ChatState extends ChangeNotifier {
         debugPrint(
           '[ChatState] Streaming timeout after 10 minutes, force ending',
         );
+        _errorMessage ??= '请求超时（10分钟），请重试或缩短对话';
         endStreaming();
       }
     });
@@ -510,6 +453,131 @@ class ChatState extends ChangeNotifier {
       _streamDirty = false;
     }
     notifyListeners();
+  }
+
+  // ═══════════════════════════════════════════
+  //  统一流式监听器（消除 3 处重复代码）
+  // ═══════════════════════════════════════════
+
+  /// 监听 Rust FFI 返回的 ChatStreamEvent 流。
+  /// 统一处理 contentDelta / thinkingDelta / done / error / onDone 竞态。
+  /// [conversationId] 用于防止切换对话后的陈旧回调。
+  void _listenToChatStream(
+    Stream<ChatStreamEvent> stream,
+    String conversationId,
+  ) {
+    _streamSubscription = stream.listen(
+      (event) {
+        // 陈旧会话守卫：用户已切换到其他对话，忽略旧流事件
+        if (_currentConversationId != conversationId) return;
+
+        try {
+          event.when(
+            contentDelta: (delta) => appendStreamingContent(delta),
+            thinkingDelta: (delta) => appendThinkingContent(delta),
+            done: () {
+              _doneEventReceived = true;
+              final activeError = _errorMessage;
+              endStreaming();
+              // 陈旧守卫：endStreaming 之后再检查一次
+              if (_currentConversationId != conversationId) return;
+              loadConversation(conversationId, preserveError: true).then((_) {
+                if (activeError != null && _errorMessage == null) {
+                  _errorMessage = activeError;
+                }
+                refreshConversationList();
+                if (_errorMessage == null) {
+                  _checkAndTriggerMemorySummarize(conversationId);
+                }
+                notifyListeners();
+              });
+            },
+            error: (msg) {
+              if (msg == '__RETRY_RESET__') {
+                _currentStreamingContent = '';
+                _currentThinkingContent = '';
+                _streamDirty = true;
+                return;
+              }
+              _errorMessage = msg;
+              debugPrint('[ChatState] Stream error event: $msg');
+              notifyListeners();
+            },
+          );
+        } catch (e) {
+          debugPrint('[ChatState] Error processing stream event: $e');
+          if (_isStreaming) endStreaming();
+        }
+      },
+      onError: (e) {
+        debugPrint('[ChatState] Stream error: $e');
+        if (_isStreaming) endStreaming();
+        _errorMessage = e.toString();
+        if (_currentConversationId == conversationId) {
+          loadConversation(conversationId, preserveError: true).then((_) {
+            notifyListeners();
+          });
+        } else {
+          notifyListeners();
+        }
+      },
+      onDone: () {
+        // Done 事件已通过 event handler 处理，无需兜底
+        if (!_isStreaming || _doneEventReceived) return;
+
+        // ═══ FRB 竞态防护（递增间隔多次重试）═══
+        // flutter_rust_bridge 的流关闭信号可能先于最后一个 Done 数据事件到达。
+        // 给 Dart 事件循环多个宽限窗口来处理尚在队列中的 Done 事件。
+        final activeError = _errorMessage;
+        _retryDoneCheck(conversationId, activeError, 0);
+      },
+    );
+  }
+
+  /// FRB 竞态防护：递增间隔检查 Done 事件是否已到达。
+  /// 总窗口约 2 秒（300 + 700 + 1000ms），比单次 500ms 更可靠。
+  void _retryDoneCheck(
+    String conversationId,
+    String? activeError,
+    int attempt,
+  ) {
+    const delays = [300, 700, 1000]; // 累计 300 → 1000 → 2000ms
+
+    if (attempt >= delays.length) {
+      // 所有重试耗尽，做最终判定
+      if (_doneEventReceived || !_isStreaming) return;
+      if (_currentConversationId != conversationId) return;
+
+      debugPrint(
+        '[ChatState] Stream closed without Done after 2s grace (conv=$conversationId)',
+      );
+      endStreaming();
+      loadConversation(conversationId, preserveError: true).then((_) {
+        if (activeError != null && _errorMessage == null) {
+          _errorMessage = activeError;
+        }
+        final hasAssistantResponse =
+            _messages.isNotEmpty &&
+            _messages.last.role == MessageRole.assistant;
+        if (hasAssistantResponse) {
+          // Rust 侧已保存回复，只是 Done 事件被竞态吞掉了
+          refreshConversationList();
+          if (_errorMessage == null) {
+            _checkAndTriggerMemorySummarize(conversationId);
+          }
+        } else if (_errorMessage == null) {
+          _errorMessage = 'AI 响应中断，请点击重试';
+        }
+        notifyListeners();
+      });
+      return;
+    }
+
+    Future.delayed(Duration(milliseconds: delays[attempt]), () {
+      if (_doneEventReceived || !_isStreaming) return;
+      if (_currentConversationId != conversationId) return;
+      _retryDoneCheck(conversationId, activeError, attempt + 1);
+    });
   }
 
   Future<void> sendMessage(String content) async {
@@ -553,88 +621,7 @@ class ChatState extends ChangeNotifier {
         enableThinking: _enableThinking,
       );
 
-      _streamSubscription = stream.listen(
-        (event) {
-          try {
-            event.when(
-              contentDelta: (delta) => appendStreamingContent(delta),
-              thinkingDelta: (delta) => appendThinkingContent(delta),
-              done: () {
-                // 保存当前错误状态，loadConversation 不应清除流式过程中产生的错误
-                final activeError = _errorMessage;
-                endStreaming();
-                loadConversation(conversationId, preserveError: true).then((_) {
-                  // 恢复流式过程中的错误（loadConversation 可能已清除）
-                  if (activeError != null && _errorMessage == null) {
-                    _errorMessage = activeError;
-                  }
-                  refreshConversationList();
-                  // 仅在无错误时触发记忆总结
-                  if (_errorMessage == null) {
-                    _checkAndTriggerMemorySummarize(conversationId);
-                  }
-                  notifyListeners();
-                });
-              },
-              error: (msg) {
-                // 重试重置信号：Rust 端发起了降级重试，清空已累积的旧内容
-                if (msg == '__RETRY_RESET__') {
-                  _currentStreamingContent = '';
-                  _currentThinkingContent = '';
-                  _streamDirty = true;
-                  return;
-                }
-                _errorMessage = msg;
-                debugPrint('[ChatState] Stream error event: $msg');
-                // 不立即 endStreaming，等待 Done 事件统一收尾
-                // 如果只有 Error 没有 Done，靠 onDone 兜底
-                notifyListeners();
-              },
-            );
-          } catch (e) {
-            debugPrint('[ChatState] Error processing stream event: $e');
-            if (_isStreaming) {
-              endStreaming();
-            }
-            _errorMessage = '消息处理异常: $e';
-            notifyListeners();
-          }
-        },
-        onError: (e) {
-          debugPrint('[ChatState] Stream error: $e');
-          if (_isStreaming) {
-            endStreaming();
-          }
-          _errorMessage = e.toString();
-          loadConversation(conversationId, preserveError: true).then((_) {
-            notifyListeners();
-          });
-        },
-        onDone: () {
-          if (_isStreaming) {
-            // 流结束但没收到 Done 事件（异常断开），兜底处理
-            debugPrint(
-              '[ChatState] Stream closed without Done event, fallback cleanup',
-            );
-            final activeError = _errorMessage;
-            endStreaming();
-            loadConversation(conversationId, preserveError: true).then((_) {
-              if (activeError != null && _errorMessage == null) {
-                _errorMessage = activeError;
-              }
-              // 检查已保存的消息而非流式内容（loadConversation 会清空 _currentStreamingContent）
-              // 如果 Rust 成功保存了 AI 回复，说明实际上是 FRB Done/close 竞态，不应报错
-              final hasAssistantResponse =
-                  _messages.isNotEmpty &&
-                  _messages.last.role == MessageRole.assistant;
-              if (_errorMessage == null && !hasAssistantResponse) {
-                _errorMessage = 'AI 响应中断，请点击重试';
-              }
-              notifyListeners();
-            });
-          }
-        },
-      );
+      _listenToChatStream(stream, conversationId);
     } catch (e) {
       debugPrint('[ChatState] Failed to create stream: $e');
       endStreaming();
@@ -710,69 +697,7 @@ class ChatState extends ChangeNotifier {
         enableThinking: _enableThinking,
       );
 
-      _streamSubscription = stream.listen(
-        (event) {
-          try {
-            event.when(
-              contentDelta: (delta) => appendStreamingContent(delta),
-              thinkingDelta: (delta) => appendThinkingContent(delta),
-              done: () {
-                final activeError = _errorMessage;
-                endStreaming();
-                loadConversation(conversationId, preserveError: true).then((_) {
-                  if (activeError != null && _errorMessage == null) {
-                    _errorMessage = activeError;
-                  }
-                  refreshConversationList();
-                  if (_errorMessage == null) {
-                    _checkAndTriggerMemorySummarize(conversationId);
-                  }
-                  notifyListeners();
-                });
-              },
-              error: (msg) {
-                if (msg == '__RETRY_RESET__') {
-                  _currentStreamingContent = '';
-                  _currentThinkingContent = '';
-                  _streamDirty = true;
-                  return;
-                }
-                _errorMessage = msg;
-                debugPrint('[ChatState] Retry error event: $msg');
-                notifyListeners();
-              },
-            );
-          } catch (e) {
-            debugPrint('[ChatState] Error in retry stream event: $e');
-            if (_isStreaming) endStreaming();
-          }
-        },
-        onError: (e) {
-          debugPrint('[ChatState] Retry stream error: $e');
-          if (_isStreaming) endStreaming();
-          _errorMessage = e.toString();
-          notifyListeners();
-        },
-        onDone: () {
-          if (_isStreaming) {
-            final activeError = _errorMessage;
-            endStreaming();
-            loadConversation(conversationId, preserveError: true).then((_) {
-              if (activeError != null && _errorMessage == null) {
-                _errorMessage = activeError;
-              }
-              // 检查已保存的消息而非流式内容（loadConversation 会清空 _currentStreamingContent）
-              final hasAssistantResponse =
-                  _messages.isNotEmpty &&
-                  _messages.last.role == MessageRole.assistant;
-              if (_errorMessage == null && !hasAssistantResponse) {
-                _errorMessage = 'AI 响应中断，请点击重试';
-              }
-              notifyListeners();
-            });
-          }
-        },
-      );
+      _listenToChatStream(stream, conversationId);
     } catch (e) {
       setError(e.toString());
     }
