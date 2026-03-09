@@ -263,7 +263,7 @@ pub async fn send_message(
             enable_thinking,
             |event| {
                 if let ChatStreamEvent::Done = &event {
-                    done_sent.store(true, std::sync::atomic::Ordering::Relaxed);
+                    done_sent.store(true, std::sync::atomic::Ordering::Release);
                 }
                 let _ = sink.add(event);
             },
@@ -276,12 +276,12 @@ pub async fn send_message(
     match pipeline_result {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
-            if !done_sent.load(std::sync::atomic::Ordering::Relaxed) {
+            if !done_sent.load(std::sync::atomic::Ordering::Acquire) {
                 let _ = sink.add(ChatStreamEvent::Error(e.to_string()));
             }
         }
         Err(_timeout) => {
-            if !done_sent.load(std::sync::atomic::Ordering::Relaxed) {
+            if !done_sent.load(std::sync::atomic::Ordering::Acquire) {
                 let _ = sink.add(ChatStreamEvent::Error(
                     "处理超时（5分钟），请缩短对话或重试".to_string(),
                 ));
@@ -289,7 +289,7 @@ pub async fn send_message(
         }
     }
 
-    if !done_sent.load(std::sync::atomic::Ordering::Relaxed) {
+    if !done_sent.load(std::sync::atomic::Ordering::Acquire) {
         let _ = sink.add(ChatStreamEvent::Done);
     }
 
@@ -338,7 +338,7 @@ pub async fn regenerate_response(
             enable_thinking,
             |event| {
                 if let ChatStreamEvent::Done = &event {
-                    done_sent.store(true, std::sync::atomic::Ordering::Relaxed);
+                    done_sent.store(true, std::sync::atomic::Ordering::Release);
                 }
                 let _ = sink.add(event);
             },
@@ -349,12 +349,12 @@ pub async fn regenerate_response(
     match pipeline_result {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
-            if !done_sent.load(std::sync::atomic::Ordering::Relaxed) {
+            if !done_sent.load(std::sync::atomic::Ordering::Acquire) {
                 let _ = sink.add(ChatStreamEvent::Error(e.to_string()));
             }
         }
         Err(_timeout) => {
-            if !done_sent.load(std::sync::atomic::Ordering::Relaxed) {
+            if !done_sent.load(std::sync::atomic::Ordering::Acquire) {
                 let _ = sink.add(ChatStreamEvent::Error(
                     "处理超时（5分钟），请缩短对话或重试".to_string(),
                 ));
@@ -362,7 +362,7 @@ pub async fn regenerate_response(
         }
     }
 
-    if !done_sent.load(std::sync::atomic::Ordering::Relaxed) {
+    if !done_sent.load(std::sync::atomic::Ordering::Acquire) {
         let _ = sink.add(ChatStreamEvent::Done);
     }
 

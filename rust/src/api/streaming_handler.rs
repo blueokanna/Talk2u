@@ -186,12 +186,14 @@ impl StreamingHandler {
                     // ═══ Per-chunk 超时触发 ═══
                     let has_partial = !full_content.is_empty() || !full_thinking.is_empty();
                     if has_partial {
+                        // 已收到部分内容时发生超时：保留并返回已接收内容，不作为致命错误上报
+                        // （下游 Dart 会将 Error 事件设为持久 _errorMessage，影响用户体验）
                         let warn_msg = format!(
                             "[{}] 服务器 {}秒 未返回新数据（已收到 {} 字），保留已接收内容",
                             model_name, chunk_timeout.as_secs(),
                             full_content.len() + full_thinking.len()
                         );
-                        on_event(ChatStreamEvent::Error(warn_msg));
+                        eprintln!("{}", warn_msg);
                         return Ok((full_content, full_thinking));
                     }
                     let err_msg = if chunk_count == 0 {
@@ -214,13 +216,13 @@ impl StreamingHandler {
 
                     if has_partial_content {
                         // 已收到部分内容 → 视为「不完整但可用」的响应
-                        // 不再抛出错误，让上层 request_with_fallback 决定是否使用
+                        // 不再发送 Error 事件，避免 Dart 侧设为持久 _errorMessage
                         let warn_msg = format!(
                             "[{}] 数据流在传输中断开（已收到{}字），保留已接收内容",
                             model_name,
                             full_content.len() + full_thinking.len()
                         );
-                        on_event(ChatStreamEvent::Error(warn_msg));
+                        eprintln!("{}", warn_msg);
                         // 直接返回已收到的内容（partial recovery）
                         return Ok((full_content, full_thinking));
                     }

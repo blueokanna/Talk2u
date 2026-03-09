@@ -7,6 +7,9 @@ import 'package:talk2u/src/models/character.dart';
 import 'package:talk2u/src/rust/api/chat_api.dart' as rust_api;
 import 'package:talk2u/src/rust/api/data_models.dart';
 
+@visibleForTesting
+typedef TestStreamSetup = void Function(Stream<ChatStreamEvent>, String);
+
 class ChatState extends ChangeNotifier {
   String? _currentConversationId;
   bool _enableThinking = true;
@@ -21,6 +24,9 @@ class ChatState extends ChangeNotifier {
 
   // 流式超时安全机制
   Timer? _streamTimeoutTimer;
+
+  // FRB 竞态防护：可取消的重试定时器
+  Timer? _retryDoneTimer;
 
   // 角色关联
   Map<String, String> _conversationCharacterMap = {};
@@ -507,19 +513,25 @@ class ChatState extends ChangeNotifier {
         } catch (e) {
           debugPrint('[ChatState] Error processing stream event: $e');
           if (_isStreaming) endStreaming();
+          _errorMessage = e.toString();
+          if (_currentConversationId == conversationId) {
+            loadConversation(conversationId, preserveError: true).then((_) {
+              notifyListeners();
+            });
+          } else {
+            notifyListeners();
+          }
         }
       },
       onError: (e) {
         debugPrint('[ChatState] Stream error: $e');
+        // 陈旧会话守卫：先检查是否仍是当前对话
+        if (_currentConversationId != conversationId) return;
         if (_isStreaming) endStreaming();
         _errorMessage = e.toString();
-        if (_currentConversationId == conversationId) {
-          loadConversation(conversationId, preserveError: true).then((_) {
-            notifyListeners();
-          });
-        } else {
+        loadConversation(conversationId, preserveError: true).then((_) {
           notifyListeners();
-        }
+        });
       },
       onDone: () {
         // Done 事件已通过 event handler 处理，无需兜底
@@ -573,7 +585,8 @@ class ChatState extends ChangeNotifier {
       return;
     }
 
-    Future.delayed(Duration(milliseconds: delays[attempt]), () {
+    _retryDoneTimer?.cancel();
+    _retryDoneTimer = Timer(Duration(milliseconds: delays[attempt]), () {
       if (_doneEventReceived || !_isStreaming) return;
       if (_currentConversationId != conversationId) return;
       _retryDoneCheck(conversationId, activeError, attempt + 1);
@@ -708,6 +721,25 @@ class ChatState extends ChangeNotifier {
     _cancelExistingSubscription();
     _streamThrottleTimer?.cancel();
     _streamTimeoutTimer?.cancel();
+    _retryDoneTimer?.cancel();
     super.dispose();
+  }
+
+  // ── 测试辅助 ──
+
+  /// 仅供测试使用：设置当前对话 ID 并监听流
+  @visibleForTesting
+  void listenToChatStreamForTest(
+    Stream<ChatStreamEvent> stream,
+    String conversationId,
+  ) {
+    _currentConversationId = conversationId;
+    _listenToChatStream(stream, conversationId);
+  }
+
+  /// 仅供测试使用：设置当前对话 ID
+  @visibleForTesting
+  void setCurrentConversationIdForTest(String? id) {
+    _currentConversationId = id;
   }
 }
