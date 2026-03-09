@@ -423,17 +423,6 @@ class ChatState extends ChangeNotifier {
         notifyListeners();
       }
     });
-    // 安全超时：10分钟后自动结束流式状态，防止永久卡死
-    _streamTimeoutTimer?.cancel();
-    _streamTimeoutTimer = Timer(const Duration(minutes: 10), () {
-      if (_isStreaming) {
-        debugPrint(
-          '[ChatState] Streaming timeout after 10 minutes, force ending',
-        );
-        _errorMessage ??= '请求超时（10分钟），请重试或缩短对话';
-        endStreaming();
-      }
-    });
     notifyListeners();
   }
 
@@ -564,22 +553,40 @@ class ChatState extends ChangeNotifier {
         '[ChatState] Stream closed without Done after 2s grace (conv=$conversationId)',
       );
       endStreaming();
-      loadConversation(conversationId, preserveError: true).then((_) {
-        if (activeError != null && _errorMessage == null) {
-          _errorMessage = activeError;
-        }
+      loadConversation(conversationId, preserveError: true).then((_) async {
         final hasAssistantResponse =
             _messages.isNotEmpty &&
             _messages.last.role == MessageRole.assistant;
+
         if (hasAssistantResponse) {
-          // Rust 侧已保存回复，只是 Done 事件被竞态吞掉了
+          if (activeError != null && _errorMessage == null) {
+            _errorMessage = activeError;
+          }
           refreshConversationList();
           if (_errorMessage == null) {
             _checkAndTriggerMemorySummarize(conversationId);
           }
-        } else if (_errorMessage == null) {
-          _errorMessage = 'AI 响应中断，请点击重试';
+          notifyListeners();
+          return;
         }
+
+        final partialContent = _currentStreamingContent.trim();
+        if (partialContent.isNotEmpty) {
+          final persisted = await _persistPartialAssistantReply(
+            conversationId,
+            partialContent,
+          );
+          if (persisted) {
+            _errorMessage = null;
+            notifyListeners();
+            return;
+          }
+        }
+
+        if (activeError != null && _errorMessage == null) {
+          _errorMessage = activeError;
+        }
+        _errorMessage ??= 'AI 响应中断，请点击重试';
         notifyListeners();
       });
       return;
@@ -591,6 +598,26 @@ class ChatState extends ChangeNotifier {
       if (_currentConversationId != conversationId) return;
       _retryDoneCheck(conversationId, activeError, attempt + 1);
     });
+  }
+
+  Future<bool> _persistPartialAssistantReply(
+    String conversationId,
+    String content,
+  ) async {
+    try {
+      final saved = await rust_api.addAssistantMessage(
+        conversationId: conversationId,
+        content: content,
+      );
+      if (!saved) return false;
+      await loadConversation(conversationId, preserveError: true);
+      await refreshConversationList();
+      _checkAndTriggerMemorySummarize(conversationId);
+      return true;
+    } catch (e) {
+      debugPrint('[ChatState] Failed to persist partial assistant reply: $e');
+      return false;
+    }
   }
 
   Future<void> sendMessage(String content) async {

@@ -3,38 +3,27 @@ use super::error_handler::{ChatError, RetryHandler};
 use flutter_rust_bridge::frb;
 use futures::StreamExt;
 
-/// 流式请求的超时配置（按模型角色分级）
+/// 流式请求的连接配置。
 struct StreamTimeoutConfig {
     connect_timeout_secs: u64,
-    /// 首个数据块的最大等待时间（模型推理预热，可能较长）
-    first_chunk_timeout_secs: u64,
-    /// 后续数据块之间的最大间隔
-    subsequent_chunk_timeout_secs: u64,
     tcp_keepalive_secs: u64,
 }
 
 impl StreamTimeoutConfig {
-    /// 根据模型选择合适的超时配置
-    /// 推理模型（glm-4-air）需要更长的首 token 等待时间
-    /// 长上下文模型（glm-4-long）处理大量输入需要更多时间
+    /// 根据模型选择合适的连接配置。
+    /// 生成阶段不再施加本地时间上限，只保留建连超时与 keepalive。
     fn for_model(model: &str) -> Self {
         match model {
             "glm-4-air" => Self {
                 connect_timeout_secs: 30,
-                first_chunk_timeout_secs: 300,     // 推理模型首 token 最长等 5 分钟
-                subsequent_chunk_timeout_secs: 120, // 推理链中间段可能有长停顿
                 tcp_keepalive_secs: 15,
             },
             "glm-4-long" => Self {
                 connect_timeout_secs: 30,
-                first_chunk_timeout_secs: 300,     // 长上下文处理预热长
-                subsequent_chunk_timeout_secs: 120,
                 tcp_keepalive_secs: 15,
             },
             _ => Self {
                 connect_timeout_secs: 30,
-                first_chunk_timeout_secs: 180,     // 标准模型首 token 最长 3 分钟
-                subsequent_chunk_timeout_secs: 90,  // 正常对话块间不应超过 90 秒
                 tcp_keepalive_secs: 15,
             },
         }
@@ -59,16 +48,18 @@ impl StreamingHandler {
         request_body: serde_json::Value,
         on_event: impl Fn(ChatStreamEvent),
     ) -> Result<(String, String), ChatError> {
-        let retry_handler = RetryHandler::new(3, 1000);  // 重试间隔从800ms提升到1000ms
+        let retry_handler = RetryHandler::new(3, 1000); // 重试间隔从800ms提升到1000ms
         let url_owned = url.to_string();
         let token_owned = token.to_string();
         let body_clone = request_body.clone();
 
         // 记录请求模型和 token 预算，便于调试
-        let model_name = request_body.get("model")
+        let model_name = request_body
+            .get("model")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
-        let max_tokens = request_body.get("max_tokens")
+        let max_tokens = request_body
+            .get("max_tokens")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
 
@@ -80,10 +71,14 @@ impl StreamingHandler {
         // 这是「AI 响应中断」的主要原因。改用 tokio::time::timeout 对每个 chunk
         // 单独计时，首 chunk 允许更长等待（模型预热），后续 chunk 更短。
         let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(timeout_config.connect_timeout_secs))
+            .connect_timeout(std::time::Duration::from_secs(
+                timeout_config.connect_timeout_secs,
+            ))
             // 不设 read_timeout — 由下方 per-chunk tokio::time::timeout 接管
             // 不设 timeout — 对 SSE 流式响应，总超时会误杀正常传输
-            .tcp_keepalive(std::time::Duration::from_secs(timeout_config.tcp_keepalive_secs))
+            .tcp_keepalive(std::time::Duration::from_secs(
+                timeout_config.tcp_keepalive_secs,
+            ))
             .pool_idle_timeout(std::time::Duration::from_secs(90))
             .pool_max_idle_per_host(4)
             .build()
@@ -169,42 +164,10 @@ impl StreamingHandler {
         let mut raw_response_preview = String::new();
         let mut chunk_count: u32 = 0;
 
-        // ═══ Per-chunk 超时：替代 reqwest read_timeout ═══
-        // 首个 chunk 允许更长等待（模型推理预热），后续缩短。
-        // 这比 read_timeout 更精确：read_timeout 会在推理间歇误杀整个流，
-        // 而 per-chunk 超时只在真正无响应时触发。
-        let first_chunk_timeout = std::time::Duration::from_secs(timeout_config.first_chunk_timeout_secs);
-        let subsequent_chunk_timeout = std::time::Duration::from_secs(timeout_config.subsequent_chunk_timeout_secs);
-
         loop {
-            let chunk_timeout = if chunk_count == 0 { first_chunk_timeout } else { subsequent_chunk_timeout };
-
-            let chunk_result = match tokio::time::timeout(chunk_timeout, stream.next()).await {
-                Ok(Some(result)) => result,
-                Ok(None) => break, // Stream ended normally
-                Err(_elapsed) => {
-                    // ═══ Per-chunk 超时触发 ═══
-                    let has_partial = !full_content.is_empty() || !full_thinking.is_empty();
-                    if has_partial {
-                        // 已收到部分内容时发生超时：保留并返回已接收内容，不作为致命错误上报
-                        // （下游 Dart 会将 Error 事件设为持久 _errorMessage，影响用户体验）
-                        let warn_msg = format!(
-                            "[{}] 服务器 {}秒 未返回新数据（已收到 {} 字），保留已接收内容",
-                            model_name, chunk_timeout.as_secs(),
-                            full_content.len() + full_thinking.len()
-                        );
-                        eprintln!("{}", warn_msg);
-                        return Ok((full_content, full_thinking));
-                    }
-                    let err_msg = if chunk_count == 0 {
-                        format!("[{}] 等待首个响应超时（{}秒），服务器可能过载，请重试", model_name, chunk_timeout.as_secs())
-                    } else {
-                        format!("[{}] 读取超时（{}秒无新数据），请重试", model_name, chunk_timeout.as_secs())
-                    };
-                    let err = ChatError::StreamError { message: err_msg.clone() };
-                    on_event(ChatStreamEvent::Error(err_msg));
-                    return Err(err);
-                }
+            let chunk_result = match stream.next().await {
+                Some(result) => result,
+                None => break,
             };
 
             let chunk = match chunk_result {

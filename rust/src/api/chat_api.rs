@@ -252,10 +252,8 @@ pub async fn send_message(
     // 使用 done_sent 标记确保 Done 事件只发送一次
     let done_sent = std::sync::atomic::AtomicBool::new(false);
 
-    // 整体管线超时保护（5分钟）：防止多阶段管线累计超过 Flutter 的 10 分钟安全超时
-    let pipeline_result = tokio::time::timeout(
-        std::time::Duration::from_secs(300),
-        engine.send_message(
+    let pipeline_result = engine
+        .send_message(
             &conversation_id,
             &content,
             &chat_model,
@@ -267,24 +265,15 @@ pub async fn send_message(
                 }
                 let _ = sink.add(event);
             },
-        ),
-    )
-    .await;
+        )
+        .await;
 
-    // 仅在 Done 未发送时报错：Done 已发送说明回复已成功生成并保存，
-    // 后续步骤（如事实提取）超时不应覆盖成功状态
+    // 仅在 Done 未发送时报错：Done 已发送说明回复已成功生成并保存。
     match pipeline_result {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
+        Ok(()) => {}
+        Err(e) => {
             if !done_sent.load(std::sync::atomic::Ordering::Acquire) {
                 let _ = sink.add(ChatStreamEvent::Error(e.to_string()));
-            }
-        }
-        Err(_timeout) => {
-            if !done_sent.load(std::sync::atomic::Ordering::Acquire) {
-                let _ = sink.add(ChatStreamEvent::Error(
-                    "处理超时（5分钟），请缩短对话或重试".to_string(),
-                ));
             }
         }
     }
@@ -329,9 +318,8 @@ pub async fn regenerate_response(
 
     let done_sent = std::sync::atomic::AtomicBool::new(false);
 
-    let pipeline_result = tokio::time::timeout(
-        std::time::Duration::from_secs(300),
-        engine.regenerate_response(
+    let pipeline_result = engine
+        .regenerate_response(
             &conversation_id,
             &chat_model,
             &thinking_model,
@@ -342,22 +330,14 @@ pub async fn regenerate_response(
                 }
                 let _ = sink.add(event);
             },
-        ),
-    )
-    .await;
+        )
+        .await;
 
     match pipeline_result {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
+        Ok(()) => {}
+        Err(e) => {
             if !done_sent.load(std::sync::atomic::Ordering::Acquire) {
                 let _ = sink.add(ChatStreamEvent::Error(e.to_string()));
-            }
-        }
-        Err(_timeout) => {
-            if !done_sent.load(std::sync::atomic::Ordering::Acquire) {
-                let _ = sink.add(ChatStreamEvent::Error(
-                    "处理超时（5分钟），请缩短对话或重试".to_string(),
-                ));
             }
         }
     }

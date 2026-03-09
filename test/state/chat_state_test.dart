@@ -158,6 +158,7 @@ void main() {
 
       // After all retries, streaming should be ended
       expect(state.isStreaming, false);
+      expect(state.currentStreamingContent, 'Partial');
     });
 
     test(
