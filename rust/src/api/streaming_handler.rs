@@ -2,6 +2,7 @@ use super::data_models::ChatStreamEvent;
 use super::error_handler::{ChatError, RetryHandler};
 use flutter_rust_bridge::frb;
 use futures::StreamExt;
+use log;
 
 /// 流式请求的连接配置。
 struct StreamTimeoutConfig {
@@ -57,7 +58,7 @@ impl StreamingHandler {
         request_body: serde_json::Value,
         on_event: impl Fn(ChatStreamEvent),
     ) -> Result<(String, String), ChatError> {
-        let retry_handler = RetryHandler::new(3, 1000); // 重试间隔从800ms提升到1000ms
+        let retry_handler = RetryHandler::new(2, 1500); // 减少重试次数+加大间隔，防止触发 API 频率限制
         let url_owned = url.to_string();
         let token_owned = token.to_string();
         let body_clone = request_body.clone();
@@ -71,6 +72,11 @@ impl StreamingHandler {
             .get("max_tokens")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
+
+        log::info!(
+            "[{}] 发起流式请求 | max_tokens={} | retries=2 | interval=1500ms",
+            model_name, max_tokens
+        );
 
         // 根据模型选择超时配置
         let timeout_config = StreamTimeoutConfig::for_model(model_name);
@@ -160,8 +166,7 @@ impl StreamingHandler {
             })
             .await
             .map_err(|e| {
-                let err_msg = format!("[{}] 请求失败: {}", model_name, e);
-                on_event(ChatStreamEvent::Error(err_msg));
+                log::error!("[{}] API 请求最终失败: {}", model_name, e);
                 e
             })?;
 
@@ -193,7 +198,7 @@ impl StreamingHandler {
                             chunk_timeout_secs,
                             full_content.len() + full_thinking.len()
                         );
-                        eprintln!("{}", warn_msg);
+                        log::warn!("{}", warn_msg);
                         return Ok((full_content, full_thinking));
                     }
 
@@ -224,7 +229,7 @@ impl StreamingHandler {
                             model_name,
                             full_content.len() + full_thinking.len()
                         );
-                        eprintln!("{}", warn_msg);
+                        log::warn!("{}", warn_msg);
                         // 直接返回已收到的内容（partial recovery）
                         return Ok((full_content, full_thinking));
                     }
@@ -318,6 +323,7 @@ impl StreamingHandler {
                 max_tokens,
                 raw_response_preview.chars().take(500).collect::<String>()
             );
+            log::warn!("{}", debug_msg);
             on_event(ChatStreamEvent::Error(debug_msg));
         }
 
@@ -327,7 +333,15 @@ impl StreamingHandler {
                 "[{}] 未收到任何数据（服务器未返回SSE流）。可能原因：1)网络中断 2)API Key无效 3)服务器过载。请检查网络和API Key后重试。",
                 model_name
             );
+            log::error!("{}", debug_msg);
             on_event(ChatStreamEvent::Error(debug_msg));
+        }
+
+        if !full_content.is_empty() || !full_thinking.is_empty() {
+            log::info!(
+                "[{}] 流式响应完成 | chunks={} | content_len={} | thinking_len={}",
+                model_name, chunk_count, full_content.len(), full_thinking.len()
+            );
         }
 
         Ok((full_content, full_thinking))

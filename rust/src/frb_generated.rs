@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -21643838;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1986128183;
 
 // Section: executor
 
@@ -151,6 +151,40 @@ fn wire__crate__api__data_models__app_settings_default_impl(
                 transform_result_sse::<_, ()>((move || {
                     let output_ok =
                         Result::<_, ()>::Ok(crate::api::data_models::AppSettings::default())?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__chat_api__clear_logs_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "clear_logs",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok = Result::<_, ()>::Ok({
+                        crate::api::chat_api::clear_logs();
+                    })?;
                     Ok(output_ok)
                 })())
             }
@@ -468,6 +502,44 @@ fn wire__crate__api__chat_api__get_conversation_list_impl(
         },
     )
 }
+fn wire__crate__api__chat_api__get_logs_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "get_logs",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_level_filter =
+                <Option<crate::api::data_models::LogLevel>>::sse_decode(&mut deserializer);
+            let api_limit = <usize>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok = Result::<_, ()>::Ok(crate::api::chat_api::get_logs(
+                        api_level_filter,
+                        api_limit,
+                    ))?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__chat_api__get_settings_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -564,6 +636,39 @@ fn wire__crate__api__chat_api__init_app_impl(
                     let output_ok = Result::<_, ()>::Ok({
                         crate::api::chat_api::init_app(api_data_path);
                     })?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__data_models__log_level_default_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "log_level_default",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok =
+                        Result::<_, ()>::Ok(crate::api::data_models::LogLevel::default())?;
                     Ok(output_ok)
                 })())
             }
@@ -1228,6 +1333,20 @@ impl SseDecode for Vec<crate::api::data_models::ConversationSummary> {
     }
 }
 
+impl SseDecode for Vec<crate::api::data_models::LogEntry> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = vec![];
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::data_models::LogEntry>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for Vec<crate::api::data_models::MemorySearchResult> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1305,6 +1424,35 @@ impl SseDecode for Vec<u8> {
             ans_.push(<u8>::sse_decode(deserializer));
         }
         return ans_;
+    }
+}
+
+impl SseDecode for crate::api::data_models::LogEntry {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_timestamp = <i64>::sse_decode(deserializer);
+        let mut var_level = <crate::api::data_models::LogLevel>::sse_decode(deserializer);
+        let mut var_module = <String>::sse_decode(deserializer);
+        let mut var_message = <String>::sse_decode(deserializer);
+        return crate::api::data_models::LogEntry {
+            timestamp: var_timestamp,
+            level: var_level,
+            module: var_module,
+            message: var_message,
+        };
+    }
+}
+
+impl SseDecode for crate::api::data_models::LogLevel {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::data_models::LogLevel::Info,
+            1 => crate::api::data_models::LogLevel::Warning,
+            2 => crate::api::data_models::LogLevel::Error,
+            _ => unreachable!("Invalid variant for LogLevel: {}", inner),
+        };
     }
 }
 
@@ -1475,6 +1623,19 @@ impl SseDecode for Option<crate::api::data_models::Conversation> {
     }
 }
 
+impl SseDecode for Option<crate::api::data_models::LogLevel> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::data_models::LogLevel>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<crate::api::data_models::MemoryContextCard> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1536,69 +1697,74 @@ fn pde_ffi_dispatcher_primary_impl(
             rust_vec_len,
             data_len,
         ),
-        4 => {
+        4 => wire__crate__api__chat_api__clear_logs_impl(port, ptr, rust_vec_len, data_len),
+        5 => {
             wire__crate__api__chat_api__create_conversation_impl(port, ptr, rust_vec_len, data_len)
         }
-        5 => {
+        6 => {
             wire__crate__api__chat_api__delete_conversation_impl(port, ptr, rust_vec_len, data_len)
         }
-        6 => wire__crate__api__chat_api__delete_message_impl(port, ptr, rust_vec_len, data_len),
-        7 => {
+        7 => wire__crate__api__chat_api__delete_message_impl(port, ptr, rust_vec_len, data_len),
+        8 => {
             wire__crate__api__chat_api__detect_message_type_impl(port, ptr, rust_vec_len, data_len)
         }
-        8 => wire__crate__api__data_models__dialogue_style_default_impl(
+        9 => wire__crate__api__data_models__dialogue_style_default_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        9 => wire__crate__api__chat_api__edit_message_impl(port, ptr, rust_vec_len, data_len),
-        10 => {
+        10 => wire__crate__api__chat_api__edit_message_impl(port, ptr, rust_vec_len, data_len),
+        11 => {
             wire__crate__api__chat_api__get_available_models_impl(port, ptr, rust_vec_len, data_len)
         }
-        11 => wire__crate__api__chat_api__get_conversation_impl(port, ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__chat_api__get_conversation_list_impl(
+        12 => wire__crate__api__chat_api__get_conversation_impl(port, ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__chat_api__get_conversation_list_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        13 => wire__crate__api__chat_api__get_settings_impl(port, ptr, rust_vec_len, data_len),
-        14 => wire__crate__api__chat_api__get_turn_count_impl(port, ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__chat_api__init_app_impl(port, ptr, rust_vec_len, data_len),
-        16 => wire__crate__api__data_models__message_type_default_impl(
+        14 => wire__crate__api__chat_api__get_logs_impl(port, ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__chat_api__get_settings_impl(port, ptr, rust_vec_len, data_len),
+        16 => wire__crate__api__chat_api__get_turn_count_impl(port, ptr, rust_vec_len, data_len),
+        17 => wire__crate__api__chat_api__init_app_impl(port, ptr, rust_vec_len, data_len),
+        18 => {
+            wire__crate__api__data_models__log_level_default_impl(port, ptr, rust_vec_len, data_len)
+        }
+        19 => wire__crate__api__data_models__message_type_default_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        17 => {
+        20 => {
             wire__crate__api__chat_api__regenerate_response_impl(port, ptr, rust_vec_len, data_len)
         }
-        18 => wire__crate__api__chat_api__restart_story_impl(port, ptr, rust_vec_len, data_len),
-        19 => {
+        21 => wire__crate__api__chat_api__restart_story_impl(port, ptr, rust_vec_len, data_len),
+        22 => {
             wire__crate__api__chat_api__rollback_to_message_impl(port, ptr, rust_vec_len, data_len)
         }
-        20 => wire__crate__api__chat_api__save_settings_impl(port, ptr, rust_vec_len, data_len),
-        21 => wire__crate__api__chat_api__search_memories_impl(port, ptr, rust_vec_len, data_len),
-        22 => wire__crate__api__chat_api__send_message_impl(port, ptr, rust_vec_len, data_len),
-        23 => wire__crate__api__chat_api__set_api_key_impl(port, ptr, rust_vec_len, data_len),
-        24 => {
+        23 => wire__crate__api__chat_api__save_settings_impl(port, ptr, rust_vec_len, data_len),
+        24 => wire__crate__api__chat_api__search_memories_impl(port, ptr, rust_vec_len, data_len),
+        25 => wire__crate__api__chat_api__send_message_impl(port, ptr, rust_vec_len, data_len),
+        26 => wire__crate__api__chat_api__set_api_key_impl(port, ptr, rust_vec_len, data_len),
+        27 => {
             wire__crate__api__chat_api__set_dialogue_style_impl(port, ptr, rust_vec_len, data_len)
         }
-        25 => wire__crate__api__chat_api__should_summarize_memory_impl(
+        28 => wire__crate__api__chat_api__should_summarize_memory_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        26 => wire__crate__api__chat_api__trigger_memory_summarize_impl(
+        29 => wire__crate__api__chat_api__trigger_memory_summarize_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        27 => wire__crate__api__chat_api__validate_api_key_impl(port, ptr, rust_vec_len, data_len),
+        30 => wire__crate__api__chat_api__validate_api_key_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -1744,6 +1910,51 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::data_models::DialogueStyle>
     for crate::api::data_models::DialogueStyle
 {
     fn into_into_dart(self) -> crate::api::data_models::DialogueStyle {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::data_models::LogEntry {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.timestamp.into_into_dart().into_dart(),
+            self.level.into_into_dart().into_dart(),
+            self.module.into_into_dart().into_dart(),
+            self.message.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::data_models::LogEntry
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::data_models::LogEntry>
+    for crate::api::data_models::LogEntry
+{
+    fn into_into_dart(self) -> crate::api::data_models::LogEntry {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::data_models::LogLevel {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Info => 0.into_dart(),
+            Self::Warning => 1.into_dart(),
+            Self::Error => 2.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::data_models::LogLevel
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::data_models::LogLevel>
+    for crate::api::data_models::LogLevel
+{
+    fn into_into_dart(self) -> crate::api::data_models::LogLevel {
         self
     }
 }
@@ -2099,6 +2310,16 @@ impl SseEncode for Vec<crate::api::data_models::ConversationSummary> {
     }
 }
 
+impl SseEncode for Vec<crate::api::data_models::LogEntry> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::data_models::LogEntry>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for Vec<crate::api::data_models::MemorySearchResult> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -2156,6 +2377,33 @@ impl SseEncode for Vec<u8> {
         for item in self {
             <u8>::sse_encode(item, serializer);
         }
+    }
+}
+
+impl SseEncode for crate::api::data_models::LogEntry {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i64>::sse_encode(self.timestamp, serializer);
+        <crate::api::data_models::LogLevel>::sse_encode(self.level, serializer);
+        <String>::sse_encode(self.module, serializer);
+        <String>::sse_encode(self.message, serializer);
+    }
+}
+
+impl SseEncode for crate::api::data_models::LogLevel {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::data_models::LogLevel::Info => 0,
+                crate::api::data_models::LogLevel::Warning => 1,
+                crate::api::data_models::LogLevel::Error => 2,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
     }
 }
 
@@ -2291,6 +2539,16 @@ impl SseEncode for Option<crate::api::data_models::Conversation> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <crate::api::data_models::Conversation>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::data_models::LogLevel> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::data_models::LogLevel>::sse_encode(value, serializer);
         }
     }
 }

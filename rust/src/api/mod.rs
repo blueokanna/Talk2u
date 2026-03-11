@@ -1,4 +1,5 @@
 pub mod chat_api;
+pub mod chat_logger;
 pub mod data_models;
 
 pub(crate) mod chat_engine;

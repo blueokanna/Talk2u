@@ -10,7 +10,7 @@ part 'data_models.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `default_chat_model`, `default_thinking_model`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `CompressionImpactLevel`, `DistilledSystemState`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 class AppSettings {
   final String? apiKey;
@@ -158,6 +158,43 @@ enum DialogueStyle {
 
   static Future<DialogueStyle> default_() =>
       RustLib.instance.api.crateApiDataModelsDialogueStyleDefault();
+}
+
+class LogEntry {
+  final PlatformInt64 timestamp;
+  final LogLevel level;
+  final String module;
+  final String message;
+
+  const LogEntry({
+    required this.timestamp,
+    required this.level,
+    required this.module,
+    required this.message,
+  });
+
+  @override
+  int get hashCode =>
+      timestamp.hashCode ^ level.hashCode ^ module.hashCode ^ message.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is LogEntry &&
+          runtimeType == other.runtimeType &&
+          timestamp == other.timestamp &&
+          level == other.level &&
+          module == other.module &&
+          message == other.message;
+}
+
+enum LogLevel {
+  info,
+  warning,
+  error;
+
+  static Future<LogLevel> default_() =>
+      RustLib.instance.api.crateApiDataModelsLogLevelDefault();
 }
 
 class MemoryContextCard {

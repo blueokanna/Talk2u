@@ -118,6 +118,20 @@ Future<void> setApiKey({required String apiKey}) =>
 Future<bool> validateApiKey({required String apiKey}) =>
     RustLib.instance.api.crateApiChatApiValidateApiKey(apiKey: apiKey);
 
+/// 获取最近的日志条目
+/// - level_filter: None=全部, Info=全部, Warning=Warning+Error, Error=仅Error
+/// - limit: 返回条数上限
+Future<List<LogEntry>> getLogs({
+  LogLevel? levelFilter,
+  required BigInt limit,
+}) => RustLib.instance.api.crateApiChatApiGetLogs(
+  levelFilter: levelFilter,
+  limit: limit,
+);
+
+/// 清空日志缓冲区
+Future<void> clearLogs() => RustLib.instance.api.crateApiChatApiClearLogs();
+
 Future<List<ModelInfo>> getAvailableModels() =>
     RustLib.instance.api.crateApiChatApiGetAvailableModels();
 

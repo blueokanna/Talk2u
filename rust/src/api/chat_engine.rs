@@ -7,6 +7,7 @@ use super::knowledge_store::{FactCategory, KnowledgeStore};
 use super::memory_engine::MemoryEngine;
 use super::saydo_detector::SayDoDetector;
 use super::streaming_handler::StreamingHandler;
+use log;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -15,6 +16,26 @@ const BIGMODEL_API_URL: &str = "https://open.bigmodel.cn/api/paas/v4/chat/comple
 const REASONING_TIMEOUT_SECS: u64 = 90;
 const DISTILLATION_TIMEOUT_SECS: u64 = 120;
 const FACT_EXTRACTION_TIMEOUT_SECS: u64 = 60;
+
+// ═══ 模型上下文窗口限制 ═══
+#[allow(dead_code)]
+const GLM_47_MAX_CONTEXT: usize = 128_000;
+const GLM_47_FLASH_MAX_CONTEXT: usize = 128_000;
+#[allow(dead_code)]
+const GLM_4_AIR_MAX_CONTEXT: usize = 128_000;
+#[allow(dead_code)]
+const GLM_4_LONG_MAX_CONTEXT: usize = 1_000_000;
+#[allow(dead_code)]
+const GLM_4_LONG_MAX_OUTPUT: usize = 4_095;
+const GLM_4_LONG_SAFE_INPUT: usize = 900_000; // 留出输出 + 系统开销空间
+
+// 双层思考超时
+const DUAL_THINKING_TIMEOUT_SECS: u64 = 180;
+const SYNTHESIS_TIMEOUT_SECS: u64 = 90;
+const SUMMARIZE_VERIFY_TIMEOUT_SECS: u64 = 120;
+
+// 验证流程最大重试次数
+const MAX_VERIFY_ATTEMPTS: usize = 3;
 
 pub struct ChatEngine {
     jwt_auth: std::sync::Mutex<JwtAuth>,
@@ -75,6 +96,10 @@ impl ChatEngine {
         };
 
         let request_body = Self::build_request_body(enhanced_messages, model, actual_thinking);
+        log::info!(
+            "[request_with_fallback] 第1次尝试 | model={} | thinking={} | messages={}",
+            model, actual_thinking, enhanced_messages.len()
+        );
         match StreamingHandler::stream_chat(BIGMODEL_API_URL, &token, request_body, &filtered_event)
             .await
         {
@@ -105,6 +130,7 @@ impl ChatEngine {
 
         attempt_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         need_content_reset.store(true, std::sync::atomic::Ordering::Relaxed);
+        log::warn!("[request_with_fallback] 降级为6条紧凑消息 | model={}", model);
         let compact = Self::build_compact_retry_messages(enhanced_messages, 6);
         let compact_body = Self::build_request_body(&compact, model, false);
         match StreamingHandler::stream_chat(BIGMODEL_API_URL, &token, compact_body, &filtered_event)
@@ -123,22 +149,32 @@ impl ChatEngine {
         } else {
             model
         };
+        log::warn!(
+            "[request_with_fallback] 最终降级 | model={} | messages=4",
+            fallback_model
+        );
         let fallback_body = Self::build_request_body(&ultra_compact, fallback_model, false);
-        match StreamingHandler::stream_chat(BIGMODEL_API_URL, &token, fallback_body, on_event).await
+        match StreamingHandler::stream_chat(
+            BIGMODEL_API_URL,
+            &token,
+            fallback_body,
+            &filtered_event,
+        )
+        .await
         {
             Ok((content, thinking)) if !content.trim().is_empty() => Ok((content, thinking)),
             Ok(_) => {
                 let diag = if let Ok(errs) = intermediate_errors.lock() {
                     if errs.is_empty() {
-                        "API 多次返回空内容".to_string()
+                        "AI 暂时无法生成回复，请稍后重试".to_string()
                     } else {
                         format!(
-                            "API 多次未能生成内容。诊断: {}",
+                            "AI 多次未能生成回复: {}",
                             errs.last().unwrap_or(&String::new())
                         )
                     }
                 } else {
-                    "API 多次返回空内容".to_string()
+                    "AI 暂时无法生成回复，请稍后重试".to_string()
                 };
                 Err(ChatError::ApiError {
                     status: 0,
@@ -156,6 +192,10 @@ impl ChatEngine {
     ///
     /// 此方法为"尽力而为"：推理失败不阻断对话，仅返回空串。
     /// 增加超时保护：最多等待 REASONING_TIMEOUT_SECS 秒。
+    ///
+    /// 注：当前管线使用 request_enhanced_reasoning 替代，
+    /// 保留此方法作为轻量级备选方案。
+    #[allow(dead_code)]
     async fn request_reasoning(
         &self,
         thinking_model: &str,
@@ -173,6 +213,7 @@ impl ChatEngine {
     }
 
     /// request_reasoning 的内部实现（无超时保护）
+    #[allow(dead_code)]
     async fn request_reasoning_inner(
         &self,
         thinking_model: &str,
@@ -308,15 +349,15 @@ impl ChatEngine {
     /// 参考 GLM 思考模式文档: https://docs.bigmodel.cn/cn/guide/capabilities/thinking-mode
     /// - GLM-4.7: 默认开启 Thinking，支持轮级思考、交错式思考、保留式思考
     /// - GLM-4-AIR: 推理专用模型，支持思考
-    /// - GLM-4.7-FLASH: 快速模型，不支持思考
+    /// - GLM-4.7-FLASH: 快速模型，支持思考模式
     pub fn should_enable_thinking(model: &str, user_preference: bool) -> bool {
         match model {
             // GLM-4.7: 文档明确支持思考模式（默认开启）
             "glm-4.7" => user_preference,
             // GLM-4-AIR: 推理模型，支持思考
             "glm-4-air" => user_preference,
-            // GLM-4.7-FLASH: 快速对话模型，不支持思考
-            "glm-4.7-flash" => false,
+            // GLM-4.7-FLASH: 快速模型，支持思考模式
+            "glm-4.7-flash" => user_preference,
             _ => false,
         }
     }
@@ -371,8 +412,8 @@ impl ChatEngine {
             .map(|s| s.summary.len() / 2 + s.core_facts.iter().map(|f| f.len() / 2).sum::<usize>())
             .sum();
         let total_tokens = msg_tokens + memory_tokens;
-        // 当总 token 超过 48K 或记忆条目超过 15 条时，使用 GLM-4-LONG
-        let needs_long = total_tokens > 48_000 || memory_summaries.len() > 15;
+        // 当总 token 超过 GLM-4.7/Flash 上下文窗口的 70%（约90K）或记忆条目超过 20 条时触发
+        let needs_long = total_tokens > 90_000 || memory_summaries.len() > 20;
         (needs_long, total_tokens)
     }
 
@@ -593,6 +634,8 @@ impl ChatEngine {
     ///   3. 输出结构化分析结论，供 GLM-4.7 参考
     ///
     /// 增加超时保护：最多等待 REASONING_TIMEOUT_SECS 秒。
+    /// 注：新管线使用 request_dual_thinking 替代，此方法保留作为降级路径。
+    #[allow(dead_code)]
     async fn request_enhanced_reasoning(
         &self,
         thinking_model: &str,
@@ -618,6 +661,7 @@ impl ChatEngine {
     }
 
     /// request_enhanced_reasoning 的内部实现（无超时保护）
+    #[allow(dead_code)]
     async fn request_enhanced_reasoning_inner(
         &self,
         thinking_model: &str,
@@ -796,6 +840,1145 @@ impl ChatEngine {
                 (String::new(), String::new())
             }
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  双层思考管线 — Flash + Air 并行思考 → Air 综合
+    //  参考用户需求：用户输入 → 同时 Flash + Air 思考 → Air 综合 → 4.7/Flash 回复
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// 双层思考：并行执行 GLM-4.7-Flash 和 GLM-4-Air 的思考，
+    /// 然后由 GLM-4-Air 综合两者的分析结果。
+    ///
+    /// 管线流程：
+    ///   1a. GLM-4.7-Flash 思考（并行）→ flash_analysis
+    ///   1b. GLM-4-Air 思考（并行）→ air_analysis
+    ///   2.  GLM-4-Air 综合两者 → synthesis
+    ///
+    /// 所有思考过程通过 ThinkingDelta 推送前端。
+    /// 返回: (综合分析结论, 完整思考链)
+    async fn request_dual_thinking(
+        &self,
+        conversation_id: &str,
+        enhanced_messages: &[Message],
+        user_content: &str,
+        on_event: &impl Fn(ChatStreamEvent),
+    ) -> (String, String) {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(DUAL_THINKING_TIMEOUT_SECS),
+            self.request_dual_thinking_inner(
+                conversation_id,
+                enhanced_messages,
+                user_content,
+                on_event,
+            ),
+        )
+        .await;
+
+        result.unwrap_or_default()
+    }
+
+    async fn request_dual_thinking_inner(
+        &self,
+        conversation_id: &str,
+        enhanced_messages: &[Message],
+        _user_content: &str,
+        on_event: &impl Fn(ChatStreamEvent),
+    ) -> (String, String) {
+        let token = {
+            let mut auth = self.jwt_auth.lock().unwrap();
+            auth.get_token()
+        };
+
+        // 构建 Flash 思考消息（快速洞察 + 情绪感知）
+        let flash_messages =
+            self.build_flash_thinking_messages(enhanced_messages, conversation_id);
+        let flash_body = Self::build_request_body(&flash_messages, "glm-4.7-flash", true);
+
+        // 构建 Air 思考消息（深度推理 + 知识检索）
+        let air_messages =
+            self.build_air_thinking_messages(enhanced_messages, conversation_id);
+        let air_body = Self::build_request_body(&air_messages, "glm-4-air", true);
+
+        // 并行执行两个思考（静默收集，完成后统一推送前端）
+        let silent = |_: ChatStreamEvent| {};
+        log::info!("[dual_thinking] 并行启动 Flash + Air 思考");
+
+        let (flash_result, air_result) = futures::join!(
+            StreamingHandler::stream_chat(BIGMODEL_API_URL, &token, flash_body, &silent),
+            StreamingHandler::stream_chat(BIGMODEL_API_URL, &token, air_body, &silent),
+        );
+
+        let (flash_content, flash_thinking) = flash_result.unwrap_or_default();
+        let (air_content, air_thinking) = air_result.unwrap_or_default();
+
+        log::info!(
+            "[dual_thinking] 并行完成 | flash_content={} flash_thinking={} | air_content={} air_thinking={}",
+            flash_content.len(), flash_thinking.len(),
+            air_content.len(), air_thinking.len()
+        );
+
+        // 向前端推送两个思考过程
+        if !flash_thinking.is_empty() {
+            on_event(ChatStreamEvent::ThinkingDelta(
+                "═══ 〔Flash 快速洞察〕 ═══\n".to_string(),
+            ));
+            on_event(ChatStreamEvent::ThinkingDelta(flash_thinking.clone()));
+        }
+        if !air_thinking.is_empty() {
+            on_event(ChatStreamEvent::ThinkingDelta(
+                "\n\n═══ 〔Air 深度推理〕 ═══\n".to_string(),
+            ));
+            on_event(ChatStreamEvent::ThinkingDelta(air_thinking.clone()));
+        }
+
+        // 提取分析结论
+        let flash_analysis = if !flash_content.trim().is_empty() {
+            flash_content
+        } else if !flash_thinking.trim().is_empty() {
+            Self::extract_reasoning_brief(&flash_thinking)
+        } else {
+            String::new()
+        };
+
+        let air_analysis = if !air_content.trim().is_empty() {
+            air_content
+        } else if !air_thinking.trim().is_empty() {
+            Self::extract_reasoning_brief(&air_thinking)
+        } else {
+            String::new()
+        };
+
+        // 如果两个都失败，返回空
+        if flash_analysis.is_empty() && air_analysis.is_empty() {
+            return (
+                String::new(),
+                format!("{}\n{}", flash_thinking, air_thinking),
+            );
+        }
+
+        // Phase 2: GLM-4-Air 综合两者分析结果
+        on_event(ChatStreamEvent::ThinkingDelta(
+            "\n\n═══ 〔综合深度分析〕 ═══\n".to_string(),
+        ));
+
+        let (synthesis, synthesis_thinking) = self
+            .request_air_synthesis(
+                &flash_analysis,
+                &air_analysis,
+                enhanced_messages,
+                on_event,
+            )
+            .await;
+
+        let all_thinking = format!(
+            "═══ Flash 快速洞察 ═══\n{}\n\n═══ Air 深度推理 ═══\n{}\n\n═══ 综合分析 ═══\n{}",
+            flash_thinking, air_thinking, synthesis_thinking
+        );
+
+        (synthesis, all_thinking)
+    }
+
+    /// 构建 Flash 思考消息（快速直觉 + 情绪感知）
+    fn build_flash_thinking_messages(
+        &self,
+        enhanced_messages: &[Message],
+        conversation_id: &str,
+    ) -> Vec<Message> {
+        let mut messages = enhanced_messages.to_vec();
+
+        let all_facts = self.knowledge_store.get_all_facts(conversation_id);
+        let fact_brief = if !all_facts.is_empty() {
+            let high_conf: Vec<_> = all_facts
+                .iter()
+                .filter(|f| f.confidence >= 0.8)
+                .take(10)
+                .collect();
+            if !high_conf.is_empty() {
+                let mut s = String::from("【已知关键事实】\n");
+                for f in &high_conf {
+                    s.push_str(&format!("· {}\n", f.content));
+                }
+                s
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
+        let flash_instruction = Message {
+            id: String::new(),
+            role: MessageRole::System,
+            content: format!(
+                "【快速思考任务 — 第一直觉与情绪感知】\n\
+                 \n\
+                 {}\n\
+                 \n\
+                 你是角色本身。用最快的速度完成以下思考（不要写回复内容）：\n\
+                 \n\
+                 ▸ 本能反应：听到这话，心里第一个感受是什么？\n\
+                 ▸ 情绪判断：对方此刻的情绪状态（具体到哪种情绪，不是笼统的好/不好）\n\
+                 ▸ 关系温度：你们现在的距离感——在靠近、稳定、试探、还是有些微妙？\n\
+                 ▸ 弦外之音：对方有没有言外之意？有的话是什么？\n\
+                 ▸ 回应直觉：你的第一反应是想怎么回？切入点是什么？\n\
+                 ▸ 什么不该做：此刻有什么回应方式是绝对出戏的？\n\
+                 \n\
+                 ■ 输出要求：\n\
+                 - 用自然的思维流，快速精准，300-500字\n\
+                 - 引用对话原文和事实作为依据\n\
+                 - 不要写回复内容，只输出思考过程",
+                fact_brief
+            ),
+            thinking_content: None,
+            model: "system".to_string(),
+            timestamp: 0,
+            message_type: MessageType::Say,
+        };
+
+        let last_user_idx = messages
+            .iter()
+            .rposition(|m| m.role == MessageRole::User);
+        if let Some(idx) = last_user_idx {
+            messages.insert(idx, flash_instruction);
+        } else {
+            messages.push(flash_instruction);
+        }
+
+        messages
+    }
+
+    /// 构建 Air 思考消息（深度推理 + 知识检索）
+    fn build_air_thinking_messages(
+        &self,
+        enhanced_messages: &[Message],
+        conversation_id: &str,
+    ) -> Vec<Message> {
+        let mut messages = enhanced_messages.to_vec();
+
+        let all_facts = self.knowledge_store.get_all_facts(conversation_id);
+        let fact_summary = if !all_facts.is_empty() {
+            let mut summary = String::from("【本地知识库概况】\n");
+            let categories: Vec<(&str, usize)> = vec![
+                ("身份", all_facts.iter().filter(|f| f.category == FactCategory::Identity).count()),
+                ("关系", all_facts.iter().filter(|f| f.category == FactCategory::Relationship).count()),
+                ("事件", all_facts.iter().filter(|f| f.category == FactCategory::Event).count()),
+                ("偏好", all_facts.iter().filter(|f| f.category == FactCategory::Preference).count()),
+                ("承诺", all_facts.iter().filter(|f| f.category == FactCategory::Promise).count()),
+                ("状态", all_facts.iter().filter(|f| f.category == FactCategory::CurrentState).count()),
+            ];
+            for (cat, count) in categories {
+                if count > 0 {
+                    summary.push_str(&format!("  {} 类事实: {} 条\n", cat, count));
+                }
+            }
+            let mut high_conf: Vec<_> = all_facts.iter().filter(|f| f.confidence >= 0.8).collect();
+            high_conf.sort_by(|a, b| {
+                b.confidence
+                    .partial_cmp(&a.confidence)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            if !high_conf.is_empty() {
+                summary.push_str("  高置信度事实（必须遵守）：\n");
+                for fact in high_conf.iter().take(15) {
+                    summary.push_str(&format!("    · {}\n", fact.content));
+                }
+            }
+            summary
+        } else {
+            String::new()
+        };
+
+        let air_instruction = Message {
+            id: String::new(),
+            role: MessageRole::System,
+            content: format!(
+                "【深度推理任务 — 知识增强分析】\n\
+                 \n\
+                 闭上眼，你就是这个角色。对方刚说完这句话。\n\
+                 \n\
+                 {}\n\
+                 \n\
+                 请从以下角度进行深度推演（用自然思维流，不要列编号清单）：\n\
+                 \n\
+                 ▸ 第一反应：听到这话，你心里的感受是什么？\n\
+                 ▸ 知识检索：你脑子里有没有和这件事相关的记忆/事实？\n\
+                   对照知识库，哪些事实与当前话题直接相关？（必须逐条引用原文）\n\
+                   有没有新的信息值得记住？\n\
+                 ▸ 弦外之音：表面意思之下是否有别的含义？\n\
+                 ▸ 上下文线索：最近几轮对话的走向是什么？和这句话有什么连续性？\n\
+                 ▸ 关系直觉：你们此刻的距离感和温度怎么样？\n\
+                 ▸ 回应策略：你想怎么回？\n\
+                   切入方式——动作/接话/反问/沉默后开口？\n\
+                   核心要回应的点是什么？\n\
+                   收束方式——提问/温柔确认/动作/自然停下？\n\
+                   什么方式是绝对不能用的？\n\
+                 \n\
+                 ■ 输出要求：\n\
+                 - 用自然的思维流表达，像是回话前脑海中闪过的念头\n\
+                 - 引用对话原文和知识库事实作为依据\n\
+                 - 500-800字，思考密度优先\n\
+                 - 不要写回复内容，只输出思考过程\n\
+                 - 知识库中的事实必须原样复述，绝不允许遗漏或篡改",
+                fact_summary
+            ),
+            thinking_content: None,
+            model: "system".to_string(),
+            timestamp: 0,
+            message_type: MessageType::Say,
+        };
+
+        let last_user_idx = messages
+            .iter()
+            .rposition(|m| m.role == MessageRole::User);
+        if let Some(idx) = last_user_idx {
+            messages.insert(idx, air_instruction);
+        } else {
+            messages.push(air_instruction);
+        }
+
+        messages
+    }
+
+    /// GLM-4-Air 综合两路思考结果，输出最终分析结论
+    async fn request_air_synthesis(
+        &self,
+        flash_analysis: &str,
+        air_analysis: &str,
+        enhanced_messages: &[Message],
+        on_event: &impl Fn(ChatStreamEvent),
+    ) -> (String, String) {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(SYNTHESIS_TIMEOUT_SECS),
+            self.request_air_synthesis_inner(
+                flash_analysis,
+                air_analysis,
+                enhanced_messages,
+                on_event,
+            ),
+        )
+        .await;
+
+        result.unwrap_or_default()
+    }
+
+    async fn request_air_synthesis_inner(
+        &self,
+        flash_analysis: &str,
+        air_analysis: &str,
+        enhanced_messages: &[Message],
+        on_event: &impl Fn(ChatStreamEvent),
+    ) -> (String, String) {
+        let token = {
+            let mut auth = self.jwt_auth.lock().unwrap();
+            auth.get_token()
+        };
+
+        let mut synthesis_messages = enhanced_messages.to_vec();
+
+        let synthesis_instruction = Message {
+            id: String::new(),
+            role: MessageRole::System,
+            content: format!(
+                "【综合分析任务 — 结合两路思考的最终研判】\n\
+                 \n\
+                 你已经从两个不同角度完成了思考，现在需要综合两者得出最终结论：\n\
+                 \n\
+                 ═══ Flash 快速洞察 ═══\n\
+                 {}\n\
+                 \n\
+                 ═══ Air 深度分析 ═══\n\
+                 {}\n\
+                 \n\
+                 请综合以上两路分析，输出最终的回应策略：\n\
+                 \n\
+                 1. 两路分析的共识点（高置信度判断）\n\
+                 2. 分歧点分析（如果有，选择更合理的判断并说明理由）\n\
+                 3. 最终回应策略：\n\
+                    - 情绪定位（此刻你的情绪应该是什么）\n\
+                    - 切入方式（具体的第一句话/动作的方向）\n\
+                    - 核心要表达的内容（不超过3个要点）\n\
+                    - 收束方式（怎么结束这段回复）\n\
+                    - 必须遵守的约束（不能做的事）\n\
+                 \n\
+                 ■ 输出要求：\n\
+                 - 500-800字，结论明确\n\
+                 - 不写回复内容，只输出分析结论\n\
+                 - 引用原始事实和对话内容作为依据",
+                flash_analysis, air_analysis
+            ),
+            thinking_content: None,
+            model: "system".to_string(),
+            timestamp: 0,
+            message_type: MessageType::Say,
+        };
+
+        let last_user_idx = synthesis_messages
+            .iter()
+            .rposition(|m| m.role == MessageRole::User);
+        if let Some(idx) = last_user_idx {
+            synthesis_messages.insert(idx, synthesis_instruction);
+        } else {
+            synthesis_messages.push(synthesis_instruction);
+        }
+
+        let request_body = Self::build_request_body(&synthesis_messages, "glm-4-air", true);
+
+        let reasoning_event = |event: ChatStreamEvent| {
+            if let ChatStreamEvent::ThinkingDelta(_) = &event {
+                on_event(event)
+            }
+        };
+
+        match StreamingHandler::stream_chat(
+            BIGMODEL_API_URL,
+            &token,
+            request_body,
+            &reasoning_event,
+        )
+        .await
+        {
+            Ok((content, thinking)) => {
+                let conclusion = if !content.trim().is_empty() {
+                    content
+                } else if !thinking.trim().is_empty() {
+                    Self::extract_reasoning_brief(&thinking)
+                } else {
+                    String::new()
+                };
+                (conclusion, thinking)
+            }
+            Err(e) => {
+                log::warn!("[air_synthesis] 综合分析失败: {}", e);
+                (String::new(), String::new())
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  验证式上下文总结管线
+    //  GLM-4-Long 总结 → GLM-4.7-Flash 校验 → GLM-4-Air 校验 → 循环
+    //  参考: https://docs.bigmodel.cn/cn/guide/tools/knowledge/contextual
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// 验证式上下文总结：GLM-4-Long 总结后由 Flash 和 Air 依次校验
+    /// 如果校验不通过，循环重试直到合格或达到最大次数
+    async fn verified_summarize_context(
+        &self,
+        messages: &[Message],
+        existing_summaries: &[MemorySummary],
+        on_event: &impl Fn(ChatStreamEvent),
+    ) -> Result<String, ChatError> {
+        let total_tokens = Self::estimate_token_count(messages);
+
+        // 如果上下文超过 GLM-4-Long 的安全处理限制（900K token），先分批处理
+        if total_tokens > GLM_4_LONG_SAFE_INPUT {
+            log::info!(
+                "[verified_summarize] 上下文超过 GLM-4-Long 安全限制 ({} > {}), 启动分批处理",
+                total_tokens, GLM_4_LONG_SAFE_INPUT
+            );
+            return self
+                .batch_process_long_context(messages, existing_summaries, on_event)
+                .await;
+        }
+
+        // 单批处理 + 验证循环
+        for attempt in 0..MAX_VERIFY_ATTEMPTS {
+            log::info!(
+                "[verified_summarize] 尝试 {}/{} | tokens={}",
+                attempt + 1, MAX_VERIFY_ATTEMPTS, total_tokens
+            );
+
+            // Step 1: GLM-4-Long 三级总结（关键无损 + 核心小概括 + 一般大概括）
+            let summary = self
+                .glm4_long_tiered_summarize(messages, existing_summaries)
+                .await;
+
+            if summary.trim().is_empty() {
+                log::warn!("[verified_summarize] GLM-4-Long 总结为空, 重试");
+                continue;
+            }
+
+            // Step 2: GLM-4.7-Flash 校验（启用思考模式）— 检查关键信息和上下文逻辑
+            let flash_ok = self
+                .verify_summary_with_flash(&summary, messages)
+                .await;
+
+            if !flash_ok {
+                log::warn!(
+                    "[verified_summarize] Flash 校验未通过 (attempt {})",
+                    attempt + 1
+                );
+                continue;
+            }
+
+            // Step 3: GLM-4-Air 校验核心内容（启用思考模式）— 第三次检查主要核心内容
+            let air_ok = self
+                .verify_summary_with_air(&summary, messages)
+                .await;
+
+            if !air_ok {
+                log::warn!(
+                    "[verified_summarize] Air 校验未通过 (attempt {})",
+                    attempt + 1
+                );
+                continue;
+            }
+
+            // 两项校验都通过
+            log::info!("[verified_summarize] 双重校验通过 (attempt {})", attempt + 1);
+            return Ok(summary);
+        }
+
+        // 最大重试次数后，使用最后一次的总结（降级）
+        log::warn!("[verified_summarize] 达到最大重试次数，使用降级总结");
+        let fallback = self
+            .glm4_long_tiered_summarize(messages, existing_summaries)
+            .await;
+        Ok(fallback)
+    }
+
+    /// GLM-4-Long 三级总结：
+    /// - 第一级：关键信息无损保留（身份/关系/事件/承诺）
+    /// - 第二级：核心内容精炼概括（情感变化/重要观点）
+    /// - 第三级：一般对话高度压缩
+    async fn glm4_long_tiered_summarize(
+        &self,
+        messages: &[Message],
+        existing_summaries: &[MemorySummary],
+    ) -> String {
+        let token = {
+            let mut auth = self.jwt_auth.lock().unwrap();
+            auth.get_token()
+        };
+
+        // 构建上下文
+        let mut context = String::new();
+        if !existing_summaries.is_empty() {
+            context.push_str("【已有记忆摘要】\n");
+            for (i, s) in existing_summaries.iter().enumerate() {
+                context.push_str(&format!(
+                    "{}. [轮次{}-{}] {}\n  事实：{}\n",
+                    i + 1,
+                    s.turn_range_start,
+                    s.turn_range_end,
+                    s.summary,
+                    s.core_facts.join("；")
+                ));
+            }
+            context.push('\n');
+        }
+
+        context.push_str("【需要总结的对话内容】\n");
+        for msg in messages {
+            let role = match msg.role {
+                MessageRole::User => "用户",
+                MessageRole::Assistant => "AI",
+                MessageRole::System => continue,
+            };
+            context.push_str(&format!("{}: {}\n", role, msg.content));
+        }
+
+        let summarize_prompt = format!(
+            "【三级上下文总结任务】\n\
+             你需要对以下对话内容进行三级精度的无损总结，确保记忆体完整。\n\
+             \n\
+             {}\n\
+             \n\
+             请按照以下三个级别进行总结：\n\
+             \n\
+             ## 第一级：关键信息（绝对无损保留）\n\
+             以下信息必须逐条原样保留，不允许任何省略或改写：\n\
+             - 所有角色身份、姓名、年龄、职业\n\
+             - 所有人物关系及变化\n\
+             - 所有承诺、约定、共识\n\
+             - 所有已发生的不可逆事件\n\
+             - 所有金额、数值、时间等精确信息\n\
+             - 当前生效的状态（位置、心情、正在做的事）\n\
+             \n\
+             ## 第二级：核心内容（精炼概括）\n\
+             以下信息进行精炼但保留核心语义：\n\
+             - 情感变化轨迹（关键转折点）\n\
+             - 重要对话的核心观点\n\
+             - 关系温度和互动模式的变化\n\
+             - 未解决的问题或冲突\n\
+             \n\
+             ## 第三级：一般对话（高度压缩）\n\
+             以下信息可以高度压缩为一两句话：\n\
+             - 日常闲聊、寒暄\n\
+             - 重复出现的类似对话\n\
+             - 场景氛围描述\n\
+             \n\
+             ■ 输出格式：\n\
+             【关键信息·无损】\n\
+             - 逐条列出\n\
+             \n\
+             【核心内容·概括】\n\
+             概括段落\n\
+             \n\
+             【一般对话·压缩】\n\
+             压缩描述\n\
+             \n\
+             ■ 总输出控制在3000字以内\n\
+             ■ 信息零丢失原则：第一级信息不允许任何遗漏",
+            context
+        );
+
+        let summarize_messages = vec![
+            Message {
+                id: String::new(),
+                role: MessageRole::System,
+                content: "你是一个高精度的长上下文总结系统。你的任务是在严格保留关键信息的前提下，\
+                         将超长对话压缩为结构化的记忆摘要。"
+                    .to_string(),
+                thinking_content: None,
+                model: "system".to_string(),
+                timestamp: 0,
+                message_type: MessageType::Say,
+            },
+            Message {
+                id: String::new(),
+                role: MessageRole::User,
+                content: summarize_prompt,
+                thinking_content: None,
+                model: "glm-4-long".to_string(),
+                timestamp: 0,
+                message_type: MessageType::Say,
+            },
+        ];
+
+        let request_body = Self::build_request_body(&summarize_messages, "glm-4-long", false);
+        let silent = |_: ChatStreamEvent| {};
+
+        match StreamingHandler::stream_chat(BIGMODEL_API_URL, &token, request_body, &silent).await
+        {
+            Ok((content, _)) => content,
+            Err(e) => {
+                log::error!("[glm4_long_summarize] 总结失败: {}", e);
+                String::new()
+            }
+        }
+    }
+
+    /// GLM-4.7-Flash 校验总结内容（启用思考模式）
+    /// 检查关键信息完整性和上下文逻辑一致性
+    async fn verify_summary_with_flash(
+        &self,
+        summary: &str,
+        original_messages: &[Message],
+    ) -> bool {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(SUMMARIZE_VERIFY_TIMEOUT_SECS),
+            self.verify_summary_with_flash_inner(summary, original_messages),
+        )
+        .await;
+
+        result.unwrap_or(true) // 超时默认通过，不阻断主流程
+    }
+
+    async fn verify_summary_with_flash_inner(
+        &self,
+        summary: &str,
+        original_messages: &[Message],
+    ) -> bool {
+        let token = {
+            let mut auth = self.jwt_auth.lock().unwrap();
+            auth.get_token()
+        };
+
+        // 提取最近对话用于比对
+        let mut key_info = String::new();
+        let mut msg_count = 0;
+        for msg in original_messages.iter().rev().take(30) {
+            if msg.role == MessageRole::System {
+                continue;
+            }
+            let role = match msg.role {
+                MessageRole::User => "用户",
+                MessageRole::Assistant => "AI",
+                MessageRole::System => continue,
+            };
+            key_info = format!("{}: {}\n{}", role, msg.content, key_info);
+            msg_count += 1;
+        }
+
+        let verify_prompt = format!(
+            "【总结质量校验任务】\n\
+             \n\
+             请对比以下总结与原始对话，检查关键信息是否完整准确。\n\
+             \n\
+             【总结内容】\n\
+             {}\n\
+             \n\
+             【最近 {} 条原始对话】\n\
+             {}\n\
+             \n\
+             请检查：\n\
+             1. 所有身份信息是否完整保留？\n\
+             2. 所有关系信息是否准确？\n\
+             3. 所有关键事件是否无遗漏？\n\
+             4. 所有承诺/约定是否记录？\n\
+             5. 上下文逻辑是否自洽？\n\
+             6. 是否有信息被错误篡改？\n\
+             \n\
+             输出JSON：\n\
+             {{\"passed\": true/false, \"issues\": [\"问题描述\"]}}",
+            summary, msg_count, key_info
+        );
+
+        let verify_messages = vec![
+            Message {
+                id: String::new(),
+                role: MessageRole::System,
+                content: "你是一个严谨的信息完整性校验系统。请仔细对比总结与原始对话，\
+                         确保关键信息无遗漏无篡改。只输出JSON。"
+                    .to_string(),
+                thinking_content: None,
+                model: "system".to_string(),
+                timestamp: 0,
+                message_type: MessageType::Say,
+            },
+            Message {
+                id: String::new(),
+                role: MessageRole::User,
+                content: verify_prompt,
+                thinking_content: None,
+                model: "glm-4.7-flash".to_string(),
+                timestamp: 0,
+                message_type: MessageType::Say,
+            },
+        ];
+
+        // 启用思考模式进行校验
+        let request_body = Self::build_request_body(&verify_messages, "glm-4.7-flash", true);
+        let silent = |_: ChatStreamEvent| {};
+
+        match StreamingHandler::stream_chat(BIGMODEL_API_URL, &token, request_body, &silent).await
+        {
+            Ok((content, _)) => Self::parse_verification_result(&content),
+            Err(_) => true, // 校验请求失败默认通过
+        }
+    }
+
+    /// GLM-4-Air 校验核心内容（启用思考模式）
+    /// 第三次检查：主要核心内容的准确性和完整性
+    async fn verify_summary_with_air(
+        &self,
+        summary: &str,
+        _original_messages: &[Message],
+    ) -> bool {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(SUMMARIZE_VERIFY_TIMEOUT_SECS),
+            self.verify_summary_with_air_inner(summary),
+        )
+        .await;
+
+        result.unwrap_or(true)
+    }
+
+    async fn verify_summary_with_air_inner(
+        &self,
+        summary: &str,
+    ) -> bool {
+        let token = {
+            let mut auth = self.jwt_auth.lock().unwrap();
+            auth.get_token()
+        };
+
+        let verify_prompt = format!(
+            "【核心内容深度校验】\n\
+             \n\
+             请深度检查以下总结的核心内容是否准确、完整、逻辑自洽。\n\
+             \n\
+             【总结内容】\n\
+             {}\n\
+             \n\
+             请重点检查：\n\
+             1. 角色身份的核心设定是否被正确保留？\n\
+             2. 人物关系的方向和性质是否准确？\n\
+             3. 事件时间线是否合乎逻辑？\n\
+             4. 情感走向是否与对话内容一致？\n\
+             5. 是否存在矛盾或不一致？\n\
+             \n\
+             输出JSON：\n\
+             {{\"passed\": true/false, \"critical_issues\": [\"严重问题描述\"]}}",
+            summary
+        );
+
+        let verify_messages = vec![
+            Message {
+                id: String::new(),
+                role: MessageRole::System,
+                content: "你是一个深度内容校验系统，专门检查总结中的核心内容是否准确完整。\
+                         启用深度思考来进行检查。只输出JSON。"
+                    .to_string(),
+                thinking_content: None,
+                model: "system".to_string(),
+                timestamp: 0,
+                message_type: MessageType::Say,
+            },
+            Message {
+                id: String::new(),
+                role: MessageRole::User,
+                content: verify_prompt,
+                thinking_content: None,
+                model: "glm-4-air".to_string(),
+                timestamp: 0,
+                message_type: MessageType::Say,
+            },
+        ];
+
+        let request_body = Self::build_request_body(&verify_messages, "glm-4-air", true);
+        let silent = |_: ChatStreamEvent| {};
+
+        match StreamingHandler::stream_chat(BIGMODEL_API_URL, &token, request_body, &silent).await
+        {
+            Ok((content, _)) => Self::parse_verification_result(&content),
+            Err(_) => true,
+        }
+    }
+
+    /// 解析校验结果 JSON（支持 passed 和 is_valid 两种格式）
+    fn parse_verification_result(text: &str) -> bool {
+        if let Some(start) = text.find('{') {
+            if let Some(end) = text.rfind('}') {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text[start..=end]) {
+                    // 支持 "passed" 或 "is_valid" 字段
+                    return json
+                        .get("passed")
+                        .or_else(|| json.get("is_valid"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true);
+                }
+            }
+        }
+        true // 解析失败默认通过
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  超长上下文分批处理
+    //  当上下文超过 GLM-4-Long 1M token 限制时，分批处理
+    //  每批双重 GLM-4-Long 处理 + 验证，确保语义不漂移
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// 分批处理超长上下文（> GLM-4-Long 安全限制）
+    /// 在完整的 user-assistant 对话边界处切分，避免句子截断
+    async fn batch_process_long_context(
+        &self,
+        messages: &[Message],
+        existing_summaries: &[MemorySummary],
+        on_event: &impl Fn(ChatStreamEvent),
+    ) -> Result<String, ChatError> {
+        let batches =
+            Self::split_at_conversation_boundaries(messages, GLM_4_LONG_SAFE_INPUT);
+        log::info!(
+            "[batch_process] 分批处理 | 总批次={} | 总消息={}",
+            batches.len(),
+            messages.len()
+        );
+
+        let mut batch_summaries: Vec<String> = Vec::new();
+
+        for (i, batch) in batches.iter().enumerate() {
+            let batch_tokens = Self::estimate_token_count(batch);
+            log::info!(
+                "[batch_process] 处理第 {}/{} 批 | 消息数={} | tokens={}",
+                i + 1, batches.len(), batch.len(), batch_tokens
+            );
+
+            // 如果剩余批次小于 GLM-4.7/Flash 上下文窗口，直接用 Flash 处理
+            if batch_tokens < GLM_47_FLASH_MAX_CONTEXT {
+                log::info!(
+                    "[batch_process] 批次 {} tokens < Flash窗口, 使用 Flash 处理",
+                    i + 1
+                );
+                let summary = self
+                    .summarize_with_flash(batch, existing_summaries)
+                    .await;
+                // Flash 处理后由 Air 校验
+                let air_ok = self.verify_summary_with_air(&summary, batch).await;
+                if air_ok {
+                    batch_summaries.push(summary);
+                } else {
+                    // Air 校验未通过，回退到双重 GLM-4-Long
+                    let summary = self
+                        .double_pass_glm4_long(batch, existing_summaries)
+                        .await;
+                    batch_summaries.push(summary);
+                }
+            } else {
+                // 使用双重 GLM-4-Long 处理
+                let summary = self
+                    .double_pass_glm4_long(batch, existing_summaries)
+                    .await;
+
+                // Flash 校验
+                let flash_ok = self.verify_summary_with_flash(&summary, batch).await;
+                if !flash_ok {
+                    log::warn!("[batch_process] 批次 {} Flash校验未通过, 重新处理", i + 1);
+                    let retry_summary = self
+                        .double_pass_glm4_long(batch, existing_summaries)
+                        .await;
+                    batch_summaries.push(retry_summary);
+                } else {
+                    // Air 校验
+                    let air_ok = self.verify_summary_with_air(&summary, batch).await;
+                    if !air_ok {
+                        log::warn!("[batch_process] 批次 {} Air校验未通过, 重新处理", i + 1);
+                        let retry_summary = self
+                            .double_pass_glm4_long(batch, existing_summaries)
+                            .await;
+                        batch_summaries.push(retry_summary);
+                    } else {
+                        batch_summaries.push(summary);
+                    }
+                }
+            }
+        }
+
+        // 合并所有批次的总结
+        let combined = batch_summaries.join("\n\n---\n\n");
+        let _ = on_event; // 保留参数以维持接口一致性
+        Ok(combined)
+    }
+
+    /// 双重 GLM-4-Long 处理：两次调用确保语义不漂移
+    /// 第一遍正常总结，第二遍对照原文校验补全
+    async fn double_pass_glm4_long(
+        &self,
+        messages: &[Message],
+        existing_summaries: &[MemorySummary],
+    ) -> String {
+        // 第一遍：正常三级总结
+        let first_pass = self
+            .glm4_long_tiered_summarize(messages, existing_summaries)
+            .await;
+
+        if first_pass.trim().is_empty() {
+            return String::new();
+        }
+
+        // 第二遍：基于第一遍结果进行语义一致性校验补全
+        let token = {
+            let mut auth = self.jwt_auth.lock().unwrap();
+            auth.get_token()
+        };
+
+        // 收集原始对话（截取尾部保证不超限）
+        let mut dialogue_context = String::new();
+        for msg in messages.iter().rev().take(80) {
+            if msg.role == MessageRole::System {
+                continue;
+            }
+            let role = match msg.role {
+                MessageRole::User => "用户",
+                MessageRole::Assistant => "AI",
+                MessageRole::System => continue,
+            };
+            dialogue_context = format!("{}: {}\n{}", role, msg.content, dialogue_context);
+        }
+
+        let second_pass_prompt = format!(
+            "【语义一致性校验 — 第二遍处理】\n\
+             \n\
+             以下是第一遍总结的结果：\n\
+             {}\n\
+             \n\
+             请重新审视原始对话内容，检查上述总结是否：\n\
+             1. 遗漏了任何关键信息（身份、关系、事件、承诺）\n\
+             2. 存在语义偏移或不准确的描述\n\
+             3. 缺少重要的情感变化节点\n\
+             \n\
+             如果发现问题，请输出修正后的完整总结。\n\
+             如果没有问题，请原样输出第一遍的结果。\n\
+             \n\
+             ■ 不要添加额外的解释，只输出最终的总结内容。",
+            first_pass
+        );
+
+        let verify_messages = vec![
+            Message {
+                id: String::new(),
+                role: MessageRole::System,
+                content: "你是一个语义一致性校验系统。请对照原始对话验证总结的准确性和完整性。"
+                    .to_string(),
+                thinking_content: None,
+                model: "system".to_string(),
+                timestamp: 0,
+                message_type: MessageType::Say,
+            },
+            Message {
+                id: String::new(),
+                role: MessageRole::User,
+                content: format!(
+                    "【原始对话参考】\n{}\n\n{}", dialogue_context, second_pass_prompt
+                ),
+                thinking_content: None,
+                model: "glm-4-long".to_string(),
+                timestamp: 0,
+                message_type: MessageType::Say,
+            },
+        ];
+
+        let request_body = Self::build_request_body(&verify_messages, "glm-4-long", false);
+        let silent = |_: ChatStreamEvent| {};
+
+        match StreamingHandler::stream_chat(BIGMODEL_API_URL, &token, request_body, &silent).await
+        {
+            Ok((content, _)) if !content.trim().is_empty() => content,
+            _ => first_pass, // 第二遍失败，使用第一遍结果
+        }
+    }
+
+    /// 使用 GLM-4.7-Flash 直接总结较短的上下文（启用思考模式提高质量）
+    async fn summarize_with_flash(
+        &self,
+        messages: &[Message],
+        existing_summaries: &[MemorySummary],
+    ) -> String {
+        let token = {
+            let mut auth = self.jwt_auth.lock().unwrap();
+            auth.get_token()
+        };
+
+        let mut context = String::new();
+        if !existing_summaries.is_empty() {
+            context.push_str("【已有记忆摘要】\n");
+            for (i, s) in existing_summaries.iter().enumerate() {
+                context.push_str(&format!(
+                    "{}. {}\n  事实：{}\n",
+                    i + 1,
+                    s.summary,
+                    s.core_facts.join("；")
+                ));
+            }
+            context.push('\n');
+        }
+
+        context.push_str("【对话内容】\n");
+        for msg in messages {
+            let role = match msg.role {
+                MessageRole::User => "用户",
+                MessageRole::Assistant => "AI",
+                MessageRole::System => continue,
+            };
+            context.push_str(&format!("{}: {}\n", role, msg.content));
+        }
+
+        let prompt = format!(
+            "请总结以下对话内容，保证关键信息（身份、关系、事件、承诺）的绝对完整。\n\
+             \n\
+             {}\n\
+             \n\
+             输出格式：\n\
+             【关键信息·无损】逐条列出所有不可变事实\n\
+             【核心内容·概括】精炼概括核心情节\n\
+             【一般对话·压缩】高度压缩日常闲聊",
+            context
+        );
+
+        let summary_messages = vec![
+            Message {
+                id: String::new(),
+                role: MessageRole::System,
+                content: "你是一个精确的对话总结系统。".to_string(),
+                thinking_content: None,
+                model: "system".to_string(),
+                timestamp: 0,
+                message_type: MessageType::Say,
+            },
+            Message {
+                id: String::new(),
+                role: MessageRole::User,
+                content: prompt,
+                thinking_content: None,
+                model: "glm-4.7-flash".to_string(),
+                timestamp: 0,
+                message_type: MessageType::Say,
+            },
+        ];
+
+        let request_body = Self::build_request_body(&summary_messages, "glm-4.7-flash", true);
+        let silent = |_: ChatStreamEvent| {};
+
+        match StreamingHandler::stream_chat(BIGMODEL_API_URL, &token, request_body, &silent).await
+        {
+            Ok((content, _)) => content,
+            Err(_) => String::new(),
+        }
+    }
+
+    /// 在完整的对话边界处切分消息列表
+    /// 确保每个批次都以完整的 user-assistant 对结束，不会截断句子
+    fn split_at_conversation_boundaries(
+        messages: &[Message],
+        max_tokens_per_batch: usize,
+    ) -> Vec<Vec<Message>> {
+        let mut batches: Vec<Vec<Message>> = Vec::new();
+        let mut current_batch: Vec<Message> = Vec::new();
+        let mut current_tokens: usize = 0;
+
+        // 收集 system 消息（始终包含在每个批次中）
+        let system_messages: Vec<Message> = messages
+            .iter()
+            .filter(|m| m.role == MessageRole::System)
+            .cloned()
+            .collect();
+        let system_tokens = Self::estimate_token_count(&system_messages);
+
+        let non_system: Vec<&Message> = messages
+            .iter()
+            .filter(|m| m.role != MessageRole::System)
+            .collect();
+
+        let mut i = 0;
+        while i < non_system.len() {
+            let msg = non_system[i];
+            let msg_tokens = Self::estimate_token_count(&[msg.clone()]);
+
+            // 检查添加这条消息后是否会超过限制
+            if current_tokens + msg_tokens + system_tokens > max_tokens_per_batch
+                && !current_batch.is_empty()
+            {
+                // 回退到上一个完整的 user-assistant 对结尾
+                while !current_batch.is_empty() {
+                    if current_batch.last().map(|m| &m.role) == Some(&MessageRole::Assistant) {
+                        break;
+                    }
+                    let removed = current_batch.pop().unwrap();
+                    current_tokens -= Self::estimate_token_count(&[removed]);
+                    if i > 0 {
+                        i -= 1;
+                    }
+                }
+
+                if !current_batch.is_empty() {
+                    let mut full_batch = system_messages.clone();
+                    full_batch.extend(current_batch);
+                    batches.push(full_batch);
+                }
+
+                current_batch = Vec::new();
+                current_tokens = 0;
+            }
+
+            current_batch.push(msg.clone());
+            current_tokens += msg_tokens;
+            i += 1;
+        }
+
+        // 处理最后一个批次
+        if !current_batch.is_empty() {
+            let mut full_batch = system_messages;
+            full_batch.extend(current_batch);
+            batches.push(full_batch);
+        }
+
+        if batches.is_empty() {
+            batches.push(messages.to_vec());
+        }
+
+        batches
     }
 
     /// ══ 异步事实提取（后台任务）══
@@ -999,14 +2182,18 @@ impl ChatEngine {
         //
         // GLM-4.7: 默认开启 Thinking，必须显式 disabled 才能关闭
         // GLM-4-AIR: 推理模型，按用户偏好开关
-        // GLM-4.7-FLASH: 快速模型，显式 disabled
+        // GLM-4.7-FLASH: 快速模型，支持思考模式
         // 其他模型: 不发送 thinking 字段（旧模型不支持）
         //
         // budget_tokens: 思考预算（官方文档推荐），防止思考无限消耗 token
         match model {
-            "glm-4.7" | "glm-4-air" => {
+            "glm-4.7" | "glm-4-air" | "glm-4.7-flash" => {
                 if Self::should_enable_thinking(model, enable_thinking) {
-                    let budget = if model == "glm-4-air" { 10240 } else { 16384 };
+                    let budget = match model {
+                        "glm-4-air" => 10240,
+                        "glm-4.7-flash" => 10240,
+                        _ => 16384, // glm-4.7
+                    };
                     body["thinking"] = serde_json::json!({
                         "type": "enabled",
                         "budget_tokens": budget
@@ -1015,10 +2202,23 @@ impl ChatEngine {
                     body["thinking"] = serde_json::json!({"type": "disabled"});
                 }
             }
-            "glm-4.7-flash" => {
-                body["thinking"] = serde_json::json!({"type": "disabled"});
-            }
             _ => {}
+        }
+
+        // ═══ 采样参数：按模型用途优化 ═══
+        // GLM-4.7 / GLM-4.7-FLASH: 默认 temperature=0.95（自然对话变化丰富）
+        // GLM-4-AIR: 降低 temperature 保证推理分析的一致性和聚焦度
+        // GLM-4-LONG: 低 temperature 保证蒸馏/总结的事实准确性
+        match model {
+            "glm-4-air" => {
+                body["temperature"] = serde_json::json!(0.75);
+            }
+            "glm-4-long" => {
+                body["temperature"] = serde_json::json!(0.4);
+            }
+            _ => {
+                // GLM-4.7 / GLM-4.7-FLASH 使用 API 默认值 0.95
+            }
         }
 
         body
@@ -1563,11 +2763,16 @@ impl ChatEngine {
         conversation_id: &str,
         content: &str,
         chat_model: &str,
-        thinking_model: &str,
+        _thinking_model: &str,
         enable_thinking: bool,
         on_event: impl Fn(ChatStreamEvent),
     ) -> Result<(), ChatError> {
         Self::validate_message(content)?;
+        log::info!(
+            "[send_message] conv={} | chat_model={} | thinking={} | content_len={}",
+            &conversation_id[..8.min(conversation_id.len())],
+            chat_model, enable_thinking, content.len()
+        );
 
         // 自动检测 say/do 类型
         let message_type = Self::detect_message_type(content);
@@ -1646,9 +2851,10 @@ impl ChatEngine {
             enhanced_messages.push(quality_msg);
         }
 
-        // ══ 四级模型管线：知识检索 → 长上下文蒸馏 → 深度推理 → 自然对话 ══
+        // ══ 五级模型管线：知识检索 → 验证式上下文管理 → 双层思考 → 综合分析 → 自然对话 ══
         let (full_content, full_thinking) = if enable_thinking {
             // ── Phase 0.3: 本地知识库检索（纯本地，零延迟）──
+            log::info!("[pipeline] Phase 0.3: 本地知识库检索");
             self.retrieve_knowledge_context(conversation_id, content, &mut enhanced_messages);
 
             // ── Phase 0.4: 读取已蒸馏的核心状态（若存在）──
@@ -1679,80 +2885,119 @@ impl ChatEngine {
                 }
             }
 
-            // ── Phase 0.5: 评估上下文复杂度，决定是否需要 GLM-4-LONG ──
+            // ── Phase 0.5: 评估上下文，决定是否需要上下文管理 ──
             let memory_summaries_for_assess = self
                 .memory_engine
                 .load_memory_index(conversation_id)
                 .unwrap_or_default();
-            let (needs_long_context, _total_tokens) =
+            let (needs_long_context, total_tokens) =
                 Self::assess_context_needs(&enhanced_messages, &memory_summaries_for_assess);
 
-            // ── Phase 0.7: 长上下文蒸馏（GLM-4-LONG，仅在上下文超长时触发）──
+            // ── Phase 0.7: 验证式上下文管理（GLM-4-Long 总结 → Flash 校验 → Air 校验 → 循环）──
             if needs_long_context {
-                let distilled = self
-                    .request_long_context_distillation(
+                log::info!(
+                    "[pipeline] Phase 0.7: 验证式上下文管理 | tokens={}",
+                    total_tokens
+                );
+                match self
+                    .verified_summarize_context(
                         &enhanced_messages,
                         &memory_summaries_for_assess,
-                        content,
                         &on_event,
                     )
-                    .await;
-                if !distilled.trim().is_empty() {
-                    let core_facts_snapshot: Vec<String> = memory_summaries_for_assess
-                        .iter()
-                        .flat_map(|s| s.core_facts.clone())
-                        .collect();
-                    let mut hasher = DefaultHasher::new();
-                    let character_prompt = enhanced_messages
-                        .iter()
-                        .find(|m| m.role == MessageRole::System)
-                        .map(|m| m.content.as_str())
-                        .unwrap_or_default();
-                    character_prompt.hash(&mut hasher);
-                    let distilled_state = DistilledSystemState {
-                        core_prompt: distilled.clone(),
-                        last_memory_count: memory_summaries_for_assess.len(),
-                        last_max_compression_gen: memory_summaries_for_assess
+                    .await
+                {
+                    Ok(verified_summary) if !verified_summary.trim().is_empty() => {
+                        // 持久化蒸馏状态
+                        let core_facts_snapshot: Vec<String> = memory_summaries_for_assess
                             .iter()
-                            .map(|s| s.compression_generation)
-                            .max()
-                            .unwrap_or(0),
-                        character_prompt_hash: hasher.finish(),
-                        last_turn_count: conv.turn_count,
-                        distilled_at: chrono::Utc::now().timestamp_millis(),
-                        core_facts_snapshot,
-                    };
-                    let _ = self
-                        .memory_engine
-                        .save_distilled_state(conversation_id, &distilled_state);
+                            .flat_map(|s| s.core_facts.clone())
+                            .collect();
+                        let mut hasher = DefaultHasher::new();
+                        let character_prompt = enhanced_messages
+                            .iter()
+                            .find(|m| m.role == MessageRole::System)
+                            .map(|m| m.content.as_str())
+                            .unwrap_or_default();
+                        character_prompt.hash(&mut hasher);
+                        let distilled_state = DistilledSystemState {
+                            core_prompt: verified_summary.clone(),
+                            last_memory_count: memory_summaries_for_assess.len(),
+                            last_max_compression_gen: memory_summaries_for_assess
+                                .iter()
+                                .map(|s| s.compression_generation)
+                                .max()
+                                .unwrap_or(0),
+                            character_prompt_hash: hasher.finish(),
+                            last_turn_count: conv.turn_count,
+                            distilled_at: chrono::Utc::now().timestamp_millis(),
+                            core_facts_snapshot,
+                        };
+                        let _ = self
+                            .memory_engine
+                            .save_distilled_state(conversation_id, &distilled_state);
 
-                    let distill_msg = Message {
-                        id: String::new(),
-                        role: MessageRole::System,
-                        content: format!(
-                            "【长上下文蒸馏摘要 — 以下为 GLM-4-LONG 整理的关键信息，必须严格遵守】\n{}\n",
-                            distilled
-                        ),
-                        thinking_content: None,
-                        model: "system".to_string(),
-                        timestamp: 0,
-                        message_type: MessageType::Say,
-                    };
-                    let last_user_idx = enhanced_messages
-                        .iter()
-                        .rposition(|m| m.role == MessageRole::User);
-                    if let Some(idx) = last_user_idx {
-                        enhanced_messages.insert(idx, distill_msg);
-                    } else {
-                        enhanced_messages.push(distill_msg);
+                        let distill_msg = Message {
+                            id: String::new(),
+                            role: MessageRole::System,
+                            content: format!(
+                                "【经验证的上下文总结 — 必须严格遵守】\n{}\n",
+                                verified_summary
+                            ),
+                            thinking_content: None,
+                            model: "system".to_string(),
+                            timestamp: 0,
+                            message_type: MessageType::Say,
+                        };
+                        let last_user_idx = enhanced_messages
+                            .iter()
+                            .rposition(|m| m.role == MessageRole::User);
+                        if let Some(idx) = last_user_idx {
+                            enhanced_messages.insert(idx, distill_msg);
+                        } else {
+                            enhanced_messages.push(distill_msg);
+                        }
+                    }
+                    _ => {
+                        log::warn!("[pipeline] 验证式总结失败，使用降级蒸馏");
+                        let distilled = self
+                            .request_long_context_distillation(
+                                &enhanced_messages,
+                                &memory_summaries_for_assess,
+                                content,
+                                &on_event,
+                            )
+                            .await;
+                        if !distilled.trim().is_empty() {
+                            let distill_msg = Message {
+                                id: String::new(),
+                                role: MessageRole::System,
+                                content: format!(
+                                    "【长上下文蒸馏摘要（降级）】\n{}\n",
+                                    distilled
+                                ),
+                                thinking_content: None,
+                                model: "system".to_string(),
+                                timestamp: 0,
+                                message_type: MessageType::Say,
+                            };
+                            let last_user_idx = enhanced_messages
+                                .iter()
+                                .rposition(|m| m.role == MessageRole::User);
+                            if let Some(idx) = last_user_idx {
+                                enhanced_messages.insert(idx, distill_msg);
+                            } else {
+                                enhanced_messages.push(distill_msg);
+                            }
+                        }
                     }
                 }
             }
 
-            // ── Phase 1: 推理模型（GLM-4-AIR）知识增强深度分析 ──
-            let (mut reasoning_conclusion, mut thinking_text) = self
-                .request_enhanced_reasoning(
-                    thinking_model,
+            // ── Phase 1: 双层思考（Flash + Air 并行 → Air 综合）──
+            log::info!("[pipeline] Phase 1: 双层思考管线 (Flash 并行 Air → Air 综合)");
+            let (synthesis_conclusion, thinking_text) = self
+                .request_dual_thinking(
                     conversation_id,
                     &enhanced_messages,
                     content,
@@ -1760,42 +3005,30 @@ impl ChatEngine {
                 )
                 .await;
 
-            // 增强推理失败时回退到基础推理链路，确保该能力在生产链路中可用
-            if reasoning_conclusion.trim().is_empty() {
-                let (fallback_conclusion, fallback_thinking) = self
-                    .request_reasoning(thinking_model, &enhanced_messages, &on_event)
-                    .await;
-                if !fallback_conclusion.trim().is_empty() {
-                    reasoning_conclusion = fallback_conclusion;
-                }
-                if !fallback_thinking.trim().is_empty() {
-                    thinking_text = fallback_thinking;
-                }
-            }
+            // 双层思考失败不阻断管线 — 对话模型可独立生成回复
 
-            // ── Phase 2: 将推理结论注入上下文，供对话模型参考 ──
-            if !reasoning_conclusion.trim().is_empty() {
+            // ── Phase 2: 将综合分析结论注入上下文 ──
+            if !synthesis_conclusion.trim().is_empty() {
                 let reasoning_msg = Message {
                     id: String::new(),
                     role: MessageRole::System,
                     content: format!(
-                        "【深度推理分析结果（GLM-4-AIR + 本地知识库）】\n{}\n\n\
+                        "【双层深度分析结论（Flash快速洞察 + Air深度推理 + Air综合分析）】\n{}\n\n\
                          ■ 执行指令：\n\
-                         基于以上分析和知识库事实，以角色身份自然地回复用户。\n\
+                         基于以上综合分析结论，以角色身份自然地回复用户。\n\
                          - 分析中提到的关键事实必须准确体现在回复中\n\
                          - 知识库中的事实不可矛盾或篡改\n\
                          - 分析建议的情感策略必须执行\n\
                          - 不要在回复中提及分析过程本身\n\
                          - 回复必须完整，不要截断或省略\n\
                          - 像真人一样自然地表达，有情绪、有温度、有个性",
-                        reasoning_conclusion
+                        synthesis_conclusion
                     ),
                     thinking_content: None,
                     model: "system".to_string(),
                     timestamp: 0,
                     message_type: MessageType::Say,
                 };
-                // 插入到最后一条用户消息之前
                 let last_user_idx = enhanced_messages
                     .iter()
                     .rposition(|m| m.role == MessageRole::User);
@@ -1806,8 +3039,11 @@ impl ChatEngine {
                 }
             }
 
-            // ── Phase 3: 对话模型（GLM-4.7）生成自然回复 ──
-            // 对话模型始终关闭思考，由推理模型专责思考
+            // ── Phase 3: 对话模型（GLM-4.7/Flash）生成自然回复 ──
+            log::info!(
+                "[pipeline] Phase 3: {} 生成回复 | synthesis_len={} | messages={}",
+                chat_model, synthesis_conclusion.len(), enhanced_messages.len()
+            );
             let (content, _) = self
                 .request_with_fallback(chat_model, false, &enhanced_messages, &on_event)
                 .await?;
@@ -1822,6 +3058,7 @@ impl ChatEngine {
 
         // 如果 AI 返回了空内容（已经过多级降级重试），报告最终错误
         if full_content.trim().is_empty() {
+            log::error!("[send_message] 所有降级尝试均未生成内容");
             on_event(ChatStreamEvent::Error(
                 "AI 暂时无法生成回复，已自动尝试多种方式均未成功。请重试或缩短之前的对话。"
                     .to_string(),
@@ -1848,12 +3085,18 @@ impl ChatEngine {
         self.conversation_store
             .add_message(conversation_id, assistant_msg)?;
 
+        log::info!("[send_message] AI回复已持久化 → 发送 Done");
         // Send Done after message is persisted so Flutter reloads the saved data
         on_event(ChatStreamEvent::Done);
 
         // ── 后台任务：异步提取事实存入知识库 ──
-        self.extract_and_store_facts(conversation_id, &on_event)
-            .await;
+        // 首轮立即提取（捕获关键身份/设定事实），之后每3轮一次（平衡 API 开销和准确性）
+        // 10 条消息的滑动窗口保证相邻提取之间有充分重叠，不会遗漏事实
+        if conv.turn_count <= 1 || conv.turn_count % 3 == 0 {
+            log::info!("[send_message] 触发事实提取 | turn={}", conv.turn_count);
+            self.extract_and_store_facts(conversation_id, &on_event)
+                .await;
+        }
 
         Ok(())
     }
@@ -1864,11 +3107,16 @@ impl ChatEngine {
         &self,
         conversation_id: &str,
         chat_model: &str,
-        thinking_model: &str,
+        _thinking_model: &str,
         enable_thinking: bool,
         on_event: impl Fn(ChatStreamEvent),
     ) -> Result<(), ChatError> {
         let conv = self.conversation_store.load_conversation(conversation_id)?;
+        log::info!(
+            "[regenerate] conv={} | chat_model={} | thinking={}",
+            &conversation_id[..8.min(conversation_id.len())],
+            chat_model, enable_thinking
+        );
 
         // 找到最后一条用户消息的内容（用于构建上下文）
         let last_user_content = conv
@@ -1942,7 +3190,7 @@ impl ChatEngine {
             enhanced_messages.push(quality_msg);
         }
 
-        // ══ 四级模型管线（与 send_message 相同逻辑）══
+        // ══ 五级模型管线（与 send_message 相同逻辑）══
         let (full_content, full_thinking) = if enable_thinking {
             // ── Phase 0.3: 本地知识库检索 ──
             self.retrieve_knowledge_context(
@@ -1979,80 +3227,118 @@ impl ChatEngine {
                 }
             }
 
-            // ── Phase 0.5: 评估上下文复杂度 ──
+            // ── Phase 0.5: 评估上下文，决定是否需要上下文管理 ──
             let memory_summaries_for_assess = self
                 .memory_engine
                 .load_memory_index(conversation_id)
                 .unwrap_or_default();
-            let (needs_long_context, _total_tokens) =
+            let (needs_long_context, total_tokens) =
                 Self::assess_context_needs(&enhanced_messages, &memory_summaries_for_assess);
 
-            // ── Phase 0.7: 长上下文蒸馏（GLM-4-LONG，仅在需要时触发）──
+            // ── Phase 0.7: 验证式上下文管理（GLM-4-Long → Flash 校验 → Air 校验 → 循环）──
             if needs_long_context {
-                let distilled = self
-                    .request_long_context_distillation(
+                log::info!(
+                    "[regen pipeline] Phase 0.7: 验证式上下文管理 | tokens={}",
+                    total_tokens
+                );
+                match self
+                    .verified_summarize_context(
                         &enhanced_messages,
                         &memory_summaries_for_assess,
-                        &last_user_content,
                         &on_event,
                     )
-                    .await;
-                if !distilled.trim().is_empty() {
-                    let core_facts_snapshot: Vec<String> = memory_summaries_for_assess
-                        .iter()
-                        .flat_map(|s| s.core_facts.clone())
-                        .collect();
-                    let mut hasher = DefaultHasher::new();
-                    let character_prompt = enhanced_messages
-                        .iter()
-                        .find(|m| m.role == MessageRole::System)
-                        .map(|m| m.content.as_str())
-                        .unwrap_or_default();
-                    character_prompt.hash(&mut hasher);
-                    let distilled_state = DistilledSystemState {
-                        core_prompt: distilled.clone(),
-                        last_memory_count: memory_summaries_for_assess.len(),
-                        last_max_compression_gen: memory_summaries_for_assess
+                    .await
+                {
+                    Ok(verified_summary) if !verified_summary.trim().is_empty() => {
+                        let core_facts_snapshot: Vec<String> = memory_summaries_for_assess
                             .iter()
-                            .map(|s| s.compression_generation)
-                            .max()
-                            .unwrap_or(0),
-                        character_prompt_hash: hasher.finish(),
-                        last_turn_count: conv.turn_count,
-                        distilled_at: chrono::Utc::now().timestamp_millis(),
-                        core_facts_snapshot,
-                    };
-                    let _ = self
-                        .memory_engine
-                        .save_distilled_state(conversation_id, &distilled_state);
+                            .flat_map(|s| s.core_facts.clone())
+                            .collect();
+                        let mut hasher = DefaultHasher::new();
+                        let character_prompt = enhanced_messages
+                            .iter()
+                            .find(|m| m.role == MessageRole::System)
+                            .map(|m| m.content.as_str())
+                            .unwrap_or_default();
+                        character_prompt.hash(&mut hasher);
+                        let distilled_state = DistilledSystemState {
+                            core_prompt: verified_summary.clone(),
+                            last_memory_count: memory_summaries_for_assess.len(),
+                            last_max_compression_gen: memory_summaries_for_assess
+                                .iter()
+                                .map(|s| s.compression_generation)
+                                .max()
+                                .unwrap_or(0),
+                            character_prompt_hash: hasher.finish(),
+                            last_turn_count: conv.turn_count,
+                            distilled_at: chrono::Utc::now().timestamp_millis(),
+                            core_facts_snapshot,
+                        };
+                        let _ = self
+                            .memory_engine
+                            .save_distilled_state(conversation_id, &distilled_state);
 
-                    let distill_msg = Message {
-                        id: String::new(),
-                        role: MessageRole::System,
-                        content: format!(
-                            "【长上下文蒸馏摘要 — 以下为 GLM-4-LONG 整理的关键信息，必须严格遵守】\n{}\n",
-                            distilled
-                        ),
-                        thinking_content: None,
-                        model: "system".to_string(),
-                        timestamp: 0,
-                        message_type: MessageType::Say,
-                    };
-                    let last_user_idx = enhanced_messages
-                        .iter()
-                        .rposition(|m| m.role == MessageRole::User);
-                    if let Some(idx) = last_user_idx {
-                        enhanced_messages.insert(idx, distill_msg);
-                    } else {
-                        enhanced_messages.push(distill_msg);
+                        let distill_msg = Message {
+                            id: String::new(),
+                            role: MessageRole::System,
+                            content: format!(
+                                "【经验证的上下文总结 — 必须严格遵守】\n{}\n",
+                                verified_summary
+                            ),
+                            thinking_content: None,
+                            model: "system".to_string(),
+                            timestamp: 0,
+                            message_type: MessageType::Say,
+                        };
+                        let last_user_idx = enhanced_messages
+                            .iter()
+                            .rposition(|m| m.role == MessageRole::User);
+                        if let Some(idx) = last_user_idx {
+                            enhanced_messages.insert(idx, distill_msg);
+                        } else {
+                            enhanced_messages.push(distill_msg);
+                        }
+                    }
+                    _ => {
+                        log::warn!("[regen pipeline] 验证式总结失败，使用降级蒸馏");
+                        let distilled = self
+                            .request_long_context_distillation(
+                                &enhanced_messages,
+                                &memory_summaries_for_assess,
+                                &last_user_content,
+                                &on_event,
+                            )
+                            .await;
+                        if !distilled.trim().is_empty() {
+                            let distill_msg = Message {
+                                id: String::new(),
+                                role: MessageRole::System,
+                                content: format!(
+                                    "【长上下文蒸馏摘要（降级）】\n{}\n",
+                                    distilled
+                                ),
+                                thinking_content: None,
+                                model: "system".to_string(),
+                                timestamp: 0,
+                                message_type: MessageType::Say,
+                            };
+                            let last_user_idx = enhanced_messages
+                                .iter()
+                                .rposition(|m| m.role == MessageRole::User);
+                            if let Some(idx) = last_user_idx {
+                                enhanced_messages.insert(idx, distill_msg);
+                            } else {
+                                enhanced_messages.push(distill_msg);
+                            }
+                        }
                     }
                 }
             }
 
-            // ── Phase 1: 推理模型（GLM-4-AIR）知识增强深度分析 ──
-            let (mut reasoning_conclusion, mut thinking_text) = self
-                .request_enhanced_reasoning(
-                    thinking_model,
+            // ── Phase 1: 双层思考（Flash + Air 并行 → Air 综合）──
+            log::info!("[regen pipeline] Phase 1: 双层思考管线");
+            let (synthesis_conclusion, thinking_text) = self
+                .request_dual_thinking(
                     conversation_id,
                     &enhanced_messages,
                     &last_user_content,
@@ -2060,35 +3346,22 @@ impl ChatEngine {
                 )
                 .await;
 
-            // 增强推理失败时回退到基础推理链路，确保该能力在生产链路中可用
-            if reasoning_conclusion.trim().is_empty() {
-                let (fallback_conclusion, fallback_thinking) = self
-                    .request_reasoning(thinking_model, &enhanced_messages, &on_event)
-                    .await;
-                if !fallback_conclusion.trim().is_empty() {
-                    reasoning_conclusion = fallback_conclusion;
-                }
-                if !fallback_thinking.trim().is_empty() {
-                    thinking_text = fallback_thinking;
-                }
-            }
-
-            // ── Phase 2: 将推理结论注入上下文 ──
-            if !reasoning_conclusion.trim().is_empty() {
+            // ── Phase 2: 将综合分析结论注入上下文 ──
+            if !synthesis_conclusion.trim().is_empty() {
                 let reasoning_msg = Message {
                     id: String::new(),
                     role: MessageRole::System,
                     content: format!(
-                        "【深度推理分析结果（GLM-4-AIR + 本地知识库）】\n{}\n\n\
+                        "【双层深度分析结论（Flash快速洞察 + Air深度推理 + Air综合分析）】\n{}\n\n\
                          ■ 执行指令：\n\
-                         基于以上分析和知识库事实，以角色身份自然地回复用户。\n\
+                         基于以上综合分析结论，以角色身份自然地回复用户。\n\
                          - 分析中提到的关键事实必须准确体现在回复中\n\
                          - 知识库中的事实不可矛盾或篡改\n\
                          - 分析建议的情感策略必须执行\n\
                          - 不要在回复中提及分析过程本身\n\
                          - 回复必须完整，不要截断或省略\n\
                          - 像真人一样自然地表达，有情绪、有温度、有个性",
-                        reasoning_conclusion
+                        synthesis_conclusion
                     ),
                     thinking_content: None,
                     model: "system".to_string(),
@@ -2105,7 +3378,11 @@ impl ChatEngine {
                 }
             }
 
-            // ── Phase 3: 对话模型（GLM-4.7）生成自然回复 ──
+            // ── Phase 3: 对话模型（GLM-4.7/Flash）生成自然回复 ──
+            log::info!(
+                "[regen pipeline] Phase 3: {} 生成回复 | synthesis_len={} | messages={}",
+                chat_model, synthesis_conclusion.len(), enhanced_messages.len()
+            );
             let (content, _) = self
                 .request_with_fallback(chat_model, false, &enhanced_messages, &on_event)
                 .await?;
@@ -2150,6 +3427,7 @@ impl ChatEngine {
         self.conversation_store
             .add_message(conversation_id, assistant_msg)?;
 
+        log::info!("[regenerate] AI回复已持久化 → 发送 Done");
         // Send Done after message is persisted so Flutter reloads the saved data
         on_event(ChatStreamEvent::Done);
 
@@ -2641,8 +3919,8 @@ mod tests {
         // GLM-4-AIR: reasoning model
         assert!(ChatEngine::should_enable_thinking("glm-4-air", true));
         assert!(!ChatEngine::should_enable_thinking("glm-4-air", false));
-        // Flash: no thinking
-        assert!(!ChatEngine::should_enable_thinking("glm-4.7-flash", true));
+        // Flash: now supports thinking
+        assert!(ChatEngine::should_enable_thinking("glm-4.7-flash", true));
         assert!(!ChatEngine::should_enable_thinking("glm-4.7-flash", false));
         // Others: no thinking
         assert!(!ChatEngine::should_enable_thinking("glm-4-long", true));

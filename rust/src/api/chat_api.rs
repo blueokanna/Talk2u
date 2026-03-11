@@ -1,6 +1,7 @@
 use std::sync::OnceLock;
 
 use super::chat_engine::ChatEngine;
+use super::chat_logger;
 use super::config_manager::ConfigManager;
 use super::conversation_store::ConversationStore;
 use super::data_models::*;
@@ -16,6 +17,7 @@ pub fn init_app(data_path: String) {
     DATA_PATH.get_or_init(|| data_path.clone());
     CONFIG_MANAGER.get_or_init(|| ConfigManager::new(&data_path));
     CONVERSATION_STORE.get_or_init(|| ConversationStore::new(&data_path));
+    chat_logger::init_logger();
 }
 
 fn get_data_path() -> &'static str {
@@ -201,6 +203,20 @@ pub fn validate_api_key(api_key: String) -> bool {
     JwtAuth::validate_api_key_format(&api_key)
 }
 
+// ── 日志系统 ──
+
+/// 获取最近的日志条目
+/// - level_filter: None=全部, Info=全部, Warning=Warning+Error, Error=仅Error
+/// - limit: 返回条数上限
+pub fn get_logs(level_filter: Option<LogLevel>, limit: usize) -> Vec<LogEntry> {
+    chat_logger::get_logs(level_filter, limit)
+}
+
+/// 清空日志缓冲区
+pub fn clear_logs() {
+    chat_logger::clear_logs();
+}
+
 pub fn get_available_models() -> Vec<ModelInfo> {
     // 参考: https://docs.bigmodel.cn/cn/guide/start/concept-param
     vec![
@@ -220,9 +236,16 @@ pub fn get_available_models() -> Vec<ModelInfo> {
         },
         ModelInfo {
             id: "glm-4.7-flash".to_string(),
-            name: "GLM-4.7-Flash（快速）".to_string(),
+            name: "GLM-4.7-Flash（快速+思考）".to_string(),
             context_tokens: 128000,
             max_output_tokens: 131072,
+            supports_thinking: true,
+        },
+        ModelInfo {
+            id: "glm-4-long".to_string(),
+            name: "GLM-4-Long（超长上下文）".to_string(),
+            context_tokens: 1000000,
+            max_output_tokens: 4095,
             supports_thinking: false,
         },
     ]

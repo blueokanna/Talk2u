@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:talk2u/src/pages/log_viewer_page.dart';
 import 'package:talk2u/src/rust/api/chat_api.dart' as rust_api;
 import 'package:talk2u/src/rust/api/data_models.dart';
 
@@ -138,6 +139,23 @@ class _SettingsPageState extends State<SettingsPage> {
             icon: const Icon(Icons.save_rounded),
             label: const Text('保存设置'),
             style: FilledButton.styleFrom(
+              minimumSize: const Size.fromHeight(48),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const LogViewerPage()),
+              );
+            },
+            icon: const Icon(Icons.article_outlined),
+            label: const Text('查看请求日志'),
+            style: OutlinedButton.styleFrom(
               minimumSize: const Size.fromHeight(48),
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(12),
