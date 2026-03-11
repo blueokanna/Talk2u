@@ -127,11 +127,7 @@ impl KnowledgeStore {
 
     // ── 事实存储 ──
 
-    pub fn save_facts(
-        &self,
-        conversation_id: &str,
-        facts: &[Fact],
-    ) -> Result<(), ChatError> {
+    pub fn save_facts(&self, conversation_id: &str, facts: &[Fact]) -> Result<(), ChatError> {
         let path = self.facts_path(conversation_id)?;
         let json = serde_json::to_string_pretty(facts).map_err(|e| ChatError::StorageError {
             message: format!("Failed to serialize facts: {}", e),
@@ -155,11 +151,7 @@ impl KnowledgeStore {
     }
 
     /// 添加新事实（自动去重和更新）
-    pub fn add_facts(
-        &self,
-        conversation_id: &str,
-        new_facts: Vec<Fact>,
-    ) -> Result<(), ChatError> {
+    pub fn add_facts(&self, conversation_id: &str, new_facts: Vec<Fact>) -> Result<(), ChatError> {
         let mut existing = self.load_facts(conversation_id)?;
 
         for new_fact in new_facts {
@@ -172,10 +164,8 @@ impl KnowledgeStore {
             });
 
             if let Some(idx) = existing_idx {
-                let similarity = Self::semantic_similarity_score(
-                    &existing[idx].content,
-                    &new_fact.content,
-                );
+                let similarity =
+                    Self::semantic_similarity_score(&existing[idx].content, &new_fact.content);
 
                 // 更新已有事实
                 let should_replace_content = Self::is_critical_category(&existing[idx].category)
@@ -189,8 +179,8 @@ impl KnowledgeStore {
                 }
 
                 existing[idx].last_confirmed_at = new_fact.last_confirmed_at;
-                existing[idx].confidence =
-                    (existing[idx].confidence + 0.1).min(1.0); // 每次确认增加置信度
+                existing[idx].confidence = (existing[idx].confidence + 0.1).min(1.0);
+            // 每次确认增加置信度
             } else {
                 existing.push(new_fact);
             }
@@ -265,8 +255,27 @@ impl KnowledgeStore {
                 !c.is_whitespace()
                     && !matches!(
                         c,
-                        '，' | '。' | '；' | '：' | '！' | '？' | ',' | '.' | ';' | ':' | '!'
-                            | '?' | '"' | '\'' | '（' | '）' | '(' | ')' | '【' | '】' | '[' | ']'
+                        '，' | '。'
+                            | '；'
+                            | '：'
+                            | '！'
+                            | '？'
+                            | ','
+                            | '.'
+                            | ';'
+                            | ':'
+                            | '!'
+                            | '?'
+                            | '"'
+                            | '\''
+                            | '（'
+                            | '）'
+                            | '('
+                            | ')'
+                            | '【'
+                            | '】'
+                            | '['
+                            | ']'
                     )
             })
             .collect()
@@ -304,11 +313,7 @@ impl KnowledgeStore {
 
     // ── 倒排索引 ──
 
-    fn rebuild_index(
-        &self,
-        conversation_id: &str,
-        facts: &[Fact],
-    ) -> Result<(), ChatError> {
+    fn rebuild_index(&self, conversation_id: &str, facts: &[Fact]) -> Result<(), ChatError> {
         let mut keyword_index: HashMap<String, Vec<String>> = HashMap::new();
         let mut entity_index: HashMap<String, Vec<String>> = HashMap::new();
         let mut category_index: HashMap<String, Vec<String>> = HashMap::new();
@@ -343,10 +348,9 @@ impl KnowledgeStore {
         };
 
         let path = self.index_path(conversation_id)?;
-        let json =
-            serde_json::to_string_pretty(&index).map_err(|e| ChatError::StorageError {
-                message: format!("Failed to serialize index: {}", e),
-            })?;
+        let json = serde_json::to_string_pretty(&index).map_err(|e| ChatError::StorageError {
+            message: format!("Failed to serialize index: {}", e),
+        })?;
         fs::write(&path, json).map_err(|e| ChatError::StorageError {
             message: format!("Failed to write index: {}", e),
         })
@@ -429,8 +433,7 @@ impl KnowledgeStore {
                 (i, score * category_boost)
             })
             .collect();
-        semantic_scores
-            .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        semantic_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         // RRF 融合
         let fused =
@@ -454,13 +457,15 @@ impl KnowledgeStore {
             .filter(|f| {
                 matches!(
                     f.category,
-                    FactCategory::Identity
-                        | FactCategory::Promise
-                        | FactCategory::Relationship
+                    FactCategory::Identity | FactCategory::Promise | FactCategory::Relationship
                 )
             })
             .collect();
-        priority.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+        priority.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         priority
             .into_iter()
             .take(top_k)
@@ -492,10 +497,7 @@ impl KnowledgeStore {
     // ── 事实提取（从对话内容中自动提取事实）──
 
     /// 从AI生成的事实JSON中解析事实列表
-    pub fn parse_extracted_facts(
-        json_text: &str,
-        turn: u32,
-    ) -> Vec<Fact> {
+    pub fn parse_extracted_facts(json_text: &str, turn: u32) -> Vec<Fact> {
         let json_str = if let Some(start) = json_text.find('[') {
             if let Some(end) = json_text.rfind(']') {
                 &json_text[start..=end]
@@ -622,7 +624,8 @@ impl KnowledgeStore {
             prompt.push_str(&format!("{}: {}\n", role, msg.content));
         }
 
-        prompt.push_str(r#"
+        prompt.push_str(
+            r#"
 请提取新的事实（已存储的不要重复），输出JSON数组：
 [
   {
@@ -644,7 +647,8 @@ impl KnowledgeStore {
 8. 共识(consensus)：双方达成的一致看法
 9. 每条事实≤30字，信息密度优先
 10. 如果没有新事实可提取，输出空数组 []
-只输出JSON"#);
+只输出JSON"#,
+        );
 
         prompt
     }
@@ -677,7 +681,8 @@ impl KnowledgeStore {
         if !all_identity_facts.is_empty() {
             context.push_str("▸ 不可变事实：\n");
             for fact in all_identity_facts {
-                context.push_str(&format!("  ● [{}] {}\n",
+                context.push_str(&format!(
+                    "  ● [{}] {}\n",
                     Self::category_label(&fact.category),
                     fact.content
                 ));
@@ -713,7 +718,8 @@ impl KnowledgeStore {
             }
 
             for result in selected {
-                context.push_str(&format!("  · [{}] {} (相关:{:.2}, 置信:{:.0}%)\n",
+                context.push_str(&format!(
+                    "  · [{}] {} (相关:{:.2}, 置信:{:.0}%)\n",
                     Self::category_label(&result.fact.category),
                     result.fact.content,
                     result.relevance_score,
@@ -725,9 +731,8 @@ impl KnowledgeStore {
             }
         }
 
-        context.push_str(
-            "\n以上知识库事实是已经确认的信息，回复时必须与之一致，不得矛盾或编造。\n",
-        );
+        context
+            .push_str("\n以上知识库事实是已经确认的信息，回复时必须与之一致，不得矛盾或编造。\n");
 
         context
     }
@@ -750,11 +755,7 @@ impl KnowledgeStore {
     }
 
     /// 更新事实的命中计数
-    pub fn record_hits(
-        &self,
-        conversation_id: &str,
-        fact_ids: &[String],
-    ) -> Result<(), ChatError> {
+    pub fn record_hits(&self, conversation_id: &str, fact_ids: &[String]) -> Result<(), ChatError> {
         let mut facts = self.load_facts(conversation_id)?;
         for fact in &mut facts {
             if fact_ids.contains(&fact.id) {
@@ -772,8 +773,10 @@ mod tests {
 
     #[test]
     fn test_category_weight() {
-        assert!(KnowledgeStore::category_weight(&FactCategory::Identity) > 
-                KnowledgeStore::category_weight(&FactCategory::CurrentState));
+        assert!(
+            KnowledgeStore::category_weight(&FactCategory::Identity)
+                > KnowledgeStore::category_weight(&FactCategory::CurrentState)
+        );
     }
 
     #[test]

@@ -41,9 +41,10 @@ impl ConversationStore {
             let json = fs::read_to_string(&json_path).map_err(|e| ChatError::StorageError {
                 message: format!("Failed to read json for migration: {}", e),
             })?;
-            let conv: Conversation = serde_json::from_str(&json).map_err(|e| ChatError::StorageError {
-                message: format!("Failed to parse json for migration: {}", e),
-            })?;
+            let conv: Conversation =
+                serde_json::from_str(&json).map_err(|e| ChatError::StorageError {
+                    message: format!("Failed to parse json for migration: {}", e),
+                })?;
             self.save_conversation(&conv)?;
             let _ = fs::remove_file(&json_path);
         }
@@ -154,11 +155,7 @@ impl ConversationStore {
         }
     }
 
-    pub fn add_message(
-        &self,
-        conversation_id: &str,
-        message: Message,
-    ) -> Result<(), ChatError> {
+    pub fn add_message(&self, conversation_id: &str, message: Message) -> Result<(), ChatError> {
         let mut conv = self.load_conversation(conversation_id)?;
 
         if conv.title.is_empty() && message.role == MessageRole::User {
@@ -172,11 +169,7 @@ impl ConversationStore {
     }
 
     /// Delete a single message from a conversation by message ID.
-    pub fn delete_message(
-        &self,
-        conversation_id: &str,
-        message_id: &str,
-    ) -> Result<(), ChatError> {
+    pub fn delete_message(&self, conversation_id: &str, message_id: &str) -> Result<(), ChatError> {
         let mut conv = self.load_conversation(conversation_id)?;
         let original_len = conv.messages.len();
         conv.messages.retain(|m| m.id != message_id);
@@ -245,10 +238,7 @@ impl ConversationStore {
             .ok_or_else(|| ChatError::StorageError {
                 message: format!("Message '{}' not found", message_id),
             })?;
-        let deleted_ids: Vec<String> = conv.messages[pos..]
-            .iter()
-            .map(|m| m.id.clone())
-            .collect();
+        let deleted_ids: Vec<String> = conv.messages[pos..].iter().map(|m| m.id.clone()).collect();
         conv.messages.truncate(pos);
         conv.updated_at = chrono::Utc::now().timestamp_millis();
         self.save_conversation(&conv)?;

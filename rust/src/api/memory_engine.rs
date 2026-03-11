@@ -131,15 +131,12 @@ impl MemoryEngine {
             CompressionImpactLevel::Lossless => {
                 "【压缩等级：无损】所有信息必须完整保留，不可省略任何细节。".to_string()
             }
-            CompressionImpactLevel::StyleDrift => {
-                "【压缩等级：轻微风格偏移】\n\
+            CompressionImpactLevel::StyleDrift => "【压缩等级：轻微风格偏移】\n\
                  优先保留：身份、关系、事件、金钱数值、承诺\n\
                  允许简化：语气描述、氛围词、重复的情绪表达\n\
                  警告：角色的口癖和表达习惯可能因压缩而轻微变化"
-                    .to_string()
-            }
-            CompressionImpactLevel::PersonalityFade => {
-                "【压缩等级：性格细节模糊风险】\n\
+                .to_string(),
+            CompressionImpactLevel::PersonalityFade => "【压缩等级：性格细节模糊风险】\n\
                  必须保留（绝对不可丢失）：\n\
                  - [身份] 所有身份属性\n\
                  - [关系] 所有人物关系\n\
@@ -147,10 +144,8 @@ impl MemoryEngine {
                  - [金钱] 所有金额/交易记录\n\
                  允许压缩：性格描述可合并为关键词，口癖可省略频率细节\n\
                  警告：此代数的压缩可能导致角色性格表现不如早期精确"
-                    .to_string()
-            }
-            CompressionImpactLevel::DetailLoss => {
-                "【压缩等级：细节丢失风险】\n\
+                .to_string(),
+            CompressionImpactLevel::DetailLoss => "【压缩等级：细节丢失风险】\n\
                  绝对保留（核心锚点）：\n\
                  - [身份] 姓名、年龄、职业、核心设定\n\
                  - [关系] 主要人物关系方向\n\
@@ -158,10 +153,8 @@ impl MemoryEngine {
                  尽力保留：金钱数值、次要关系、时间线\n\
                  允许丢失：氛围、场景细节、重复事件的具体过程\n\
                  警告：金钱数值和次要关系可能因多次压缩而不精确"
-                    .to_string()
-            }
-            CompressionImpactLevel::IdentityErosion => {
-                "【压缩等级：深度退化风险】\n\
+                .to_string(),
+            CompressionImpactLevel::IdentityErosion => "【压缩等级：深度退化风险】\n\
                  这是高代数压缩，信息损耗不可避免。\n\
                  绝对保留（最后防线）：\n\
                  - 角色姓名和核心身份\n\
@@ -169,8 +162,7 @@ impl MemoryEngine {
                  - 最重要的 3-5 个转折事件\n\
                  尽力保留：其他身份属性、金钱、次要关系\n\
                  警告：身份的边缘属性（爱好、习惯、次要设定）可能已经模糊"
-                    .to_string()
-            }
+                .to_string(),
         }
     }
 
@@ -211,7 +203,11 @@ impl MemoryEngine {
             .map(|s| s.compression_generation)
             .max()
             .unwrap_or(0);
-        let current_gen = if existing_summaries.is_empty() { 0 } else { max_gen };
+        let current_gen = if existing_summaries.is_empty() {
+            0
+        } else {
+            max_gen
+        };
 
         // 注入压缩保护指令
         prompt.push_str(&Self::compression_protection_instructions(current_gen));
@@ -511,8 +507,8 @@ impl MemoryEngine {
             let tf_val_b = tf_b.get(*term).copied().unwrap_or(0.0);
 
             // 计算文档频率（出现在几个文档中）
-            let df = (if tf_val_a > 0.0 { 1.0 } else { 0.0 })
-                + (if tf_val_b > 0.0 { 1.0 } else { 0.0 });
+            let df =
+                (if tf_val_a > 0.0 { 1.0 } else { 0.0 }) + (if tf_val_b > 0.0 { 1.0 } else { 0.0 });
             let idf = (total_docs / (1.0 + df)).ln() + 1.0;
 
             let tfidf_a = tf_val_a * idf;
@@ -745,8 +741,8 @@ impl MemoryEngine {
         };
 
         // 是否以问句结尾
-        let ends_with_question = content.trim_end().ends_with('？')
-            || content.trim_end().ends_with('?');
+        let ends_with_question =
+            content.trim_end().ends_with('？') || content.trim_end().ends_with('?');
 
         // 是否有动作标记
         let has_action_marker =
@@ -785,10 +781,7 @@ impl MemoryEngine {
         let concerned_words = ["怎么了", "还好吗", "担心", "小心", "注意", "别", "当心"];
         let cold_words = ["哦", "嗯", "行", "好吧", "随便", "知道了"];
 
-        let warm_count = warm_words
-            .iter()
-            .filter(|w| content.contains(*w))
-            .count();
+        let warm_count = warm_words.iter().filter(|w| content.contains(*w)).count();
         let playful_count = playful_words
             .iter()
             .filter(|w| content.contains(*w))
@@ -797,10 +790,7 @@ impl MemoryEngine {
             .iter()
             .filter(|w| content.contains(*w))
             .count();
-        let cold_count = cold_words
-            .iter()
-            .filter(|w| content.contains(*w))
-            .count();
+        let cold_count = cold_words.iter().filter(|w| content.contains(*w)).count();
 
         let max_count = warm_count
             .max(playful_count)
@@ -851,11 +841,8 @@ impl MemoryEngine {
         }
 
         // 检测2：结尾总是问句
-        let question_end_ratio = recent
-            .iter()
-            .filter(|f| f.ends_with_question)
-            .count() as f64
-            / recent.len() as f64;
+        let question_end_ratio =
+            recent.iter().filter(|f| f.ends_with_question).count() as f64 / recent.len() as f64;
         if question_end_ratio > 0.7 {
             suggestions.push(
                 "不要每次都用问句结尾！有时候把话说完就行。\
@@ -916,11 +903,8 @@ impl MemoryEngine {
         }
 
         // 检测6：动作描写使用率异常
-        let action_ratio = recent
-            .iter()
-            .filter(|f| f.has_action_marker)
-            .count() as f64
-            / recent.len() as f64;
+        let action_ratio =
+            recent.iter().filter(|f| f.has_action_marker).count() as f64 / recent.len() as f64;
         if action_ratio > 0.9 {
             suggestions.push(
                 "不是每次都需要动作描写。有时纯对话更有力量。\
@@ -1253,33 +1237,56 @@ impl MemoryEngine {
         let f = fact.to_lowercase();
 
         // Identity 级：身份、姓名、年龄、职业、核心设定
-        if f.contains("[身份]") || f.contains("姓名") || f.contains("名字")
-            || f.contains("年龄") || f.contains("职业") || f.contains("设定")
-            || f.contains("identity") || f.contains("→是→") || f.contains("→叫→")
+        if f.contains("[身份]")
+            || f.contains("姓名")
+            || f.contains("名字")
+            || f.contains("年龄")
+            || f.contains("职业")
+            || f.contains("设定")
+            || f.contains("identity")
+            || f.contains("→是→")
+            || f.contains("→叫→")
         {
             return MemoryTier::Identity;
         }
 
         // CriticalEvent 级：不可逆事件、承诺、约定、金钱
-        if f.contains("[事件]") || f.contains("承诺") || f.contains("约定")
-            || f.contains("金钱") || f.contains("金额") || f.contains("转折")
-            || f.contains("不可逆") || f.contains("死") || f.contains("离开")
-            || f.contains("告白") || f.contains("分手") || f.contains("结婚")
+        if f.contains("[事件]")
+            || f.contains("承诺")
+            || f.contains("约定")
+            || f.contains("金钱")
+            || f.contains("金额")
+            || f.contains("转折")
+            || f.contains("不可逆")
+            || f.contains("死")
+            || f.contains("离开")
+            || f.contains("告白")
+            || f.contains("分手")
+            || f.contains("结婚")
         {
             return MemoryTier::CriticalEvent;
         }
 
         // RelationshipDynamic 级：关系变化
-        if f.contains("[关系]") || f.contains("关系") || f.contains("亲密")
-            || f.contains("信任") || f.contains("→喜欢→") || f.contains("→讨厌→")
-            || f.contains("→暗恋→") || f.contains("→青梅竹马→")
+        if f.contains("[关系]")
+            || f.contains("关系")
+            || f.contains("亲密")
+            || f.contains("信任")
+            || f.contains("→喜欢→")
+            || f.contains("→讨厌→")
+            || f.contains("→暗恋→")
+            || f.contains("→青梅竹马→")
         {
             return MemoryTier::RelationshipDynamic;
         }
 
         // CurrentState 级：当前状态
-        if f.contains("[状态]") || f.contains("当前") || f.contains("现在")
-            || f.contains("情绪") || f.contains("心情") || f.contains("基调")
+        if f.contains("[状态]")
+            || f.contains("当前")
+            || f.contains("现在")
+            || f.contains("情绪")
+            || f.contains("心情")
+            || f.contains("基调")
         {
             return MemoryTier::CurrentState;
         }
@@ -1290,7 +1297,10 @@ impl MemoryEngine {
 
     /// 为所有核心事实生成排级分类
     pub fn classify_all_facts(core_facts: &[String]) -> Vec<MemoryTier> {
-        core_facts.iter().map(|f| Self::classify_fact_tier(f)).collect()
+        core_facts
+            .iter()
+            .map(|f| Self::classify_fact_tier(f))
+            .collect()
     }
 
     /// 执行分级合并：将多条摘要按排级策略合并为更少的条目
@@ -1340,28 +1350,39 @@ impl MemoryEngine {
 
         // 第三步：将摘要按时间分组合并
         // 保留最新的 1 条摘要不动，其余合并为 1-2 条
-        let max_gen = summaries.iter().map(|s| s.compression_generation).max().unwrap_or(0);
+        let max_gen = summaries
+            .iter()
+            .map(|s| s.compression_generation)
+            .max()
+            .unwrap_or(0);
         let merge_gen = max_gen + 1;
 
         // 最新的摘要保持独立
         let latest = summaries.last().cloned();
 
         // 其余摘要合并为一条"历史总览"
-        let older: Vec<&MemorySummary> = summaries.iter().take(summaries.len().saturating_sub(1)).collect();
+        let older: Vec<&MemorySummary> = summaries
+            .iter()
+            .take(summaries.len().saturating_sub(1))
+            .collect();
 
         if older.is_empty() {
             return (summaries.to_vec(), None);
         }
 
         // 合并所有旧摘要的 summary 为时间线
-        let merged_summary: String = older.iter()
+        let merged_summary: String = older
+            .iter()
             .map(|s| s.summary.as_str())
             .collect::<Vec<&str>>()
             .join("→");
 
         // 截断合并后的 summary（保持精炼）
         let merged_summary = if merged_summary.chars().count() > 150 {
-            format!("{}...", merged_summary.chars().take(147).collect::<String>())
+            format!(
+                "{}...",
+                merged_summary.chars().take(147).collect::<String>()
+            )
         } else {
             merged_summary
         };
@@ -1392,9 +1413,8 @@ impl MemoryEngine {
         let turn_end = older.iter().map(|s| s.turn_range_end).max().unwrap_or(0);
 
         // 合并关键词
-        let mut merged_keywords: Vec<String> = older.iter()
-            .flat_map(|s| s.keywords.clone())
-            .collect();
+        let mut merged_keywords: Vec<String> =
+            older.iter().flat_map(|s| s.keywords.clone()).collect();
         merged_keywords.sort();
         merged_keywords.dedup();
 
@@ -1420,9 +1440,7 @@ impl MemoryEngine {
         }
 
         // 如果合并后仍然超过目标，生成 LLM 辅助合并 prompt
-        let needs_llm = result.iter()
-            .map(|s| s.core_facts.len())
-            .sum::<usize>() > 40;
+        let needs_llm = result.iter().map(|s| s.core_facts.len()).sum::<usize>() > 40;
 
         let llm_prompt = if needs_llm {
             Some(Self::build_tiered_merge_prompt(&result, merge_gen))
@@ -1440,7 +1458,15 @@ impl MemoryEngine {
             return facts.to_vec();
         }
         // 简单策略：只保留最后 2 条状态事实（最新的状态）
-        facts.iter().rev().take(2).cloned().collect::<Vec<_>>().into_iter().rev().collect()
+        facts
+            .iter()
+            .rev()
+            .take(2)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
     }
 
     /// 构建分级合并的 LLM 辅助 prompt
@@ -1462,7 +1488,13 @@ impl MemoryEngine {
         prompt.push_str("  - [状态] 类事实（只保留当前状态）\n\n");
 
         for (i, s) in summaries.iter().enumerate() {
-            prompt.push_str(&format!("记忆{}. [轮{}-{}] {}\n", i + 1, s.turn_range_start, s.turn_range_end, s.summary));
+            prompt.push_str(&format!(
+                "记忆{}. [轮{}-{}] {}\n",
+                i + 1,
+                s.turn_range_start,
+                s.turn_range_end,
+                s.summary
+            ));
             for (j, fact) in s.core_facts.iter().enumerate() {
                 let tier_tag = if j < s.fact_tiers.len() {
                     match &s.fact_tiers[j] {
@@ -1503,11 +1535,19 @@ impl MemoryEngine {
     /// 为记忆摘要生成上下文增强卡片
     /// 参考智谱上下文增强技术：为每个知识切片附加结构化元信息
     pub fn build_context_card(summary: &MemorySummary) -> MemoryContextCard {
-        Self::build_context_card_from_facts(&summary.core_facts, summary.turn_range_start, summary.turn_range_end)
+        Self::build_context_card_from_facts(
+            &summary.core_facts,
+            summary.turn_range_start,
+            summary.turn_range_end,
+        )
     }
 
     /// 从核心事实列表构建上下文卡片
-    fn build_context_card_from_facts(core_facts: &[String], turn_start: u32, turn_end: u32) -> MemoryContextCard {
+    fn build_context_card_from_facts(
+        core_facts: &[String],
+        turn_start: u32,
+        turn_end: u32,
+    ) -> MemoryContextCard {
         let source_range = format!("对话轮次 {}-{}", turn_start, turn_end);
 
         // 提取主题标签：从事实中提取分类标签
@@ -1518,17 +1558,28 @@ impl MemoryEngine {
 
         for fact in core_facts {
             // 提取分类标签
-            if fact.contains("[身份]") { topic_tags.push("身份".to_string()); }
-            if fact.contains("[关系]") { topic_tags.push("关系".to_string()); }
-            if fact.contains("[事件]") { topic_tags.push("事件".to_string()); }
-            if fact.contains("[状态]") { topic_tags.push("状态".to_string()); }
+            if fact.contains("[身份]") {
+                topic_tags.push("身份".to_string());
+            }
+            if fact.contains("[关系]") {
+                topic_tags.push("关系".to_string());
+            }
+            if fact.contains("[事件]") {
+                topic_tags.push("事件".to_string());
+            }
+            if fact.contains("[状态]") {
+                topic_tags.push("状态".to_string());
+            }
 
             // 提取实体：→ 分隔的三元组中的主体和客体
             let parts: Vec<&str> = fact.split('→').collect();
             if parts.len() >= 2 {
-                let entity = parts[0].trim()
-                    .trim_start_matches("[身份]").trim_start_matches("[关系]")
-                    .trim_start_matches("[事件]").trim_start_matches("[状态]")
+                let entity = parts[0]
+                    .trim()
+                    .trim_start_matches("[身份]")
+                    .trim_start_matches("[关系]")
+                    .trim_start_matches("[事件]")
+                    .trim_start_matches("[状态]")
                     .trim();
                 if !entity.is_empty() && entity.chars().count() <= 10 {
                     key_entities.push(entity.to_string());
@@ -1545,14 +1596,22 @@ impl MemoryEngine {
             let positive = ["开心", "幸福", "甜蜜", "温暖", "信任", "亲密", "喜欢"];
             let negative = ["难过", "生气", "冷战", "疏远", "不信任", "伤心", "愤怒"];
             for kw in &positive {
-                if fact.contains(kw) { emotional_indicators.push("正面"); }
+                if fact.contains(kw) {
+                    emotional_indicators.push("正面");
+                }
             }
             for kw in &negative {
-                if fact.contains(kw) { emotional_indicators.push("负面"); }
+                if fact.contains(kw) {
+                    emotional_indicators.push("负面");
+                }
             }
 
             // 因果关联：包含"因为"、"导致"、"所以"的事实
-            if fact.contains("因为") || fact.contains("导致") || fact.contains("所以") || fact.contains("因此") {
+            if fact.contains("因为")
+                || fact.contains("导致")
+                || fact.contains("所以")
+                || fact.contains("因此")
+            {
                 causal_links.push(fact.clone());
             }
         }
@@ -1563,8 +1622,14 @@ impl MemoryEngine {
         key_entities.dedup();
 
         // 综合情感基调
-        let pos_count = emotional_indicators.iter().filter(|&&e| e == "正面").count();
-        let neg_count = emotional_indicators.iter().filter(|&&e| e == "负面").count();
+        let pos_count = emotional_indicators
+            .iter()
+            .filter(|&&e| e == "正面")
+            .count();
+        let neg_count = emotional_indicators
+            .iter()
+            .filter(|&&e| e == "负面")
+            .count();
         let emotional_tone = if pos_count > neg_count {
             format!("正面(强度:{}/{})", pos_count, pos_count + neg_count)
         } else if neg_count > pos_count {
@@ -1678,10 +1743,9 @@ impl MemoryEngine {
     ) -> Result<(), ChatError> {
         let dir = self.memory_dir()?;
         let path = dir.join(format!("{}_distilled.json", conversation_id));
-        let json =
-            serde_json::to_string_pretty(state).map_err(|e| ChatError::StorageError {
-                message: format!("Failed to serialize distilled state: {}", e),
-            })?;
+        let json = serde_json::to_string_pretty(state).map_err(|e| ChatError::StorageError {
+            message: format!("Failed to serialize distilled state: {}", e),
+        })?;
         fs::write(&path, json).map_err(|e| ChatError::StorageError {
             message: format!("Failed to write distilled state: {}", e),
         })

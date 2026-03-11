@@ -1195,6 +1195,7 @@ dependencies = [
  "flutter_rust_bridge",
  "futures",
  "hmac",
+ "log",
  "proptest",
  "reqwest",
  "rmp-serde",

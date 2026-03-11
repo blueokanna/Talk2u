@@ -1,6 +1,7 @@
 use std::sync::OnceLock;
 
 use super::chat_engine::ChatEngine;
+use super::chat_logger;
 use super::config_manager::ConfigManager;
 use super::conversation_store::ConversationStore;
 use super::data_models::*;
@@ -16,6 +17,7 @@ pub fn init_app(data_path: String) {
     DATA_PATH.get_or_init(|| data_path.clone());
     CONFIG_MANAGER.get_or_init(|| ConfigManager::new(&data_path));
     CONVERSATION_STORE.get_or_init(|| ConversationStore::new(&data_path));
+    chat_logger::init_logger();
 }
 
 fn get_data_path() -> &'static str {
@@ -106,13 +108,23 @@ pub fn add_system_message(conversation_id: String, content: String) -> bool {
         .is_ok()
 }
 
-pub fn add_assistant_message(conversation_id: String, content: String) -> bool {
+pub fn add_assistant_message(
+    conversation_id: String,
+    content: String,
+    model: Option<String>,
+    thinking_content: Option<String>,
+) -> bool {
+    let assistant_model = model
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("glm-4.7")
+        .to_string();
     let msg = Message {
         id: uuid::Uuid::new_v4().to_string(),
         role: MessageRole::Assistant,
         content,
-        thinking_content: None,
-        model: "glm-4.7".to_string(),
+        thinking_content,
+        model: assistant_model,
         timestamp: chrono::Utc::now().timestamp_millis(),
         message_type: MessageType::Say,
     };
@@ -191,6 +203,20 @@ pub fn validate_api_key(api_key: String) -> bool {
     JwtAuth::validate_api_key_format(&api_key)
 }
 
+// ── 日志系统 ──
+
+/// 获取最近的日志条目
+/// - level_filter: None=全部, Info=全部, Warning=Warning+Error, Error=仅Error
+/// - limit: 返回条数上限
+pub fn get_logs(level_filter: Option<LogLevel>, limit: usize) -> Vec<LogEntry> {
+    chat_logger::get_logs(level_filter, limit)
+}
+
+/// 清空日志缓冲区
+pub fn clear_logs() {
+    chat_logger::clear_logs();
+}
+
 pub fn get_available_models() -> Vec<ModelInfo> {
     // 参考: https://docs.bigmodel.cn/cn/guide/start/concept-param
     vec![
@@ -210,9 +236,16 @@ pub fn get_available_models() -> Vec<ModelInfo> {
         },
         ModelInfo {
             id: "glm-4.7-flash".to_string(),
-            name: "GLM-4.7-Flash（快速）".to_string(),
+            name: "GLM-4.7-Flash（快速+思考）".to_string(),
             context_tokens: 128000,
             max_output_tokens: 131072,
+            supports_thinking: true,
+        },
+        ModelInfo {
+            id: "glm-4-long".to_string(),
+            name: "GLM-4-Long（超长上下文）".to_string(),
+            context_tokens: 1000000,
+            max_output_tokens: 4095,
             supports_thinking: false,
         },
     ]
@@ -252,10 +285,8 @@ pub async fn send_message(
     // 使用 done_sent 标记确保 Done 事件只发送一次
     let done_sent = std::sync::atomic::AtomicBool::new(false);
 
-    // 整体管线超时保护（5分钟）：防止多阶段管线累计超过 Flutter 的 10 分钟安全超时
-    let pipeline_result = tokio::time::timeout(
-        std::time::Duration::from_secs(300),
-        engine.send_message(
+    let pipeline_result = engine
+        .send_message(
             &conversation_id,
             &content,
             &chat_model,
@@ -267,24 +298,15 @@ pub async fn send_message(
                 }
                 let _ = sink.add(event);
             },
-        ),
-    )
-    .await;
+        )
+        .await;
 
-    // 仅在 Done 未发送时报错：Done 已发送说明回复已成功生成并保存，
-    // 后续步骤（如事实提取）超时不应覆盖成功状态
+    // 仅在 Done 未发送时报错：Done 已发送说明回复已成功生成并保存。
     match pipeline_result {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
+        Ok(()) => {}
+        Err(e) => {
             if !done_sent.load(std::sync::atomic::Ordering::Acquire) {
                 let _ = sink.add(ChatStreamEvent::Error(e.to_string()));
-            }
-        }
-        Err(_timeout) => {
-            if !done_sent.load(std::sync::atomic::Ordering::Acquire) {
-                let _ = sink.add(ChatStreamEvent::Error(
-                    "处理超时（5分钟），请缩短对话或重试".to_string(),
-                ));
             }
         }
     }
@@ -329,9 +351,8 @@ pub async fn regenerate_response(
 
     let done_sent = std::sync::atomic::AtomicBool::new(false);
 
-    let pipeline_result = tokio::time::timeout(
-        std::time::Duration::from_secs(300),
-        engine.regenerate_response(
+    let pipeline_result = engine
+        .regenerate_response(
             &conversation_id,
             &chat_model,
             &thinking_model,
@@ -342,22 +363,14 @@ pub async fn regenerate_response(
                 }
                 let _ = sink.add(event);
             },
-        ),
-    )
-    .await;
+        )
+        .await;
 
     match pipeline_result {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
+        Ok(()) => {}
+        Err(e) => {
             if !done_sent.load(std::sync::atomic::Ordering::Acquire) {
                 let _ = sink.add(ChatStreamEvent::Error(e.to_string()));
-            }
-        }
-        Err(_timeout) => {
-            if !done_sent.load(std::sync::atomic::Ordering::Acquire) {
-                let _ = sink.add(ChatStreamEvent::Error(
-                    "处理超时（5分钟），请缩短对话或重试".to_string(),
-                ));
             }
         }
     }
@@ -389,4 +402,39 @@ pub async fn trigger_memory_summarize(
             let _ = sink.add(event);
         })
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn add_assistant_message_persists_model_and_thinking_content() {
+        let temp_dir = tempdir().expect("create temp dir");
+        init_app(temp_dir.path().to_string_lossy().to_string());
+
+        let conversation = create_conversation();
+
+        let saved = add_assistant_message(
+            conversation.id.clone(),
+            "partial reply".to_string(),
+            Some("glm-4.7-flash".to_string()),
+            Some("reasoning trace".to_string()),
+        );
+
+        assert!(saved);
+
+        let reloaded = get_conversation(conversation.id)
+            .expect("conversation should exist after saving assistant reply");
+        let message = reloaded
+            .messages
+            .last()
+            .expect("assistant message should be persisted");
+
+        assert_eq!(message.role, MessageRole::Assistant);
+        assert_eq!(message.content, "partial reply");
+        assert_eq!(message.model, "glm-4.7-flash");
+        assert_eq!(message.thinking_content.as_deref(), Some("reasoning trace"));
+    }
 }

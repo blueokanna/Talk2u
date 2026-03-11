@@ -22,9 +22,7 @@ impl ConfigManager {
     pub fn load_settings(&self) -> AppSettings {
         let file_path = Path::new(&self.config_path).join("settings.json");
         match fs::read_to_string(&file_path) {
-            Ok(contents) => {
-                serde_json::from_str(&contents).unwrap_or_default()
-            }
+            Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
             Err(_) => AppSettings::default(),
         }
     }

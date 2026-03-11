@@ -158,6 +158,7 @@ void main() {
 
       // After all retries, streaming should be ended
       expect(state.isStreaming, false);
+      expect(state.currentStreamingContent, 'Partial');
     });
 
     test(
@@ -223,23 +224,42 @@ void main() {
       state.endStreaming();
     });
 
-    test('catch block in event handler sets _errorMessage', () async {
-      // This tests the try/catch around event.when(...)
-      // We simulate an exception by sending a contentDelta after streaming stopped
-      // Actually, let's test that _errorMessage is set when catch fires
-      // The catch block is hard to trigger directly, but we verify its structure
-      // by confirming normal error events work correctly
+    test(
+      'error after content does NOT set persistent error (partial content protection)',
+      () async {
+        // When content has already been received, error events are treated as
+        // intermediate (non-fatal) — they are logged but don't set _errorMessage.
+        // This prevents transient mid-stream errors from overriding valid partial content.
+        final controller = StreamController<ChatStreamEvent>();
+
+        state.startStreaming();
+        state.listenToChatStreamForTest(controller.stream, 'conv-4');
+
+        controller.add(const ChatStreamEvent.contentDelta('Hi'));
+        controller.add(const ChatStreamEvent.error('server error'));
+        await Future.delayed(const Duration(milliseconds: 50));
+
+        // errorMessage should be null because content was already received
+        expect(state.errorMessage, isNull);
+        expect(state.currentStreamingContent, 'Hi');
+
+        await controller.close();
+        state.endStreaming();
+      },
+    );
+
+    test('error before any content sets persistent error', () async {
+      // When no content has been received yet, error events ARE set as persistent.
       final controller = StreamController<ChatStreamEvent>();
 
       state.startStreaming();
-      state.listenToChatStreamForTest(controller.stream, 'conv-4');
+      state.listenToChatStreamForTest(controller.stream, 'conv-4b');
 
-      controller.add(const ChatStreamEvent.contentDelta('Hi'));
-      controller.add(const ChatStreamEvent.error('server error'));
+      controller.add(const ChatStreamEvent.error('API error'));
       await Future.delayed(const Duration(milliseconds: 50));
 
-      expect(state.errorMessage, 'server error');
-      expect(state.currentStreamingContent, 'Hi');
+      expect(state.errorMessage, 'API error');
+      expect(state.currentStreamingContent, '');
 
       await controller.close();
       state.endStreaming();

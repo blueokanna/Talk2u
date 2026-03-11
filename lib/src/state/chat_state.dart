@@ -87,12 +87,16 @@ class ChatState extends ChangeNotifier {
     // glm-4-air 自动开启思考
     if (model == thinkingModel) {
       _enableThinking = true;
-    } else if (model == flashModel) {
-      // flash 模型不支持思考
-      _enableThinking = false;
     }
-    // glm-4.7 保持用户当前的思考偏好不变
+    // glm-4.7 和 glm-4.7-flash 都支持思考模式，保持用户偏好不变
     notifyListeners();
+  }
+
+  String _assistantModelForPersistence() {
+    if (_selectedModel == thinkingModel) {
+      return chatModel;
+    }
+    return _selectedModel;
   }
 
   // ── 对话风格 ──
@@ -218,7 +222,6 @@ class ChatState extends ChangeNotifier {
         _currentThinkingContent = '';
         _dialogueStyle = conv.dialogueStyle;
 
-        // 恢复角色关联
         final characterId = _conversationCharacterMap[id];
         if (characterId != null) {
           _currentCharacter = CharacterStore.instance.getById(characterId);
@@ -265,7 +268,6 @@ class ChatState extends ChangeNotifier {
     }
   }
 
-  /// 编辑用户消息内容
   Future<void> editMessage(String messageId, String newContent) async {
     if (_currentConversationId == null) return;
     if (newContent.trim().isEmpty) return;
@@ -284,8 +286,6 @@ class ChatState extends ChangeNotifier {
     }
   }
 
-  /// 回溯到某条用户消息：删除该消息及之后的所有消息，
-  /// 同时清除相关的记忆摘要
   Future<void> rollbackToMessage(String messageId) async {
     if (_currentConversationId == null) return;
     try {
@@ -302,24 +302,19 @@ class ChatState extends ChangeNotifier {
     }
   }
 
-  /// 编辑用户消息并重新发送（回溯到该消息，然后发送新内容）
   Future<void> editAndResend(String messageId, String newContent) async {
     if (_currentConversationId == null || _isStreaming) return;
     if (newContent.trim().isEmpty) return;
     final conversationId = _currentConversationId!;
     try {
-      // 先回溯删除该消息及之后的所有消息
       await rust_api.rollbackToMessage(
         conversationId: conversationId,
         messageId: messageId,
       );
-      // 重新加载对话
       await loadConversation(conversationId);
-      // 发送新内容（会自动添加用户消息并请求 AI 回复）
       await sendMessage(newContent);
     } catch (e) {
       debugPrint('Failed to edit and resend: $e');
-      // 确保即使出错也能恢复到正确状态
       if (_isStreaming) {
         endStreaming();
       }
@@ -329,30 +324,20 @@ class ChatState extends ChangeNotifier {
     }
   }
 
-  /// 重新生成AI回复：只删除该AI回复，然后重新请求AI生成
   Future<void> regenerateResponse(String assistantMessageId) async {
     if (_currentConversationId == null || _isStreaming) return;
     try {
-      // 找到该AI消息在列表中的位置
       final msgIndex = _messages.indexWhere((m) => m.id == assistantMessageId);
       if (msgIndex < 0) return;
 
-      // 只删除这条AI消息及之后的所有消息（保留用户消息）
-      // rollbackToMessage 会删除目标消息及之后的所有消息
       await rust_api.rollbackToMessage(
         conversationId: _currentConversationId!,
         messageId: assistantMessageId,
       );
 
-      // 重新加载对话（此时用户消息还在，AI消息已删除）
       await loadConversation(_currentConversationId!);
-
       final conversationId = _currentConversationId!;
-
-      // 【关键修复】取消旧的流式订阅，防止僵尸回调
       _cancelExistingSubscription();
-
-      // 使用 regenerateResponse API，不会重新添加用户消息
       startStreaming();
 
       final stream = rust_api.regenerateResponse(
@@ -367,8 +352,6 @@ class ChatState extends ChangeNotifier {
       if (_isStreaming) endStreaming();
     }
   }
-
-  // ── 重启剧情 ──
 
   Future<void> restartStory() async {
     if (_currentConversationId == null) return;
@@ -385,35 +368,31 @@ class ChatState extends ChangeNotifier {
     }
   }
 
-  // ── 流式聊天 ──
-
   void setEnableThinking(bool enabled) {
     _enableThinking = enabled;
-    // 关闭思考时：如果当前选的是推理模型，切回对话模型
     if (!enabled && _selectedModel == thinkingModel) {
       _selectedModel = chatModel;
     }
-    // 开启思考时：如果当前选的是 flash 模型（不支持思考），切回对话模型
-    if (enabled && _selectedModel == flashModel) {
-      _selectedModel = chatModel;
-    }
+    // glm-4.7-flash 现在也支持思考模式，不需要切换模型
     notifyListeners();
   }
 
-  /// 取消旧的流式订阅，防止僵尸回调干扰新的流式会话
   void _cancelExistingSubscription() {
     _streamSubscription?.cancel();
     _streamSubscription = null;
+    _retryDoneTimer?.cancel();
+    _retryDoneTimer = null;
   }
 
   void startStreaming() {
+    _retryDoneTimer?.cancel();
+    _retryDoneTimer = null;
     _isStreaming = true;
     _currentStreamingContent = '';
     _currentThinkingContent = '';
     _errorMessage = null;
     _streamDirty = false;
     _doneEventReceived = false;
-    // 启动节流定时器：每 30ms 刷新一次 UI，实现逐字显示效果
     _streamThrottleTimer?.cancel();
     _streamThrottleTimer = Timer.periodic(const Duration(milliseconds: 30), (
       _,
@@ -421,17 +400,6 @@ class ChatState extends ChangeNotifier {
       if (_streamDirty) {
         _streamDirty = false;
         notifyListeners();
-      }
-    });
-    // 安全超时：10分钟后自动结束流式状态，防止永久卡死
-    _streamTimeoutTimer?.cancel();
-    _streamTimeoutTimer = Timer(const Duration(minutes: 10), () {
-      if (_isStreaming) {
-        debugPrint(
-          '[ChatState] Streaming timeout after 10 minutes, force ending',
-        );
-        _errorMessage ??= '请求超时（10分钟），请重试或缩短对话';
-        endStreaming();
       }
     });
     notifyListeners();
@@ -454,27 +422,18 @@ class ChatState extends ChangeNotifier {
     _streamThrottleTimer = null;
     _streamTimeoutTimer?.cancel();
     _streamTimeoutTimer = null;
-    // 最后一次刷新，确保所有累积的流式内容都显示出来
     if (_streamDirty) {
       _streamDirty = false;
     }
     notifyListeners();
   }
 
-  // ═══════════════════════════════════════════
-  //  统一流式监听器（消除 3 处重复代码）
-  // ═══════════════════════════════════════════
-
-  /// 监听 Rust FFI 返回的 ChatStreamEvent 流。
-  /// 统一处理 contentDelta / thinkingDelta / done / error / onDone 竞态。
-  /// [conversationId] 用于防止切换对话后的陈旧回调。
   void _listenToChatStream(
     Stream<ChatStreamEvent> stream,
     String conversationId,
   ) {
     _streamSubscription = stream.listen(
       (event) {
-        // 陈旧会话守卫：用户已切换到其他对话，忽略旧流事件
         if (_currentConversationId != conversationId) return;
 
         try {
@@ -483,13 +442,20 @@ class ChatState extends ChangeNotifier {
             thinkingDelta: (delta) => appendThinkingContent(delta),
             done: () {
               _doneEventReceived = true;
-              final activeError = _errorMessage;
               endStreaming();
-              // 陈旧守卫：endStreaming 之后再检查一次
               if (_currentConversationId != conversationId) return;
               loadConversation(conversationId, preserveError: true).then((_) {
-                if (activeError != null && _errorMessage == null) {
-                  _errorMessage = activeError;
+                // 检查 AI 是否成功保存了回复消息
+                final hasAssistantReply =
+                    _messages.isNotEmpty &&
+                    _messages.last.role == MessageRole.assistant;
+                if (hasAssistantReply) {
+                  // AI 回复成功落盘 — 清除所有中间错误
+                  _errorMessage = null;
+                  _lastFailedContent = null;
+                } else {
+                  // AI 回复未成功 — 保留或恢复错误信息
+                  _errorMessage ??= 'AI 响应失败，请点击重试';
                 }
                 refreshConversationList();
                 if (_errorMessage == null) {
@@ -501,11 +467,16 @@ class ChatState extends ChangeNotifier {
             error: (msg) {
               if (msg == '__RETRY_RESET__') {
                 _currentStreamingContent = '';
-                _currentThinkingContent = '';
+                // 不清除 thinking：Phase 3 的内容重试不应丢弃 Phase 1 的推理展示
                 _streamDirty = true;
                 return;
               }
-              _errorMessage = msg;
+              // 仅在尚未收到任何流式内容时设置为持久错误
+              // 已有内容时，中间错误只记录日志不影响最终状态
+              if (_currentStreamingContent.isEmpty &&
+                  _currentThinkingContent.isEmpty) {
+                _errorMessage = msg;
+              }
               debugPrint('[ChatState] Stream error event: $msg');
               notifyListeners();
             },
@@ -525,7 +496,6 @@ class ChatState extends ChangeNotifier {
       },
       onError: (e) {
         debugPrint('[ChatState] Stream error: $e');
-        // 陈旧会话守卫：先检查是否仍是当前对话
         if (_currentConversationId != conversationId) return;
         if (_isStreaming) endStreaming();
         _errorMessage = e.toString();
@@ -534,52 +504,65 @@ class ChatState extends ChangeNotifier {
         });
       },
       onDone: () {
-        // Done 事件已通过 event handler 处理，无需兜底
         if (!_isStreaming || _doneEventReceived) return;
-
-        // ═══ FRB 竞态防护（递增间隔多次重试）═══
-        // flutter_rust_bridge 的流关闭信号可能先于最后一个 Done 数据事件到达。
-        // 给 Dart 事件循环多个宽限窗口来处理尚在队列中的 Done 事件。
         final activeError = _errorMessage;
         _retryDoneCheck(conversationId, activeError, 0);
       },
     );
   }
 
-  /// FRB 竞态防护：递增间隔检查 Done 事件是否已到达。
-  /// 总窗口约 2 秒（300 + 700 + 1000ms），比单次 500ms 更可靠。
   void _retryDoneCheck(
     String conversationId,
     String? activeError,
     int attempt,
   ) {
-    const delays = [300, 700, 1000]; // 累计 300 → 1000 → 2000ms
+    const delays = [300, 700, 1000];
 
     if (attempt >= delays.length) {
-      // 所有重试耗尽，做最终判定
       if (_doneEventReceived || !_isStreaming) return;
       if (_currentConversationId != conversationId) return;
+
+      final partialContent = _currentStreamingContent.trim();
+      final partialThinking = _currentThinkingContent.trim();
+      final partialModel = _assistantModelForPersistence();
 
       debugPrint(
         '[ChatState] Stream closed without Done after 2s grace (conv=$conversationId)',
       );
       endStreaming();
-      loadConversation(conversationId, preserveError: true).then((_) {
-        if (activeError != null && _errorMessage == null) {
-          _errorMessage = activeError;
-        }
+      loadConversation(conversationId, preserveError: true).then((_) async {
         final hasAssistantResponse =
             _messages.isNotEmpty &&
             _messages.last.role == MessageRole.assistant;
+
         if (hasAssistantResponse) {
-          // Rust 侧已保存回复，只是 Done 事件被竞态吞掉了
+          _errorMessage = null;
+          _lastFailedContent = null;
           refreshConversationList();
-          if (_errorMessage == null) {
-            _checkAndTriggerMemorySummarize(conversationId);
-          }
-        } else if (_errorMessage == null) {
-          _errorMessage = 'AI 响应中断，请点击重试';
+          _checkAndTriggerMemorySummarize(conversationId);
+          notifyListeners();
+          return;
         }
+
+        if (partialContent.isNotEmpty) {
+          final persisted = await _persistPartialAssistantReply(
+            conversationId,
+            partialContent,
+            model: partialModel,
+            thinkingContent: partialThinking.isEmpty ? null : partialThinking,
+          );
+          if (persisted) {
+            _errorMessage = null;
+            _lastFailedContent = null;
+            notifyListeners();
+            return;
+          }
+        }
+
+        if (activeError != null && _errorMessage == null) {
+          _errorMessage = activeError;
+        }
+        _errorMessage ??= 'AI 响应中断，请点击重试';
         notifyListeners();
       });
       return;
@@ -591,6 +574,30 @@ class ChatState extends ChangeNotifier {
       if (_currentConversationId != conversationId) return;
       _retryDoneCheck(conversationId, activeError, attempt + 1);
     });
+  }
+
+  Future<bool> _persistPartialAssistantReply(
+    String conversationId,
+    String content, {
+    required String model,
+    String? thinkingContent,
+  }) async {
+    try {
+      final saved = await rust_api.addAssistantMessage(
+        conversationId: conversationId,
+        content: content,
+        model: model,
+        thinkingContent: thinkingContent,
+      );
+      if (!saved) return false;
+      await loadConversation(conversationId, preserveError: true);
+      await refreshConversationList();
+      _checkAndTriggerMemorySummarize(conversationId);
+      return true;
+    } catch (e) {
+      debugPrint('[ChatState] Failed to persist partial assistant reply: $e');
+      return false;
+    }
   }
 
   Future<void> sendMessage(String content) async {

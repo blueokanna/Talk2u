@@ -20,7 +20,6 @@ pub enum MessageType {
     Mixed,
 }
 
-
 #[frb]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
@@ -52,7 +51,6 @@ pub enum DialogueStyle {
     #[default]
     Mixed,
 }
-
 
 /// 对话
 #[frb]
@@ -196,4 +194,27 @@ pub struct DistilledSystemState {
     pub last_turn_count: u32,
     pub distilled_at: i64,
     pub core_facts_snapshot: Vec<String>,
+}
+
+// ═══════════════════════════════════════════
+//  日志系统
+// ═══════════════════════════════════════════
+
+#[derive(Default)]
+#[frb]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum LogLevel {
+    #[default]
+    Info,
+    Warning,
+    Error,
+}
+
+#[frb]
+#[derive(Debug, Clone)]
+pub struct LogEntry {
+    pub timestamp: i64,
+    pub level: LogLevel,
+    pub module: String,
+    pub message: String,
 }

@@ -1,21 +1,39 @@
 use flutter_rust_bridge::frb;
 use std::fmt;
 use std::future::Future;
-use tokio::time::sleep;
 use std::time::Duration;
+use tokio::time::sleep;
 
 #[frb(opaque)]
 #[derive(Debug, Clone)]
 pub enum ChatError {
-    ApiError { status: u16, message: String },
-    NetworkError { message: String },
-    RateLimitError { retry_after_secs: u64 },
-    AuthError { message: String },
-    StorageError { message: String },
-    ValidationError { message: String },
-    StreamError { message: String },
+    ApiError {
+        status: u16,
+        message: String,
+    },
+    NetworkError {
+        message: String,
+    },
+    RateLimitError {
+        retry_after_secs: u64,
+    },
+    AuthError {
+        message: String,
+    },
+    StorageError {
+        message: String,
+    },
+    ValidationError {
+        message: String,
+    },
+    StreamError {
+        message: String,
+    },
     /// GLM 业务错误（携带业务错误码，便于精确分类）
-    GlmBusinessError { code: String, message: String },
+    GlmBusinessError {
+        code: String,
+        message: String,
+    },
 }
 
 impl fmt::Display for ChatError {
@@ -255,8 +273,7 @@ impl RetryHandler {
 
                     last_error = Some(err.clone());
                     if attempt < self.max_retries {
-                        let wait_ms = if let ChatError::RateLimitError { retry_after_secs } = &err
-                        {
+                        let wait_ms = if let ChatError::RateLimitError { retry_after_secs } = &err {
                             retry_after_secs * 1000
                         } else {
                             let current = delay_ms;
@@ -286,9 +303,14 @@ mod tests {
             status: 500,
             message: "Internal Server Error".to_string(),
         };
-        assert_eq!(err.to_string(), "API error (status 500): Internal Server Error");
+        assert_eq!(
+            err.to_string(),
+            "API error (status 500): Internal Server Error"
+        );
 
-        let err = ChatError::RateLimitError { retry_after_secs: 5 };
+        let err = ChatError::RateLimitError {
+            retry_after_secs: 5,
+        };
         assert_eq!(err.to_string(), "Rate limited: retry after 5 seconds");
 
         let err = ChatError::ValidationError {
@@ -299,22 +321,68 @@ mod tests {
 
     #[test]
     fn test_chat_error_is_retryable() {
-        assert!(ChatError::NetworkError { message: "timeout".into() }.is_retryable());
-        assert!(ChatError::ApiError { status: 500, message: "err".into() }.is_retryable());
-        assert!(!ChatError::ApiError { status: 400, message: "bad".into() }.is_retryable());
-        assert!(!ChatError::ApiError { status: 401, message: "auth".into() }.is_retryable());
-        assert!(ChatError::RateLimitError { retry_after_secs: 1 }.is_retryable());
+        assert!(ChatError::NetworkError {
+            message: "timeout".into()
+        }
+        .is_retryable());
+        assert!(ChatError::ApiError {
+            status: 500,
+            message: "err".into()
+        }
+        .is_retryable());
+        assert!(!ChatError::ApiError {
+            status: 400,
+            message: "bad".into()
+        }
+        .is_retryable());
+        assert!(!ChatError::ApiError {
+            status: 401,
+            message: "auth".into()
+        }
+        .is_retryable());
+        assert!(ChatError::RateLimitError {
+            retry_after_secs: 1
+        }
+        .is_retryable());
 
-        assert!(!ChatError::ValidationError { message: "bad".into() }.is_retryable());
-        assert!(!ChatError::StorageError { message: "io".into() }.is_retryable());
-        assert!(!ChatError::AuthError { message: "denied".into() }.is_retryable());
-        assert!(ChatError::StreamError { message: "broken".into() }.is_retryable());
+        assert!(!ChatError::ValidationError {
+            message: "bad".into()
+        }
+        .is_retryable());
+        assert!(!ChatError::StorageError {
+            message: "io".into()
+        }
+        .is_retryable());
+        assert!(!ChatError::AuthError {
+            message: "denied".into()
+        }
+        .is_retryable());
+        assert!(ChatError::StreamError {
+            message: "broken".into()
+        }
+        .is_retryable());
 
         // GLM 业务码
-        assert!(ChatError::GlmBusinessError { code: "1302".into(), message: "并发".into() }.is_retryable());
-        assert!(ChatError::GlmBusinessError { code: "1303".into(), message: "频率".into() }.is_retryable());
-        assert!(!ChatError::GlmBusinessError { code: "1304".into(), message: "限额".into() }.is_retryable());
-        assert!(!ChatError::GlmBusinessError { code: "1113".into(), message: "余额".into() }.is_retryable());
+        assert!(ChatError::GlmBusinessError {
+            code: "1302".into(),
+            message: "并发".into()
+        }
+        .is_retryable());
+        assert!(ChatError::GlmBusinessError {
+            code: "1303".into(),
+            message: "频率".into()
+        }
+        .is_retryable());
+        assert!(!ChatError::GlmBusinessError {
+            code: "1304".into(),
+            message: "限额".into()
+        }
+        .is_retryable());
+        assert!(!ChatError::GlmBusinessError {
+            code: "1113".into(),
+            message: "余额".into()
+        }
+        .is_retryable());
     }
 
     #[tokio::test]
@@ -428,7 +496,9 @@ mod tests {
                 let count = cc.fetch_add(1, Ordering::SeqCst) + 1;
                 async move {
                     if count == 1 {
-                        Err(ChatError::RateLimitError { retry_after_secs: 1 })
+                        Err(ChatError::RateLimitError {
+                            retry_after_secs: 1,
+                        })
                     } else {
                         Ok(99)
                     }
@@ -454,7 +524,9 @@ mod tests {
                 let count = cc2.fetch_add(1, Ordering::SeqCst) + 1;
                 async move {
                     if count < 2 {
-                        Err(ChatError::NetworkError { message: "err".into() })
+                        Err(ChatError::NetworkError {
+                            message: "err".into(),
+                        })
                     } else {
                         Ok("hello".to_string())
                     }

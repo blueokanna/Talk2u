@@ -19,6 +19,7 @@ sha2 = "0.10"
 base64url = "0.1"
 uuid = { version = "1", features = ["v4"] }
 futures = "0.3"
+log = "0.4"
 rmp-serde = "1"
 bincode = "1"
 

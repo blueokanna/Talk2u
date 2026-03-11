@@ -45,6 +45,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Conversation dco_decode_box_autoadd_conversation(dynamic raw);
 
   @protected
+  LogLevel dco_decode_box_autoadd_log_level(dynamic raw);
+
+  @protected
   MemoryContextCard dco_decode_box_autoadd_memory_context_card(dynamic raw);
 
   @protected
@@ -75,6 +78,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ConversationSummary> dco_decode_list_conversation_summary(dynamic raw);
 
   @protected
+  List<LogEntry> dco_decode_list_log_entry(dynamic raw);
+
+  @protected
   List<MemorySearchResult> dco_decode_list_memory_search_result(dynamic raw);
 
   @protected
@@ -91,6 +97,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  LogEntry dco_decode_log_entry(dynamic raw);
+
+  @protected
+  LogLevel dco_decode_log_level(dynamic raw);
 
   @protected
   MemoryContextCard dco_decode_memory_context_card(dynamic raw);
@@ -121,6 +133,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Conversation? dco_decode_opt_box_autoadd_conversation(dynamic raw);
+
+  @protected
+  LogLevel? dco_decode_opt_box_autoadd_log_level(dynamic raw);
 
   @protected
   MemoryContextCard? dco_decode_opt_box_autoadd_memory_context_card(
@@ -165,6 +180,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  LogLevel sse_decode_box_autoadd_log_level(SseDeserializer deserializer);
+
+  @protected
   MemoryContextCard sse_decode_box_autoadd_memory_context_card(
     SseDeserializer deserializer,
   );
@@ -201,6 +219,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<LogEntry> sse_decode_list_log_entry(SseDeserializer deserializer);
+
+  @protected
   List<MemorySearchResult> sse_decode_list_memory_search_result(
     SseDeserializer deserializer,
   );
@@ -221,6 +242,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  LogEntry sse_decode_log_entry(SseDeserializer deserializer);
+
+  @protected
+  LogLevel sse_decode_log_level(SseDeserializer deserializer);
 
   @protected
   MemoryContextCard sse_decode_memory_context_card(
@@ -257,6 +284,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Conversation? sse_decode_opt_box_autoadd_conversation(
     SseDeserializer deserializer,
   );
+
+  @protected
+  LogLevel? sse_decode_opt_box_autoadd_log_level(SseDeserializer deserializer);
 
   @protected
   MemoryContextCard? sse_decode_opt_box_autoadd_memory_context_card(
@@ -309,6 +339,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_log_level(
+    LogLevel self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_memory_context_card(
     MemoryContextCard self,
     SseSerializer serializer,
@@ -351,6 +387,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_log_entry(List<LogEntry> self, SseSerializer serializer);
+
+  @protected
   void sse_encode_list_memory_search_result(
     List<MemorySearchResult> self,
     SseSerializer serializer,
@@ -382,6 +421,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     Uint8List self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_log_entry(LogEntry self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_log_level(LogLevel self, SseSerializer serializer);
 
   @protected
   void sse_encode_memory_context_card(
@@ -419,6 +464,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_conversation(
     Conversation? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_log_level(
+    LogLevel? self,
     SseSerializer serializer,
   );
 

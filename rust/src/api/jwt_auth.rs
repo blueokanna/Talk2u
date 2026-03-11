@@ -251,20 +251,29 @@ mod tests {
         let mut auth = JwtAuth::new("user.secret").unwrap();
         let t1 = auth.get_token();
         let t2 = auth.get_token();
-        assert_eq!(t1, t2, "Consecutive get_token calls should return cached token");
+        assert_eq!(
+            t1, t2,
+            "Consecutive get_token calls should return cached token"
+        );
     }
 
     #[test]
     fn test_is_token_expired_when_no_token() {
         let auth = JwtAuth::new("user.secret").unwrap();
-        assert!(auth.is_token_expired(), "Should be expired when no token exists");
+        assert!(
+            auth.is_token_expired(),
+            "Should be expired when no token exists"
+        );
     }
 
     #[test]
     fn test_is_token_not_expired_after_generation() {
         let mut auth = JwtAuth::new("user.secret").unwrap();
         auth.get_token();
-        assert!(!auth.is_token_expired(), "Freshly generated token should not be expired");
+        assert!(
+            !auth.is_token_expired(),
+            "Freshly generated token should not be expired"
+        );
     }
 
     #[test]
