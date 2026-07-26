@@ -43,6 +43,16 @@ dependencies:
   file_picker: ^8.0.0
   share_plus: ^10.0.0
   freezed_annotation: ^3.1.0
+  crypto: ^3.0.6
+  archive: ^4.0.9
+  path: ^1.9.0
+  audioplayers: ^6.5.1
+  fcllama: ^0.0.3
+  record: ^6.0.0
+  sherpa_onnx: ^1.13.4
+  webview_cef:
+    path: third_party/webview_cef_linux
+  webview_windows: ^0.4.0
 
 dev_dependencies:
   flutter_test:
@@ -88,6 +98,15 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+  assets:
+    - assets/Talk2U.png
+    - assets/live2d/
+    - assets/live2d/vendor/
+    - model/mao/ReadMe.txt
+    - model/mao/runtime/
+    - model/mao/runtime/expressions/
+    - model/mao/runtime/motions/
+    - model/mao/runtime/mao_pro.4096/
 
   # To add assets to your application, add an assets section, like this:
   # assets:

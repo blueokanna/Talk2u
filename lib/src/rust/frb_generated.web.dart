@@ -48,6 +48,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   MemoryContextCard dco_decode_box_autoadd_memory_context_card(dynamic raw);
 
   @protected
+  ProviderConfig dco_decode_box_autoadd_provider_config(dynamic raw);
+
+  @protected
   ChatStreamEvent dco_decode_chat_stream_event(dynamic raw);
 
   @protected
@@ -93,6 +96,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
+  List<ProviderConfig> dco_decode_list_provider_config(dynamic raw);
+
+  @protected
   MemoryContextCard dco_decode_memory_context_card(dynamic raw);
 
   @protected
@@ -126,6 +132,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   MemoryContextCard? dco_decode_opt_box_autoadd_memory_context_card(
     dynamic raw,
   );
+
+  @protected
+  ProviderConfig dco_decode_provider_config(dynamic raw);
 
   @protected
   int dco_decode_u_32(dynamic raw);
@@ -166,6 +175,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   MemoryContextCard sse_decode_box_autoadd_memory_context_card(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ProviderConfig sse_decode_box_autoadd_provider_config(
     SseDeserializer deserializer,
   );
 
@@ -223,6 +237,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
+  List<ProviderConfig> sse_decode_list_provider_config(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   MemoryContextCard sse_decode_memory_context_card(
     SseDeserializer deserializer,
   );
@@ -262,6 +281,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   MemoryContextCard? sse_decode_opt_box_autoadd_memory_context_card(
     SseDeserializer deserializer,
   );
+
+  @protected
+  ProviderConfig sse_decode_provider_config(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_32(SseDeserializer deserializer);
@@ -311,6 +333,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_memory_context_card(
     MemoryContextCard self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_provider_config(
+    ProviderConfig self,
     SseSerializer serializer,
   );
 
@@ -384,6 +412,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_provider_config(
+    List<ProviderConfig> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_memory_context_card(
     MemoryContextCard self,
     SseSerializer serializer,
@@ -425,6 +459,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_memory_context_card(
     MemoryContextCard? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_provider_config(
+    ProviderConfig self,
     SseSerializer serializer,
   );
 

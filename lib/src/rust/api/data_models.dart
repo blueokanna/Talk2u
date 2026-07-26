@@ -8,9 +8,12 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'data_models.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `default_chat_model`, `default_thinking_model`
+// These functions are ignored because they are not marked as `pub`: `default_chat_model`, `default_provider_max_output_tokens`, `default_providers_json`, `default_selected_provider`, `default_thinking_model`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `CompressionImpactLevel`, `DistilledSystemState`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+
+Future<List<ProviderConfig>> defaultProviderConfigs() =>
+    RustLib.instance.api.crateApiDataModelsDefaultProviderConfigs();
 
 class AppSettings {
   final String? apiKey;
@@ -18,6 +21,8 @@ class AppSettings {
   final bool enableThinkingByDefault;
   final String chatModel;
   final String thinkingModel;
+  final String selectedProvider;
+  final String providersJson;
 
   const AppSettings({
     this.apiKey,
@@ -25,6 +30,8 @@ class AppSettings {
     required this.enableThinkingByDefault,
     required this.chatModel,
     required this.thinkingModel,
+    required this.selectedProvider,
+    required this.providersJson,
   });
 
   static Future<AppSettings> default_() =>
@@ -36,7 +43,9 @@ class AppSettings {
       defaultModel.hashCode ^
       enableThinkingByDefault.hashCode ^
       chatModel.hashCode ^
-      thinkingModel.hashCode;
+      thinkingModel.hashCode ^
+      selectedProvider.hashCode ^
+      providersJson.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -47,7 +56,9 @@ class AppSettings {
           defaultModel == other.defaultModel &&
           enableThinkingByDefault == other.enableThinkingByDefault &&
           chatModel == other.chatModel &&
-          thinkingModel == other.thinkingModel;
+          thinkingModel == other.thinkingModel &&
+          selectedProvider == other.selectedProvider &&
+          providersJson == other.providersJson;
 }
 
 @freezed
@@ -370,4 +381,59 @@ class ModelInfo {
           contextTokens == other.contextTokens &&
           maxOutputTokens == other.maxOutputTokens &&
           supportsThinking == other.supportsThinking;
+}
+
+/// A saved LLM endpoint. `protocol` is either `openai` or `anthropic`.
+/// Custom endpoints intentionally use the OpenAI-compatible wire format.
+class ProviderConfig {
+  final String id;
+  final String name;
+  final String? apiKey;
+  final String apiUrl;
+  final String chatModel;
+  final String? thinkingModel;
+  final String protocol;
+  final int maxOutputTokens;
+
+  const ProviderConfig({
+    required this.id,
+    required this.name,
+    this.apiKey,
+    required this.apiUrl,
+    required this.chatModel,
+    this.thinkingModel,
+    required this.protocol,
+    required this.maxOutputTokens,
+  });
+
+  Future<bool> isConfigured() => RustLib.instance.api
+      .crateApiDataModelsProviderConfigIsConfigured(that: this);
+
+  Future<bool> requiresApiKey() => RustLib.instance.api
+      .crateApiDataModelsProviderConfigRequiresApiKey(that: this);
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      name.hashCode ^
+      apiKey.hashCode ^
+      apiUrl.hashCode ^
+      chatModel.hashCode ^
+      thinkingModel.hashCode ^
+      protocol.hashCode ^
+      maxOutputTokens.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ProviderConfig &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name &&
+          apiKey == other.apiKey &&
+          apiUrl == other.apiUrl &&
+          chatModel == other.chatModel &&
+          thinkingModel == other.thinkingModel &&
+          protocol == other.protocol &&
+          maxOutputTokens == other.maxOutputTokens;
 }

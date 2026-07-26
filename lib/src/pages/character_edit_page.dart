@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:talk2u/src/models/character.dart';
+import 'package:talk2u/src/services/live2d_model_importer.dart';
 
 class CharacterEditPage extends StatefulWidget {
   final Character? character; // null = 创建新角色
@@ -20,10 +22,12 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
   final _userNameController = TextEditingController();
   final _userSettingController = TextEditingController();
   final _tagController = TextEditingController();
+  final _live2dModelController = TextEditingController();
 
   CharacterGender _gender = CharacterGender.other;
   List<String> _tags = [];
   bool _isSaving = false;
+  bool _isImportingLive2d = false;
 
   bool get _isEditing => widget.character != null;
 
@@ -39,6 +43,7 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
       _dialogueExampleController.text = c.dialogueExample;
       _userNameController.text = c.userName;
       _userSettingController.text = c.userSetting;
+      _live2dModelController.text = c.live2dModelPath;
       _gender = c.gender;
       _tags = List.from(c.tags);
     }
@@ -54,6 +59,7 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
     _userNameController.dispose();
     _userSettingController.dispose();
     _tagController.dispose();
+    _live2dModelController.dispose();
     super.dispose();
   }
 
@@ -77,6 +83,7 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
         userName: _userNameController.text.trim(),
         userSetting: _userSettingController.text.trim(),
         tags: _tags,
+        live2dModelPath: _live2dModelController.text.trim(),
         createdAt: widget.character?.createdAt ?? now,
         updatedAt: now,
       );
@@ -109,6 +116,67 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
 
   void _removeTag(String tag) {
     setState(() => _tags.remove(tag));
+  }
+
+  Future<void> _pickLive2dModel() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: const ['zip'],
+    );
+    final path = result?.files.single.path;
+    if (path == null) return;
+    setState(() => _isImportingLive2d = true);
+    try {
+      final modelPath = await Live2dModelImporter.importArchive(path);
+      if (mounted) setState(() => _live2dModelController.text = modelPath);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Live2D 模型导入失败: $error')));
+    } finally {
+      if (mounted) setState(() => _isImportingLive2d = false);
+    }
+  }
+
+  Future<void> _installBundledMao() async {
+    final accepted = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('使用虹色 Mao 示例模型'),
+        content: const Text(
+          '该模型由 Live2D Inc. 提供，使用前必须同意 Cubism 示例模型使用授权要求。'
+          '仓库中的 model/mao/ReadMe.txt 包含来源与许可说明。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('我已阅读并同意'),
+          ),
+        ],
+      ),
+    );
+    if (accepted != true || !mounted) return;
+    setState(() => _isImportingLive2d = true);
+    try {
+      final modelPath = await Live2dModelImporter.installBundledMao();
+      if (!mounted) return;
+      setState(() => _live2dModelController.text = modelPath);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Cubism 5 Mao 模型已安装')));
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('内置模型安装失败: $error')));
+    } finally {
+      if (mounted) setState(() => _isImportingLive2d = false);
+    }
   }
 
   @override
@@ -253,6 +321,40 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
                   maxLines: 4,
                   minLines: 2,
                   decoration: _inputDecoration('描述你在对话中的身份'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            _buildSectionCard(
+              theme,
+              children: [
+                _buildFieldLabel(theme, 'Live2D 模型'),
+                const SizedBox(height: 8),
+                TextFormField(
+                  controller: _live2dModelController,
+                  readOnly: true,
+                  decoration: _inputDecoration('未导入 Live2D ZIP 模型包').copyWith(
+                    prefixIcon: const Icon(Icons.view_in_ar_outlined),
+                    suffixIcon: _isImportingLive2d
+                        ? const Padding(
+                            padding: EdgeInsets.all(14),
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : IconButton(
+                            tooltip: '导入 Live2D ZIP 模型包',
+                            icon: const Icon(Icons.folder_open_outlined),
+                            onPressed: _pickLive2dModel,
+                          ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: OutlinedButton.icon(
+                    onPressed: _isImportingLive2d ? null : _installBundledMao,
+                    icon: const Icon(Icons.download_for_offline_outlined),
+                    label: const Text('安装内置 Cubism 5 Mao 模型'),
+                  ),
                 ),
               ],
             ),

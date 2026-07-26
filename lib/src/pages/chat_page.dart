@@ -7,6 +7,8 @@ import 'package:talk2u/src/widgets/chat_input.dart';
 import 'package:talk2u/src/pages/conversation_list_page.dart';
 import 'package:talk2u/src/pages/character_list_page.dart';
 import 'package:talk2u/src/pages/settings_page.dart';
+import 'package:talk2u/src/services/offline_speech_service.dart';
+import 'package:talk2u/src/widgets/live2d_avatar.dart';
 
 class ChatPage extends StatefulWidget {
   const ChatPage({super.key});
@@ -19,6 +21,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   final _scrollController = ScrollController();
   late AnimationController _fabController;
   bool _showScrollToBottom = false;
+  bool _showTranscript = false;
 
   @override
   void initState() {
@@ -88,11 +91,55 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     _scrollToBottom();
   }
 
+  Future<void> _toggleListening() async {
+    final speech = OfflineSpeechService.instance;
+    try {
+      if (speech.listening) {
+        await speech.stopListening();
+      } else {
+        await speech.startListening();
+      }
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('离线语音识别不可用: $error')));
+    }
+  }
+
+  Future<void> _speakLastReply(ChatState state) async {
+    final speech = OfflineSpeechService.instance;
+    if (speech.speaking) {
+      await speech.stopSpeaking();
+      return;
+    }
+    String? reply;
+    for (final message in state.messages.reversed) {
+      if (message.role == MessageRole.assistant) {
+        reply = message.content;
+        break;
+      }
+    }
+    if (reply == null || reply.trim().isEmpty) return;
+    try {
+      await speech.speak(reply);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('离线语音合成不可用: $error')));
+    }
+  }
+
   void _openCharacterList() {
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (_) => CharacterListPage(
+          onSelectAssistant: () {
+            Navigator.pop(context);
+            context.read<ChatState>().createNewConversation();
+          },
           onSelectCharacter: (character) {
             Navigator.pop(context);
             context.read<ChatState>().startCharacterChat(character);
@@ -220,14 +267,44 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
 
                     const Divider(height: 24),
 
-                    // 模型选择
+                    // 平台与模型选择
                     Text(
-                      '模型选择',
+                      '平台与模型',
                       style: theme.textTheme.titleSmall?.copyWith(
                         fontWeight: FontWeight.w600,
                       ),
                     ),
                     const SizedBox(height: 8),
+                    DropdownButtonFormField<String>(
+                      initialValue: chatState.selectedProviderId,
+                      isExpanded: true,
+                      decoration: const InputDecoration(
+                        labelText: 'API 平台',
+                        border: OutlineInputBorder(),
+                        prefixIcon: Icon(Icons.hub_outlined),
+                      ),
+                      items: chatState.providers
+                          .map(
+                            (provider) => DropdownMenuItem(
+                              value: provider.id,
+                              child: Text(
+                                provider.isConfigured
+                                    ? provider.name
+                                    : '${provider.name}（未配置）',
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: chatState.isStreaming
+                          ? null
+                          : (value) {
+                              if (value == null) return;
+                              chatState.setSelectedProvider(value);
+                              setSheetState(() {});
+                            },
+                    ),
+                    const SizedBox(height: 12),
                     RadioGroup<String>(
                       groupValue: chatState.selectedModel,
                       onChanged: (String? value) {
@@ -240,25 +317,20 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                         children: [
                           _buildModelOption(
                             theme,
-                            'GLM-4.7',
-                            '对话模型，响应快速',
-                            'glm-4.7',
+                            chatState.selectedProvider?.chatModel ?? '未配置',
+                            '对话模型',
+                            chatState.selectedProvider?.chatModel ?? '',
                             false,
                           ),
-                          _buildModelOption(
-                            theme,
-                            'GLM-4-Air',
-                            '深度推理，自动开启思考',
-                            'glm-4-air',
-                            true,
-                          ),
-                          _buildModelOption(
-                            theme,
-                            'GLM-4.7-Flash',
-                            '快速响应，轻量对话',
-                            'glm-4.7-flash',
-                            false,
-                          ),
+                          if (chatState.selectedProvider?.supportsThinking ==
+                              true)
+                            _buildModelOption(
+                              theme,
+                              chatState.selectedProvider!.thinkingModel!,
+                              '推理模型，自动启用推理管线',
+                              chatState.selectedProvider!.thinkingModel!,
+                              true,
+                            ),
                         ],
                       ),
                     ),
@@ -467,29 +539,38 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
         elevation: 0,
         scrolledUnderElevation: 1,
         actions: [
+          Consumer<ChatState>(
+            builder: (context, state, _) => AnimatedBuilder(
+              animation: OfflineSpeechService.instance,
+              builder: (context, _) {
+                final speech = OfflineSpeechService.instance;
+                return IconButton(
+                  tooltip: speech.capabilities.offlineTts
+                      ? (speech.speaking ? '停止朗读' : '离线朗读上一条回复')
+                      : '设备无离线 TTS 语音包',
+                  onPressed: speech.capabilities.offlineTts
+                      ? () => _speakLastReply(state)
+                      : null,
+                  icon: Icon(
+                    speech.speaking
+                        ? Icons.stop_circle_outlined
+                        : Icons.volume_up_outlined,
+                  ),
+                );
+              },
+            ),
+          ),
           // 模型指示器
           Consumer<ChatState>(
             builder: (context, state, _) {
-              final isThinking = state.selectedModel == ChatState.thinkingModel;
-              final isFlash = state.selectedModel == ChatState.flashModel;
+              final isThinking = state.enableThinking;
               return IconButton(
                 icon: Icon(
-                  isThinking
-                      ? Icons.psychology
-                      : isFlash
-                      ? Icons.flash_on_rounded
-                      : Icons.psychology_outlined,
-                  color: isThinking
-                      ? theme.colorScheme.primary
-                      : isFlash
-                      ? Colors.amber
-                      : null,
+                  isThinking ? Icons.psychology : Icons.psychology_outlined,
+                  color: isThinking ? theme.colorScheme.primary : null,
                 ),
-                tooltip: isThinking
-                    ? 'GLM-4-Air 深度推理'
-                    : isFlash
-                    ? 'GLM-4.7-Flash 快速'
-                    : 'GLM-4.7 对话',
+                tooltip:
+                    '${state.selectedProvider?.name ?? '未配置'} · ${state.selectedModel}',
                 onPressed: () {
                   state.setEnableThinking(!state.enableThinking);
                 },
@@ -540,12 +621,13 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                     ),
                     title: const Text('设置'),
                     subtitle: const Text('API 密钥、模型配置'),
-                    onTap: () {
+                    onTap: () async {
                       Navigator.pop(context);
-                      Navigator.push(
+                      await Navigator.push(
                         context,
                         MaterialPageRoute(builder: (_) => const SettingsPage()),
                       );
+                      await chatState.reloadProviderSettings();
                     },
                   ),
                 ],
@@ -562,35 +644,108 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
             _scrollToBottom();
           }
 
-          return Stack(
+          final configuredPath =
+              chatState.currentCharacter?.live2dModelPath.trim() ?? '';
+          final modelPath = configuredPath.isEmpty
+              ? Live2dModelPaths.bundledMao
+              : configuredPath;
+          return Column(
             children: [
-              Column(
-                children: [
-                  Expanded(child: _buildMessageArea(chatState)),
-                  if (chatState.errorMessage != null)
-                    _buildErrorBanner(chatState),
-                  ChatInput(
+              Expanded(
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    Live2dAvatar(
+                      key: ValueKey(modelPath),
+                      modelPath: modelPath,
+                    ),
+                    Positioned(
+                      left: 12,
+                      top: 12,
+                      child: SafeArea(
+                        child: IconButton.filledTonal(
+                          tooltip: _showTranscript ? '隐藏对话' : '查看对话',
+                          onPressed: () => setState(
+                            () => _showTranscript = !_showTranscript,
+                          ),
+                          icon: Icon(
+                            _showTranscript
+                                ? Icons.visibility_off_outlined
+                                : Icons.forum_outlined,
+                          ),
+                        ),
+                      ),
+                    ),
+                    if (_showTranscript)
+                      Align(
+                        alignment: Alignment.bottomCenter,
+                        child: FractionallySizedBox(
+                          heightFactor: 0.58,
+                          widthFactor: 1,
+                          child: _buildTranscriptPanel(chatState),
+                        ),
+                      ),
+                    if (_showScrollToBottom && _showTranscript)
+                      Positioned(
+                        right: 16,
+                        bottom: 12,
+                        child: ScaleTransition(
+                          scale: _fabController,
+                          child: FloatingActionButton.small(
+                            onPressed: () => _scrollToBottom(),
+                            elevation: 2,
+                            child: const Icon(Icons.keyboard_arrow_down),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              if (chatState.errorMessage != null) _buildErrorBanner(chatState),
+              AnimatedBuilder(
+                animation: OfflineSpeechService.instance,
+                builder: (context, _) {
+                  final speech = OfflineSpeechService.instance;
+                  return ChatInput(
                     isStreaming: chatState.isStreaming,
                     onSend: _handleSend,
-                  ),
-                ],
+                    onVoiceInput: _toggleListening,
+                    isListening: speech.listening,
+                    voiceEnabled: speech.capabilities.offlineStt,
+                    dictatedText: speech.recognizedText,
+                  );
+                },
               ),
-              if (_showScrollToBottom)
-                Positioned(
-                  right: 16,
-                  bottom: 80,
-                  child: ScaleTransition(
-                    scale: _fabController,
-                    child: FloatingActionButton.small(
-                      onPressed: () => _scrollToBottom(),
-                      elevation: 2,
-                      child: const Icon(Icons.keyboard_arrow_down),
-                    ),
-                  ),
-                ),
             ],
           );
         },
+      ),
+    );
+  }
+
+  Widget _buildTranscriptPanel(ChatState chatState) {
+    final theme = Theme.of(context);
+    return ColoredBox(
+      color: theme.colorScheme.surface.withValues(alpha: 0.94),
+      child: Column(
+        children: [
+          SizedBox(
+            height: 44,
+            child: Row(
+              children: [
+                const SizedBox(width: 16),
+                Expanded(child: Text('对话', style: theme.textTheme.titleSmall)),
+                IconButton(
+                  tooltip: '隐藏对话',
+                  onPressed: () => setState(() => _showTranscript = false),
+                  icon: const Icon(Icons.close),
+                ),
+              ],
+            ),
+          ),
+          const Divider(height: 1),
+          Expanded(child: _buildMessageArea(chatState)),
+        ],
       ),
     );
   }

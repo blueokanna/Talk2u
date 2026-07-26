@@ -1,9 +1,20 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-feature android:glEsVersion="0x00020000" android:required="true" />
+    <uses-feature
+        android:name="android.hardware.vulkan.level"
+        android:version="1"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.vulkan.version"
+        android:version="0x00400000"
+        android:required="false" />
     <application
         android:label="Talk2U"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
+        android:hardwareAccelerated="true"
         android:usesCleartextTraffic="false">
         <activity
             android:name=".MainActivity"
@@ -42,6 +53,12 @@
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE"/>
+        </intent>
+        <intent>
+            <action android:name="android.speech.RecognitionService"/>
         </intent>
     </queries>
 </manifest>

@@ -1,7 +1,13 @@
 use super::data_models::ChatStreamEvent;
 use super::error_handler::{ChatError, RetryHandler};
+use super::provider::ProviderRuntime;
 use flutter_rust_bridge::frb;
 use futures::StreamExt;
+use rustglm::{
+    ChatCompletionRequest as GlmChatCompletionRequest, HttpConfig as GlmHttpConfig,
+    ResponseContent as GlmResponseContent, RetryPolicy as GlmRetryPolicy, SdkError as GlmError,
+    ZhipuConfig,
+};
 
 /// 流式请求的超时配置（按模型角色分级）
 struct StreamTimeoutConfig {
@@ -21,20 +27,20 @@ impl StreamTimeoutConfig {
         match model {
             "glm-4-air" => Self {
                 connect_timeout_secs: 30,
-                first_chunk_timeout_secs: 300,     // 推理模型首 token 最长等 5 分钟
+                first_chunk_timeout_secs: 300, // 推理模型首 token 最长等 5 分钟
                 subsequent_chunk_timeout_secs: 120, // 推理链中间段可能有长停顿
                 tcp_keepalive_secs: 15,
             },
             "glm-4-long" => Self {
                 connect_timeout_secs: 30,
-                first_chunk_timeout_secs: 300,     // 长上下文处理预热长
+                first_chunk_timeout_secs: 300, // 长上下文处理预热长
                 subsequent_chunk_timeout_secs: 120,
                 tcp_keepalive_secs: 15,
             },
             _ => Self {
                 connect_timeout_secs: 30,
-                first_chunk_timeout_secs: 180,     // 标准模型首 token 最长 3 分钟
-                subsequent_chunk_timeout_secs: 90,  // 正常对话块间不应超过 90 秒
+                first_chunk_timeout_secs: 180, // 标准模型首 token 最长 3 分钟
+                subsequent_chunk_timeout_secs: 90, // 正常对话块间不应超过 90 秒
                 tcp_keepalive_secs: 15,
             },
         }
@@ -54,21 +60,28 @@ impl StreamingHandler {
     /// 4. TCP keepalive防止NAT/代理断开空闲连接
     /// 5. 更细粒度的错误分类，便于上层决策
     pub async fn stream_chat(
-        url: &str,
-        token: &str,
+        provider: &ProviderRuntime,
         request_body: serde_json::Value,
         on_event: impl Fn(ChatStreamEvent),
     ) -> Result<(String, String), ChatError> {
-        let retry_handler = RetryHandler::new(3, 1000);  // 重试间隔从800ms提升到1000ms
-        let url_owned = url.to_string();
-        let token_owned = token.to_string();
-        let body_clone = request_body.clone();
+        if provider.id == "zhipu" {
+            return Self::stream_zhipu_chat(provider, request_body, &on_event).await;
+        }
+
+        let retry_handler = RetryHandler::new(3, 1000); // 重试间隔从800ms提升到1000ms
+        let url_owned = provider.api_url.clone();
+        let headers = provider
+            .request_headers()
+            .map_err(|message| ChatError::AuthError { message })?;
+        let body_clone = provider.adapt_request_body(request_body.clone());
 
         // 记录请求模型和 token 预算，便于调试
-        let model_name = request_body.get("model")
+        let model_name = request_body
+            .get("model")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
-        let max_tokens = request_body.get("max_tokens")
+        let max_tokens = request_body
+            .get("max_tokens")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
 
@@ -80,10 +93,14 @@ impl StreamingHandler {
         // 这是「AI 响应中断」的主要原因。改用 tokio::time::timeout 对每个 chunk
         // 单独计时，首 chunk 允许更长等待（模型预热），后续 chunk 更短。
         let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(timeout_config.connect_timeout_secs))
+            .connect_timeout(std::time::Duration::from_secs(
+                timeout_config.connect_timeout_secs,
+            ))
             // 不设 read_timeout — 由下方 per-chunk tokio::time::timeout 接管
             // 不设 timeout — 对 SSE 流式响应，总超时会误杀正常传输
-            .tcp_keepalive(std::time::Duration::from_secs(timeout_config.tcp_keepalive_secs))
+            .tcp_keepalive(std::time::Duration::from_secs(
+                timeout_config.tcp_keepalive_secs,
+            ))
             .pool_idle_timeout(std::time::Duration::from_secs(90))
             .pool_max_idle_per_host(4)
             .build()
@@ -95,15 +112,12 @@ impl StreamingHandler {
             .execute_with_retry(|| {
                 let client = client.clone();
                 let u = url_owned.clone();
-                let t = token_owned.clone();
+                let h = headers.clone();
                 let b = body_clone.clone();
                 async move {
                     let resp = client
                         .post(&u)
-                        .header("Authorization", format!("Bearer {}", &t))
-                        .header("Content-Type", "application/json")
-                        // 显式请求 SSE 流
-                        .header("Accept", "text/event-stream")
+                        .headers(h)
                         .json(&b)
                         .send()
                         .await
@@ -136,9 +150,7 @@ impl StreamingHandler {
 
                         let body_text = resp.text().await.unwrap_or_default();
 
-                        // 使用 GLM 错误码精确分类
-                        // 参考: https://docs.bigmodel.cn/cn/api/api-code
-                        let mut err = ChatError::from_glm_response(status_code, &body_text);
+                        let mut err = Self::classify_http_error(status_code, &body_text);
 
                         // 如果 HTTP 头中有 retry-after，优先使用头部指定的等待时间
                         if let Some(retry_secs) = retry_after_header {
@@ -173,11 +185,17 @@ impl StreamingHandler {
         // 首个 chunk 允许更长等待（模型推理预热），后续缩短。
         // 这比 read_timeout 更精确：read_timeout 会在推理间歇误杀整个流，
         // 而 per-chunk 超时只在真正无响应时触发。
-        let first_chunk_timeout = std::time::Duration::from_secs(timeout_config.first_chunk_timeout_secs);
-        let subsequent_chunk_timeout = std::time::Duration::from_secs(timeout_config.subsequent_chunk_timeout_secs);
+        let first_chunk_timeout =
+            std::time::Duration::from_secs(timeout_config.first_chunk_timeout_secs);
+        let subsequent_chunk_timeout =
+            std::time::Duration::from_secs(timeout_config.subsequent_chunk_timeout_secs);
 
         loop {
-            let chunk_timeout = if chunk_count == 0 { first_chunk_timeout } else { subsequent_chunk_timeout };
+            let chunk_timeout = if chunk_count == 0 {
+                first_chunk_timeout
+            } else {
+                subsequent_chunk_timeout
+            };
 
             let chunk_result = match tokio::time::timeout(chunk_timeout, stream.next()).await {
                 Ok(Some(result)) => result,
@@ -190,18 +208,29 @@ impl StreamingHandler {
                         // （下游 Dart 会将 Error 事件设为持久 _errorMessage，影响用户体验）
                         let warn_msg = format!(
                             "[{}] 服务器 {}秒 未返回新数据（已收到 {} 字），保留已接收内容",
-                            model_name, chunk_timeout.as_secs(),
+                            model_name,
+                            chunk_timeout.as_secs(),
                             full_content.len() + full_thinking.len()
                         );
                         eprintln!("{}", warn_msg);
                         return Ok((full_content, full_thinking));
                     }
                     let err_msg = if chunk_count == 0 {
-                        format!("[{}] 等待首个响应超时（{}秒），服务器可能过载，请重试", model_name, chunk_timeout.as_secs())
+                        format!(
+                            "[{}] 等待首个响应超时（{}秒），服务器可能过载，请重试",
+                            model_name,
+                            chunk_timeout.as_secs()
+                        )
                     } else {
-                        format!("[{}] 读取超时（{}秒无新数据），请重试", model_name, chunk_timeout.as_secs())
+                        format!(
+                            "[{}] 读取超时（{}秒无新数据），请重试",
+                            model_name,
+                            chunk_timeout.as_secs()
+                        )
                     };
-                    let err = ChatError::StreamError { message: err_msg.clone() };
+                    let err = ChatError::StreamError {
+                        message: err_msg.clone(),
+                    };
                     on_event(ChatStreamEvent::Error(err_msg));
                     return Err(err);
                 }
@@ -331,6 +360,203 @@ impl StreamingHandler {
         Ok((full_content, full_thinking))
     }
 
+    async fn stream_zhipu_chat(
+        provider: &ProviderRuntime,
+        request_body: serde_json::Value,
+        on_event: &impl Fn(ChatStreamEvent),
+    ) -> Result<(String, String), ChatError> {
+        let body = provider.adapt_request_body(request_body);
+        let request: GlmChatCompletionRequest =
+            serde_json::from_value(body).map_err(|error| ChatError::ValidationError {
+                message: format!("智谱请求无法转换为 rustglm 请求: {error}"),
+            })?;
+        let model_name = request.model.clone();
+        let timeout_config = StreamTimeoutConfig::for_model(&model_name);
+
+        let mut retry = GlmRetryPolicy::default();
+        retry.max_retries = 3;
+        retry.initial_delay = std::time::Duration::from_secs(1);
+        retry.max_delay = std::time::Duration::from_secs(4);
+        let http = GlmHttpConfig {
+            // Per-chunk timeouts below provide the user-visible streaming
+            // policy. Keep the SDK request timeout above the longest session.
+            timeout: std::time::Duration::from_secs(60 * 60),
+            connect_timeout: std::time::Duration::from_secs(timeout_config.connect_timeout_secs),
+            pool_idle_timeout: std::time::Duration::from_secs(90),
+            user_agent: format!("Talk2U/1.0 RustGLM/{}", env!("CARGO_PKG_VERSION")),
+            retry,
+            ..GlmHttpConfig::default()
+        };
+        let client = ZhipuConfig::new(provider.api_key.clone())
+            .base_url(Self::zhipu_base_url(&provider.api_url)?)
+            .http(http)
+            .build()
+            .map_err(Self::map_glm_error)?;
+        let mut stream = client
+            .chat_completion_stream(&request)
+            .await
+            .map_err(Self::map_glm_error)?;
+
+        let first_chunk_timeout =
+            std::time::Duration::from_secs(timeout_config.first_chunk_timeout_secs);
+        let subsequent_chunk_timeout =
+            std::time::Duration::from_secs(timeout_config.subsequent_chunk_timeout_secs);
+        let mut chunk_count = 0_u32;
+        let mut full_content = String::new();
+        let mut full_thinking = String::new();
+
+        loop {
+            let timeout = if chunk_count == 0 {
+                first_chunk_timeout
+            } else {
+                subsequent_chunk_timeout
+            };
+            let item = match tokio::time::timeout(timeout, stream.next()).await {
+                Ok(Some(item)) => item,
+                Ok(None) => break,
+                Err(_) if !full_content.is_empty() || !full_thinking.is_empty() => {
+                    eprintln!(
+                        "[{model_name}] rustglm stream paused for {}s; preserving {} received bytes",
+                        timeout.as_secs(),
+                        full_content.len() + full_thinking.len()
+                    );
+                    return Ok((full_content, full_thinking));
+                }
+                Err(_) => {
+                    let message = format!(
+                        "[{model_name}] 等待智谱流式响应超时（{}秒），请重试",
+                        timeout.as_secs()
+                    );
+                    on_event(ChatStreamEvent::Error(message.clone()));
+                    return Err(ChatError::StreamError { message });
+                }
+            };
+
+            let chunk = match item {
+                Ok(chunk) => chunk,
+                Err(error) if !full_content.is_empty() || !full_thinking.is_empty() => {
+                    eprintln!(
+                        "[{model_name}] rustglm stream ended after partial response: {error}"
+                    );
+                    return Ok((full_content, full_thinking));
+                }
+                Err(error) => {
+                    let mapped = Self::map_glm_error(error);
+                    on_event(ChatStreamEvent::Error(format!(
+                        "[{model_name}] 智谱流式响应失败: {mapped}"
+                    )));
+                    return Err(mapped);
+                }
+            };
+            chunk_count += 1;
+
+            for choice in chunk.choices {
+                if let Some(thinking) = choice.delta.reasoning_content {
+                    if !thinking.is_empty() {
+                        full_thinking.push_str(&thinking);
+                        on_event(ChatStreamEvent::ThinkingDelta(thinking));
+                    }
+                }
+                if let Some(content) = choice.delta.content {
+                    let text = match content {
+                        GlmResponseContent::Text(text) => text,
+                        GlmResponseContent::Parts(parts) => parts
+                            .into_iter()
+                            .filter_map(|part| part.text)
+                            .collect::<String>(),
+                    };
+                    if !text.is_empty() {
+                        full_content.push_str(&text);
+                        on_event(ChatStreamEvent::ContentDelta(text));
+                    }
+                }
+            }
+        }
+
+        if chunk_count == 0 || (full_content.is_empty() && full_thinking.is_empty()) {
+            let message = format!("[{model_name}] 智谱 API 未返回有效的流式内容");
+            on_event(ChatStreamEvent::Error(message.clone()));
+            return Err(ChatError::StreamError { message });
+        }
+
+        Ok((full_content, full_thinking))
+    }
+
+    fn zhipu_base_url(api_url: &str) -> Result<String, ChatError> {
+        let trimmed = api_url.trim().trim_end_matches('/');
+        let base = trimmed.strip_suffix("/chat/completions").unwrap_or(trimmed);
+        let parsed = reqwest::Url::parse(base).map_err(|error| ChatError::ValidationError {
+            message: format!("智谱 API URL 无效: {error}"),
+        })?;
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.host().is_none() {
+            return Err(ChatError::ValidationError {
+                message: "智谱 API URL 必须是完整的 HTTP(S) 地址".to_string(),
+            });
+        }
+        Ok(base.to_string())
+    }
+
+    fn map_glm_error(error: GlmError) -> ChatError {
+        match error {
+            GlmError::Api(error) => {
+                if error.body.trim().is_empty() {
+                    match error.status.as_u16() {
+                        401 | 403 => ChatError::AuthError {
+                            message: error.message,
+                        },
+                        429 => ChatError::RateLimitError {
+                            retry_after_secs: 2,
+                        },
+                        status => ChatError::ApiError {
+                            status,
+                            message: error.message,
+                        },
+                    }
+                } else {
+                    ChatError::from_glm_response(error.status.as_u16(), &error.body)
+                }
+            }
+            GlmError::Transport(error) => ChatError::NetworkError {
+                message: error.to_string(),
+            },
+            GlmError::Timeout(error) => ChatError::NetworkError {
+                message: error.to_string(),
+            },
+            GlmError::Configuration(error) => ChatError::ValidationError {
+                message: error.to_string(),
+            },
+            GlmError::Validation(error) => ChatError::ValidationError {
+                message: error.to_string(),
+            },
+            GlmError::Stream(error) => ChatError::StreamError {
+                message: error.to_string(),
+            },
+            other => ChatError::StreamError {
+                message: other.to_string(),
+            },
+        }
+    }
+
+    fn classify_http_error(status_code: u16, body_text: &str) -> ChatError {
+        let message = serde_json::from_str::<serde_json::Value>(body_text)
+            .ok()
+            .and_then(|json| {
+                json.pointer("/error/message")
+                    .or_else(|| json.get("message"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| body_text.chars().take(1000).collect());
+        match status_code {
+            401 | 403 => ChatError::AuthError { message },
+            429 => ChatError::RateLimitError {
+                retry_after_secs: 2,
+            },
+            status if status >= 500 => ChatError::ApiError { status, message },
+            status => ChatError::ApiError { status, message },
+        }
+    }
+
     pub fn parse_sse_line(line: &str) -> Option<ChatStreamEvent> {
         let trimmed = line.trim();
 
@@ -379,9 +605,7 @@ impl StreamingHandler {
                         .unwrap_or("Unknown API error");
                     return Some(ChatStreamEvent::Error(msg.to_string()));
                 }
-                if json.get("choices").is_some() {
-                    return Self::extract_delta(&json);
-                }
+                return Self::extract_delta(&json);
             }
         }
 
@@ -395,6 +619,56 @@ impl StreamingHandler {
                 .and_then(|v| v.as_str())
                 .unwrap_or("Unknown API error");
             return Some(ChatStreamEvent::Error(msg.to_string()));
+        }
+
+        // Anthropic Messages streaming protocol.
+        if json.get("type").and_then(|v| v.as_str()) == Some("error") {
+            let message = json
+                .pointer("/error/message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Anthropic API error");
+            return Some(ChatStreamEvent::Error(message.to_string()));
+        }
+        if let Some(delta) = json.get("delta") {
+            match delta.get("type").and_then(|v| v.as_str()) {
+                Some("text_delta") => {
+                    if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
+                        if !text.is_empty() {
+                            return Some(ChatStreamEvent::ContentDelta(text.to_string()));
+                        }
+                    }
+                }
+                Some("thinking_delta") => {
+                    if let Some(thinking) = delta.get("thinking").and_then(|v| v.as_str()) {
+                        if !thinking.is_empty() {
+                            return Some(ChatStreamEvent::ThinkingDelta(thinking.to_string()));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if json.get("type").and_then(|v| v.as_str()) == Some("content_block_start") {
+            if let Some(text) = json.pointer("/content_block/text").and_then(|v| v.as_str()) {
+                if !text.is_empty() {
+                    return Some(ChatStreamEvent::ContentDelta(text.to_string()));
+                }
+            }
+        }
+        if json.get("type").and_then(|v| v.as_str()) == Some("message_stop") {
+            return Some(ChatStreamEvent::Done);
+        }
+
+        // Non-streaming Anthropic response (some compatible proxies ignore `stream`).
+        if let Some(content) = json.get("content").and_then(|v| v.as_array()) {
+            if let Some(text) = content.iter().find_map(|block| {
+                block
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .filter(|v| !v.is_empty())
+            }) {
+                return Some(ChatStreamEvent::ContentDelta(text.to_string()));
+            }
         }
 
         let choice = json.get("choices").and_then(|c| c.get(0))?;
@@ -670,5 +944,84 @@ mod tests {
             Some(ChatStreamEvent::ContentDelta(text)) => assert_eq!(text, "Hello"),
             other => panic!("Expected ContentDelta, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_parse_anthropic_text_delta() {
+        let line = r#"event: content_block_delta"#;
+        assert!(StreamingHandler::parse_sse_line(line).is_none());
+        let line =
+            r#"data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"你好"}}"#;
+        match StreamingHandler::parse_sse_line(line) {
+            Some(ChatStreamEvent::ContentDelta(text)) => assert_eq!(text, "你好"),
+            other => panic!("Expected Anthropic ContentDelta, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_anthropic_thinking_delta() {
+        let line = r#"data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"分析"}}"#;
+        match StreamingHandler::parse_sse_line(line) {
+            Some(ChatStreamEvent::ThinkingDelta(text)) => assert_eq!(text, "分析"),
+            other => panic!("Expected Anthropic ThinkingDelta, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_anthropic_message_stop() {
+        let line = r#"data: {"type":"message_stop"}"#;
+        assert!(matches!(
+            StreamingHandler::parse_sse_line(line),
+            Some(ChatStreamEvent::Done)
+        ));
+    }
+
+    #[test]
+    fn test_parse_anthropic_error() {
+        let line =
+            r#"data: {"type":"error","error":{"type":"authentication_error","message":"bad key"}}"#;
+        match StreamingHandler::parse_sse_line(line) {
+            Some(ChatStreamEvent::Error(message)) => assert_eq!(message, "bad key"),
+            other => panic!("Expected Anthropic Error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_raw_anthropic_completion() {
+        let line = r#"{"id":"msg_1","type":"message","content":[{"type":"text","text":"完整回复"}],"stop_reason":"end_turn"}"#;
+        match StreamingHandler::parse_sse_line(line) {
+            Some(ChatStreamEvent::ContentDelta(text)) => assert_eq!(text, "完整回复"),
+            other => panic!("Expected raw Anthropic ContentDelta, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn zhipu_sdk_base_url_strips_chat_endpoint() {
+        assert_eq!(
+            StreamingHandler::zhipu_base_url(
+                "https://open.bigmodel.cn/api/paas/v4/chat/completions/"
+            )
+            .unwrap(),
+            "https://open.bigmodel.cn/api/paas/v4"
+        );
+        assert!(StreamingHandler::zhipu_base_url("file:///tmp/chat/completions").is_err());
+    }
+
+    #[test]
+    fn zhipu_request_body_converts_to_rustglm() {
+        let body = serde_json::json!({
+            "model": "glm-4.7",
+            "messages": [
+                {"role": "system", "content": "identity"},
+                {"role": "user", "content": "hello"}
+            ],
+            "stream": true,
+            "thinking": {"type": "disabled"},
+            "max_tokens": 1024
+        });
+        let request: GlmChatCompletionRequest = serde_json::from_value(body).unwrap();
+        assert_eq!(request.model, "glm-4.7");
+        assert_eq!(request.messages.len(), 2);
+        assert_eq!(request.max_tokens, Some(1024));
     }
 }

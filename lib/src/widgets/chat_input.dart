@@ -3,8 +3,20 @@ import 'package:flutter/material.dart';
 class ChatInput extends StatefulWidget {
   final bool isStreaming;
   final ValueChanged<String> onSend;
+  final VoidCallback? onVoiceInput;
+  final bool isListening;
+  final bool voiceEnabled;
+  final String dictatedText;
 
-  const ChatInput({super.key, required this.isStreaming, required this.onSend});
+  const ChatInput({
+    super.key,
+    required this.isStreaming,
+    required this.onSend,
+    this.onVoiceInput,
+    this.isListening = false,
+    this.voiceEnabled = false,
+    this.dictatedText = '',
+  });
 
   @override
   State<ChatInput> createState() => _ChatInputState();
@@ -39,6 +51,18 @@ class _ChatInputState extends State<ChatInput>
         }
       }
     });
+  }
+
+  @override
+  void didUpdateWidget(covariant ChatInput oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.dictatedText.isNotEmpty &&
+        widget.dictatedText != oldWidget.dictatedText) {
+      _controller.value = TextEditingValue(
+        text: widget.dictatedText,
+        selection: TextSelection.collapsed(offset: widget.dictatedText.length),
+      );
+    }
   }
 
   @override
@@ -77,6 +101,16 @@ class _ChatInputState extends State<ChatInput>
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
+            IconButton(
+              tooltip: widget.voiceEnabled ? '离线语音输入' : '设备无离线识别引擎',
+              onPressed: widget.voiceEnabled && !widget.isStreaming
+                  ? widget.onVoiceInput
+                  : null,
+              icon: Icon(
+                widget.isListening ? Icons.mic : Icons.mic_none_outlined,
+                color: widget.isListening ? theme.colorScheme.error : null,
+              ),
+            ),
             Expanded(
               child: TextField(
                 controller: _controller,

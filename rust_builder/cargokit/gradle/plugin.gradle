@@ -134,11 +134,11 @@ class CargoKitPlugin implements Plugin<Project> {
 
             def platforms = com.flutter.gradle.FlutterPluginUtils.getTargetPlatforms(project).collect()
 
-            // Same thing addFlutterDependencies does in flutter.gradle
-            if (buildType == "debug") {
-                platforms.add("android-x86")
-                platforms.add("android-x64")
-            }
+            // Respect Flutter's requested target list. Unconditionally adding
+            // emulator ABIs here can create an APK with a Rust library but no
+            // matching Flutter engine, so the package advertises an ABI that
+            // cannot start. Call flutter with android-x64 explicitly when an
+            // emulator build is required.
 
             // The task name depends on plugin properties, which are not available
             // at this point

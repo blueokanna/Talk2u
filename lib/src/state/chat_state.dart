@@ -4,8 +4,10 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:talk2u/src/models/character.dart';
+import 'package:talk2u/src/models/provider_profile.dart';
 import 'package:talk2u/src/rust/api/chat_api.dart' as rust_api;
 import 'package:talk2u/src/rust/api/data_models.dart';
+import 'package:talk2u/src/services/offline_llm_service.dart';
 
 @visibleForTesting
 typedef TestStreamSetup = void Function(Stream<ChatStreamEvent>, String);
@@ -37,6 +39,8 @@ class ChatState extends ChangeNotifier {
   static const String chatModel = 'glm-4.7';
   static const String thinkingModel = 'glm-4-air';
   static const String flashModel = 'glm-4.7-flash';
+  List<ProviderProfile> _providers = [];
+  String _selectedProviderId = 'zhipu';
 
   // 对话风格
   DialogueStyle _dialogueStyle = DialogueStyle.mixed;
@@ -61,6 +65,18 @@ class ChatState extends ChangeNotifier {
       List.unmodifiable(_conversations);
   Character? get currentCharacter => _currentCharacter;
   String get selectedModel => _selectedModel;
+  List<ProviderProfile> get providers => List.unmodifiable(_providers);
+  String get selectedProviderId => _selectedProviderId;
+  ProviderProfile? get selectedProvider {
+    for (final provider in _providers) {
+      if (provider.id == _selectedProviderId) return provider;
+    }
+    return null;
+  }
+
+  bool get usesAndroidOfflineProvider =>
+      _selectedProviderId == ProviderProfile.androidOfflineId;
+
   DialogueStyle get dialogueStyle => _dialogueStyle;
 
   /// 获取展示用的消息列表（过滤掉 system 消息）
@@ -70,8 +86,20 @@ class ChatState extends ChangeNotifier {
   Future<void> initialize() async {
     try {
       final settings = await rust_api.getSettings();
-      _enableThinking = settings.enableThinkingByDefault;
-      _selectedModel = settings.chatModel;
+      _applyProviderSettings(settings);
+      await OfflineLlmService.instance.initialize();
+      if (OfflineLlmService.instance.modelReady &&
+          !_providers.any(
+            (provider) => !provider.isLocal && provider.isConfigured,
+          )) {
+        final offline = _providers.where((provider) => provider.isLocal);
+        if (offline.isNotEmpty) {
+          _selectedProviderId = offline.first.id;
+          _selectedModel = offline.first.chatModel;
+          _enableThinking = false;
+          await _persistSelectedProvider(offline.first);
+        }
+      }
       await CharacterStore.instance.load();
       await _loadConversationCharacterMap();
       await refreshConversationList();
@@ -82,16 +110,80 @@ class ChatState extends ChangeNotifier {
 
   // ── 模型选择 ──
 
+  void _applyProviderSettings(AppSettings settings) {
+    _providers = ProviderProfile.decodeList(settings.providersJson);
+    final legacyZhipuKey = settings.apiKey?.trim();
+    if (legacyZhipuKey?.isNotEmpty == true) {
+      final zhipuIndex = _providers.indexWhere(
+        (provider) => provider.id == 'zhipu',
+      );
+      if (zhipuIndex >= 0 &&
+          _providers[zhipuIndex].apiKey?.trim().isNotEmpty != true) {
+        _providers[zhipuIndex] = _providers[zhipuIndex].copyWith(
+          apiKey: legacyZhipuKey,
+        );
+      }
+    }
+    if (OfflineLlmService.instance.supported &&
+        !_providers.any(
+          (provider) => provider.id == ProviderProfile.androidOfflineId,
+        )) {
+      _providers.add(ProviderProfile.androidOffline);
+    }
+    _selectedProviderId =
+        _providers.any((provider) => provider.id == settings.selectedProvider)
+        ? settings.selectedProvider
+        : _providers.first.id;
+    _selectedModel = selectedProvider?.chatModel ?? settings.chatModel;
+    _enableThinking =
+        settings.enableThinkingByDefault &&
+        (selectedProvider?.supportsThinking ?? false);
+  }
+
+  Future<void> reloadProviderSettings() async {
+    try {
+      _applyProviderSettings(await rust_api.getSettings());
+      notifyListeners();
+    } catch (error) {
+      debugPrint('Failed to reload provider settings: $error');
+    }
+  }
+
+  Future<void> setSelectedProvider(String providerId) async {
+    if (_selectedProviderId == providerId || _isStreaming) return;
+    final provider = _providers.firstWhere((item) => item.id == providerId);
+    _selectedProviderId = providerId;
+    _selectedModel = provider.chatModel;
+    _enableThinking = provider.supportsThinking && _enableThinking;
+    notifyListeners();
+
+    await _persistSelectedProvider(provider);
+  }
+
+  Future<void> _persistSelectedProvider(ProviderProfile provider) async {
+    try {
+      final old = await rust_api.getSettings();
+      await rust_api.saveSettings(
+        settings: AppSettings(
+          apiKey: old.apiKey,
+          defaultModel: provider.chatModel,
+          enableThinkingByDefault: old.enableThinkingByDefault,
+          chatModel: provider.chatModel,
+          thinkingModel: provider.thinkingModel ?? '',
+          selectedProvider: provider.id,
+          providersJson: ProviderProfile.encodeList(_providers),
+        ),
+      );
+    } catch (error) {
+      debugPrint('Failed to persist selected provider: $error');
+    }
+  }
+
   void setSelectedModel(String model) {
     _selectedModel = model;
-    // glm-4-air 自动开启思考
-    if (model == thinkingModel) {
+    if (model == selectedProvider?.thinkingModel) {
       _enableThinking = true;
-    } else if (model == flashModel) {
-      // flash 模型不支持思考
-      _enableThinking = false;
     }
-    // glm-4.7 保持用户当前的思考偏好不变
     notifyListeners();
   }
 
@@ -355,8 +447,14 @@ class ChatState extends ChangeNotifier {
       // 使用 regenerateResponse API，不会重新添加用户消息
       startStreaming();
 
+      if (usesAndroidOfflineProvider) {
+        await _generateOfflineAssistant(conversationId);
+        return;
+      }
+
       final stream = rust_api.regenerateResponse(
         conversationId: conversationId,
+        providerId: _selectedProviderId,
         model: _selectedModel,
         enableThinking: _enableThinking,
       );
@@ -388,15 +486,9 @@ class ChatState extends ChangeNotifier {
   // ── 流式聊天 ──
 
   void setEnableThinking(bool enabled) {
-    _enableThinking = enabled;
-    // 关闭思考时：如果当前选的是推理模型，切回对话模型
-    if (!enabled && _selectedModel == thinkingModel) {
-      _selectedModel = chatModel;
-    }
-    // 开启思考时：如果当前选的是 flash 模型（不支持思考），切回对话模型
-    if (enabled && _selectedModel == flashModel) {
-      _selectedModel = chatModel;
-    }
+    _enableThinking =
+        enabled &&
+        (_providers.isEmpty || (selectedProvider?.supportsThinking ?? false));
     notifyListeners();
   }
 
@@ -441,6 +533,11 @@ class ChatState extends ChangeNotifier {
     _currentStreamingContent += delta;
     _streamDirty = true;
     // 不直接 notifyListeners，由节流定时器统一刷新
+  }
+
+  void _replaceStreamingContent(String content) {
+    _currentStreamingContent = content;
+    _streamDirty = true;
   }
 
   void appendThinkingContent(String delta) {
@@ -577,8 +674,8 @@ class ChatState extends ChangeNotifier {
           if (_errorMessage == null) {
             _checkAndTriggerMemorySummarize(conversationId);
           }
-        } else if (_errorMessage == null) {
-          _errorMessage = 'AI 响应中断，请点击重试';
+        } else {
+          _errorMessage ??= 'AI 响应中断，请点击重试';
         }
         notifyListeners();
       });
@@ -604,6 +701,8 @@ class ChatState extends ChangeNotifier {
     _errorMessage = null;
     _lastFailedContent = null;
 
+    if (!await _ensureSelectedProviderReady()) return;
+
     if (_currentConversationId == null) {
       await createNewConversation();
     }
@@ -627,9 +726,21 @@ class ChatState extends ChangeNotifier {
     notifyListeners();
 
     try {
+      if (usesAndroidOfflineProvider) {
+        final saved = await rust_api.addUserMessage(
+          conversationId: conversationId,
+          content: content,
+          model: _selectedModel,
+        );
+        if (!saved) throw StateError('无法保存用户消息');
+        await _generateOfflineAssistant(conversationId);
+        return;
+      }
+
       final stream = rust_api.sendMessage(
         conversationId: conversationId,
         content: content,
+        providerId: _selectedProviderId,
         model: _selectedModel,
         enableThinking: _enableThinking,
       );
@@ -642,6 +753,106 @@ class ChatState extends ChangeNotifier {
         _errorMessage = e.toString();
         notifyListeners();
       });
+    }
+  }
+
+  Future<bool> _ensureSelectedProviderReady() async {
+    final provider = selectedProvider;
+    if (provider != null && !provider.isLocal && provider.isConfigured) {
+      return true;
+    }
+
+    await OfflineLlmService.instance.initialize();
+    if (OfflineLlmService.instance.modelReady) {
+      ProviderProfile? offline;
+      for (final candidate in _providers) {
+        if (candidate.isLocal) {
+          offline = candidate;
+          break;
+        }
+      }
+      if (offline != null) {
+        _selectedProviderId = offline.id;
+        _selectedModel = offline.chatModel;
+        _enableThinking = false;
+        await _persistSelectedProvider(offline);
+        notifyListeners();
+        return true;
+      }
+    }
+
+    _errorMessage = provider?.isLocal == true
+        ? '请先在“模型与接口”中下载并校验 3B 端侧 AI 模型'
+        : '${provider?.name ?? '当前在线平台'}尚未配置 API Key；'
+              '也未检测到已就绪的 3B 端侧 AI 模型';
+    notifyListeners();
+    return false;
+  }
+
+  List<OfflineChatMessage> _buildOfflinePrompt() {
+    const contentBudget = 5000;
+    var remaining = contentBudget;
+    final systemMessages = _messages
+        .where((message) => message.role == MessageRole.system)
+        .map(
+          (message) =>
+              OfflineChatMessage(role: 'system', content: message.content),
+        )
+        .toList(growable: false);
+
+    final recent = <OfflineChatMessage>[];
+    for (final message in _messages.reversed) {
+      if (message.role == MessageRole.system ||
+          message.content.trim().isEmpty) {
+        continue;
+      }
+      if (remaining <= 0 && recent.isNotEmpty) break;
+      final content = message.content.length <= remaining
+          ? message.content
+          : message.content.substring(message.content.length - remaining);
+      recent.add(
+        OfflineChatMessage(
+          role: message.role == MessageRole.assistant ? 'assistant' : 'user',
+          content: content,
+        ),
+      );
+      remaining -= content.length;
+    }
+
+    return [...systemMessages, ...recent.reversed];
+  }
+
+  Future<void> _generateOfflineAssistant(String conversationId) async {
+    try {
+      final response = await OfflineLlmService.instance.generate(
+        _buildOfflinePrompt(),
+        onText: (text) {
+          if (_currentConversationId == conversationId && _isStreaming) {
+            _replaceStreamingContent(text);
+          }
+        },
+      );
+      final saved = await rust_api.addAssistantMessageWithModel(
+        conversationId: conversationId,
+        content: response,
+        model: _selectedModel,
+      );
+      if (!saved) throw StateError('无法保存端侧 AI 回复');
+
+      if (_currentConversationId == conversationId) {
+        _replaceStreamingContent(response);
+        endStreaming();
+        await loadConversation(conversationId);
+        await refreshConversationList();
+      }
+    } catch (error) {
+      debugPrint('[ChatState] Offline generation failed: $error');
+      if (_currentConversationId == conversationId) {
+        endStreaming();
+        await loadConversation(conversationId, preserveError: true);
+        _errorMessage = '端侧 AI 生成失败: $error';
+        notifyListeners();
+      }
     }
   }
 
@@ -704,8 +915,14 @@ class ChatState extends ChangeNotifier {
     startStreaming();
 
     try {
+      if (usesAndroidOfflineProvider) {
+        await _generateOfflineAssistant(conversationId);
+        return;
+      }
+
       final stream = rust_api.regenerateResponse(
         conversationId: conversationId,
+        providerId: _selectedProviderId,
         model: _selectedModel,
         enableThinking: _enableThinking,
       );

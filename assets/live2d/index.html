@@ -1,0 +1,741 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+  <style>
+    html, body, canvas { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; }
+    #status { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; color: #7a3e00;
+      font: 14px system-ui, sans-serif; text-align: center; background: rgba(255,247,237,.92); }
+  </style>
+</head>
+<body>
+  <canvas id="avatar"></canvas>
+  <div id="status">正在加载 Live2D 运行时...</div>
+  <script>
+    const statusEl = document.getElementById('status');
+    window.__talk2uPendingStatus = [];
+    const report = (type, message, details = {}) => {
+      const payload = JSON.stringify({type, message, ...details});
+      statusEl.textContent = message;
+      statusEl.style.display = type === 'ready' ? 'none' : 'grid';
+      if (window.Talk2uNative?.postMessage) {
+        Talk2uNative.postMessage(payload);
+      } else {
+        window.__talk2uPendingStatus.push(payload);
+      }
+    };
+    window.flushTalk2uStatus = () => {
+      if (!window.Talk2uNative?.postMessage) return false;
+      window.__talk2uPendingStatus.splice(0).forEach(payload =>
+        Talk2uNative.postMessage(payload));
+      return true;
+    };
+
+    const loadScript = (sources) => new Promise((resolve, reject) => {
+      const remaining = [...sources];
+      const next = () => {
+        const source = remaining.shift();
+        if (!source) return reject(new Error('运行库加载失败'));
+        const script = document.createElement('script');
+        const timer = setTimeout(() => {
+          script.remove();
+          next();
+        }, 15000);
+        script.src = source;
+        script.onload = () => {
+          clearTimeout(timer);
+          resolve(source);
+        };
+        script.onerror = () => {
+          clearTimeout(timer);
+          script.remove();
+          next();
+        };
+        document.head.appendChild(script);
+      };
+      next();
+    });
+
+    const loadJson = url => new Promise((resolve, reject) => {
+      const request = new XMLHttpRequest();
+      request.open('GET', url, true);
+      request.timeout = 15000;
+      request.onload = () => {
+        if ((request.status >= 200 && request.status < 300) ||
+            (request.status === 0 && request.responseText)) {
+          try {
+            resolve(JSON.parse(request.responseText));
+          } catch (error) {
+            reject(new Error(`${url} 不是有效 JSON: ${error.message}`));
+          }
+        } else {
+          reject(new Error(`${url} 加载失败 (${request.status})`));
+        }
+      };
+      request.onerror = () => reject(new Error(`${url} 无法读取`));
+      request.ontimeout = () => reject(new Error(`${url} 读取超时`));
+      request.send();
+    });
+
+    const normalize = value => String(value || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9\u4e00-\u9fff]/g, '');
+
+    const siblingUrl = (base, relative) => new URL(relative, base).href;
+
+    const coreVersion = () => {
+      try {
+        const encoded = Number(Live2DCubismCore.Version.csmGetVersion()) >>> 0;
+        return {
+          encoded,
+          major: (encoded >>> 24) & 0xff,
+          minor: (encoded >>> 16) & 0xff,
+          patch: encoded & 0xffff,
+        };
+      } catch (_) {
+        return null;
+      }
+    };
+
+    const discoverLipSyncIds = async (modelUrl, settings, avatarConfig) => {
+      const configured = avatarConfig?.lipSync?.parameterIds;
+      if (Array.isArray(configured) && configured.length) {
+        return [...new Set(configured.filter(Boolean).map(String))];
+      }
+
+      const group = (settings.Groups || settings.groups || []).find(item =>
+        normalize(item.Name || item.name) === 'lipsync');
+      const groupIds = group && (group.Ids || group.ids);
+      if (Array.isArray(groupIds) && groupIds.length) {
+        return [...new Set(groupIds.filter(Boolean).map(String))];
+      }
+
+      const references = settings.FileReferences || settings.fileReferences || {};
+      const displayInfo = references.DisplayInfo || references.displayInfo;
+      if (displayInfo) {
+        try {
+          const cdi = await loadJson(siblingUrl(modelUrl, displayInfo));
+          const parameters = cdi.Parameters || cdi.parameters || [];
+          const exactIds = new Set(['ParamMouthOpenY', 'ParamA']);
+          const candidates = parameters.filter(item => {
+            const id = item.Id || item.id;
+            const name = normalize(item.Name || item.name);
+            return exactIds.has(id) || name === 'mouthopen' || name === '嘴巴开合';
+          }).map(item => String(item.Id || item.id));
+          if (candidates.length) return [...new Set(candidates)];
+        } catch (_) {
+          // DisplayInfo is optional at runtime; model loading below remains authoritative.
+        }
+      }
+      return ['ParamMouthOpenY', 'ParamA'];
+    };
+
+    let model = null;
+    let modelSettings = null;
+    let avatarConfig = {};
+    let lipSyncIds = [];
+    let mouthTarget = 0;
+    let mouthCurrent = 0;
+    let speaking = false;
+    let lastMouthSignalAt = 0;
+    let expressionResetTimer = null;
+    let naturalGazeTimer = null;
+    let microExpressionTimer = null;
+    let rendererDiagnostics = null;
+    let rendererPolicy = null;
+    let rendererContextRequest = null;
+    let pixiApp = null;
+    let contextRecoveryTimer = null;
+    let naturalCapabilities = {};
+    let cueCoverage = [];
+    let invalidConfiguredCues = [];
+    let intrinsicModelWidth = 0;
+    let intrinsicModelHeight = 0;
+    let modelFitReady = false;
+
+    const finiteNumber = (value, fallback, minimum, maximum) => {
+      const parsed = Number(value);
+      return Number.isFinite(parsed)
+        ? Math.max(minimum, Math.min(maximum, parsed))
+        : fallback;
+    };
+
+    const diagnosticNumber = value => {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+
+    const getModelGeometryDiagnostics = () => {
+      const canvas = pixiApp?.view || document.getElementById('avatar');
+      return {
+        fitted: modelFitReady,
+        visible: model?.visible === true,
+        renderable: model?.renderable === true,
+        alpha: diagnosticNumber(model?.alpha),
+        intrinsicWidth: diagnosticNumber(intrinsicModelWidth),
+        intrinsicHeight: diagnosticNumber(intrinsicModelHeight),
+        width: diagnosticNumber(model?.width),
+        height: diagnosticNumber(model?.height),
+        scaleX: diagnosticNumber(model?.scale?.x),
+        scaleY: diagnosticNumber(model?.scale?.y),
+        positionX: diagnosticNumber(model?.position?.x),
+        positionY: diagnosticNumber(model?.position?.y),
+        viewportWidth: diagnosticNumber(window.innerWidth),
+        viewportHeight: diagnosticNumber(window.innerHeight),
+        canvasWidth: diagnosticNumber(canvas?.width),
+        canvasHeight: diagnosticNumber(canvas?.height),
+      };
+    };
+
+    const runtimeSettings = () => model?.internalModel?.settings;
+
+    const availableMotionGroups = () => {
+      const motions = runtimeSettings()?.motions || {};
+      return Object.keys(motions).filter(group =>
+        Array.isArray(motions[group]) && motions[group].length > 0);
+    };
+
+    const availableExpressions = () => (runtimeSettings()?.expressions || [])
+      .map(item => String(item.Name || item.name || ''))
+      .filter(Boolean);
+
+    const resolveMotion = motion => {
+      if (!motion || !Object.prototype.hasOwnProperty.call(motion, 'group')) return null;
+      const group = String(motion.group);
+      const index = Math.max(0, Math.trunc(Number(motion.index) || 0));
+      const definitions = runtimeSettings()?.motions?.[group];
+      return Array.isArray(definitions) && index < definitions.length ? {group, index} : null;
+    };
+
+    const resolveExpression = name => {
+      if (!name) return null;
+      const requested = normalize(name);
+      return availableExpressions().find(item => normalize(item) === requested) || null;
+    };
+
+    const expressionManager = () =>
+      model?.internalModel?.motionManager?.expressionManager || null;
+
+    const resetExpression = () => {
+      if (expressionResetTimer) clearTimeout(expressionResetTimer);
+      expressionResetTimer = null;
+      const manager = expressionManager();
+      if (!manager || typeof manager.resetExpression !== 'function') return false;
+      manager.resetExpression();
+      return true;
+    };
+
+    const playExpression = (name, durationMs) => {
+      const resolved = resolveExpression(name);
+      if (!resolved || !model) return false;
+      model.expression(resolved);
+      if (expressionResetTimer) clearTimeout(expressionResetTimer);
+      const duration = finiteNumber(
+        durationMs,
+        finiteNumber(avatarConfig?.naturalBehavior?.expressionDurationMs, 4200, 500, 15000),
+        500,
+        15000,
+      );
+      expressionResetTimer = setTimeout(resetExpression, duration);
+      return true;
+    };
+
+    const resolveConfiguredCue = cue => {
+      const configured = avatarConfig?.cues?.[cue];
+      if (!configured) return null;
+      const motion = resolveMotion(configured.motion);
+      const expression = resolveExpression(configured.expression);
+      return motion || expression ? {motion, expression, configured} : null;
+    };
+
+    const playConfiguredCue = cue => {
+      const resolved = resolveConfiguredCue(cue);
+      if (!resolved || !model) return false;
+      let played = false;
+      if (resolved.motion) {
+        model.motion(resolved.motion.group, resolved.motion.index, 3);
+        played = true;
+      }
+      if (resolved.expression) {
+        playExpression(resolved.expression, resolved.configured.durationMs);
+        played = true;
+      }
+      return played;
+    };
+
+    const resolveFallbackCue = cue => {
+      if (!model) return null;
+      const groups = availableMotionGroups();
+      const aliases = {
+        neutral: ['idle'],
+        greeting: ['greeting', 'hello'],
+        wave: ['wave'],
+        hug: ['hug', 'embrace'],
+        nod: ['nod'],
+        happy: ['happy', 'joy', 'smile'],
+        sad: ['sad', 'sorrow'],
+        angry: ['angry', 'mad'],
+        shy: ['shy', 'blush'],
+        surprise: ['surprise', 'shock']
+      };
+      const requested = aliases[cue] || aliases.neutral;
+      const group = requested.map(alias => groups.find(item => {
+        const value = normalize(item);
+        return value === alias || value.includes(alias);
+      })).find(item => item !== undefined);
+
+      const expressionAliases = {
+        greeting: ['smile', 'happy'], wave: ['smile', 'happy'], hug: ['smile', 'happy'],
+        happy: ['happy', 'smile', 'joy'], sad: ['sad', 'sorrow'], angry: ['angry', 'mad'],
+        shy: ['shy', 'blush'], surprise: ['surprise', 'shock']
+      };
+      const expression = availableExpressions().find(item => {
+        const name = normalize(item);
+        return (expressionAliases[cue] || []).some(alias => name === alias || name.includes(alias));
+      }) || null;
+      return group || expression ? {motion: group ? {group, index: 0} : null, expression} : null;
+    };
+
+    const playFallbackCue = cue => {
+      const resolved = resolveFallbackCue(cue);
+      if (!resolved || !model) return false;
+      if (resolved.motion) model.motion(resolved.motion.group, resolved.motion.index, 3);
+      if (resolved.expression) playExpression(resolved.expression);
+      return true;
+    };
+
+    const calculateCueCoverage = () => {
+      const supported = [
+        'neutral', 'greeting', 'wave', 'hug', 'nod',
+        'happy', 'sad', 'angry', 'shy', 'surprise'
+      ];
+      invalidConfiguredCues = Object.keys(avatarConfig?.cues || {}).filter(cue =>
+        !resolveConfiguredCue(cue));
+      return supported.filter(cue =>
+        Boolean(resolveConfiguredCue(cue) || resolveFallbackCue(cue)));
+    };
+
+    const randomBetween = (minimum, maximum) => minimum + Math.random() * (maximum - minimum);
+
+    const scheduleNaturalGaze = () => {
+      if (naturalGazeTimer) clearTimeout(naturalGazeTimer);
+      const gaze = avatarConfig?.naturalBehavior?.gaze || {};
+      if (gaze.enabled === false) return;
+      const minimum = finiteNumber(gaze.intervalMinMs, 2600, 800, 30000);
+      const maximum = finiteNumber(gaze.intervalMaxMs, 5600, minimum, 60000);
+      naturalGazeTimer = setTimeout(() => {
+        const controller = model?.internalModel?.focusController;
+        if (!document.hidden && controller && typeof controller.focus === 'function') {
+          const rangeX = finiteNumber(gaze.rangeX, 0.22, 0, 0.65);
+          const rangeY = finiteNumber(gaze.rangeY, 0.12, 0, 0.45);
+          controller.focus(randomBetween(-rangeX, rangeX), randomBetween(-rangeY, rangeY));
+        }
+        scheduleNaturalGaze();
+      }, randomBetween(minimum, maximum));
+    };
+
+    const scheduleMicroExpression = () => {
+      if (microExpressionTimer) clearTimeout(microExpressionTimer);
+      const behavior = avatarConfig?.naturalBehavior || {};
+      const candidates = Array.isArray(behavior.microExpressions)
+        ? behavior.microExpressions.map(resolveExpression).filter(Boolean)
+        : [];
+      if (!candidates.length) return;
+      const minimum = finiteNumber(behavior.microExpressionMinMs, 12000, 3000, 120000);
+      const maximum = finiteNumber(behavior.microExpressionMaxMs, 24000, minimum, 180000);
+      microExpressionTimer = setTimeout(() => {
+        if (!document.hidden && !speaking) {
+          playExpression(candidates[Math.floor(Math.random() * candidates.length)], behavior.microExpressionDurationMs);
+        }
+        scheduleMicroExpression();
+      }, randomBetween(minimum, maximum));
+    };
+
+    const createWebGlContext = canvas => {
+      const forceWebGl1 = sessionStorage.getItem('talk2u-force-webgl1') === '1';
+      const attributes = {
+        alpha: true,
+        antialias: true,
+        depth: false,
+        stencil: true,
+        premultipliedAlpha: true,
+        preserveDrawingBuffer: false,
+        failIfMajorPerformanceCaveat: true,
+        powerPreference: 'high-performance',
+      };
+      const attempts = forceWebGl1
+        ? [{api: 'webgl1', contextName: 'webgl'}]
+        : [
+            {api: 'webgl2', contextName: 'webgl2'},
+            {api: 'webgl1', contextName: 'webgl'},
+          ];
+      const failures = [];
+      for (const attempt of attempts) {
+        try {
+          const context = canvas.getContext(attempt.contextName, attributes);
+          if (context) {
+            return {
+              context,
+              selectedApi: attempt.api,
+              forceWebGl1,
+              requestedApiOrder: attempts.map(item => item.api),
+              failures,
+              attributes,
+            };
+          }
+          failures.push(`${attempt.api}: context unavailable`);
+        } catch (error) {
+          failures.push(`${attempt.api}: ${error.message}`);
+        }
+      }
+      throw new Error(`硬件 WebGL context 创建失败（${failures.join('; ')}）`);
+    };
+
+    const installContextRecovery = (canvas, selectedApi) => {
+      const recoveryKey = 'talk2u-webgl-recovery-count';
+      canvas.addEventListener('webglcontextlost', event => {
+        event.preventDefault();
+        mouthTarget = 0;
+        if (pixiApp) pixiApp.stop();
+        const recoveries = Number(sessionStorage.getItem(recoveryKey) || 0);
+        report('recovering', 'Live2D 图形上下文丢失，正在等待驱动恢复...', {
+          selectedApi,
+          recoveries,
+        });
+        clearTimeout(contextRecoveryTimer);
+        contextRecoveryTimer = setTimeout(() => {
+          report('error', 'Live2D 图形上下文未能恢复，请点击重试', {
+            failureCode: 'webgl-context-restore-timeout',
+            recoverable: true,
+          });
+        }, 10000);
+      }, false);
+
+      canvas.addEventListener('webglcontextrestored', () => {
+        clearTimeout(contextRecoveryTimer);
+        const recoveries = Number(sessionStorage.getItem(recoveryKey) || 0) + 1;
+        sessionStorage.setItem(recoveryKey, String(recoveries));
+        if (recoveries > 2) {
+          report('error', 'Live2D 图形上下文反复丢失，已停止自动恢复', {
+            failureCode: 'webgl-context-unstable',
+            recoverable: true,
+          });
+          return;
+        }
+        if (selectedApi === 'webgl2') {
+          sessionStorage.setItem('talk2u-force-webgl1', '1');
+        }
+        report('loading', selectedApi === 'webgl2'
+          ? 'WebGL2 驱动不稳定，正在使用 WebGL1 兼容模式重载...'
+          : '图形上下文已恢复，正在重新加载 Live2D...');
+        setTimeout(() => location.reload(), 50);
+      }, false);
+    };
+
+    const detectRenderer = app => {
+      const gl = app?.renderer?.gl;
+      if (!gl) return {api: 'none', backend: 'unavailable', software: true};
+      const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+      const vendor = debugInfo
+        ? gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL)
+        : gl.getParameter(gl.VENDOR);
+      const renderer = debugInfo
+        ? gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL)
+        : gl.getParameter(gl.RENDERER);
+      const version = gl.getParameter(gl.VERSION);
+      const shadingLanguageVersion = gl.getParameter(gl.SHADING_LANGUAGE_VERSION);
+      const backendValue = `${vendor || ''} ${renderer || ''}`.toLowerCase();
+      const backend = backendValue.includes('vulkan')
+        ? 'vulkan-via-angle'
+        : backendValue.includes('opengl') || backendValue.includes('gles')
+          ? 'opengl-es-via-webgl'
+          : backendValue.includes('angle')
+            ? 'angle-backend-unspecified'
+            : 'webgl-driver-unspecified';
+      let platform = {};
+      try {
+        platform = window.Talk2uNative?.getRendererCapabilities
+          ? JSON.parse(Talk2uNative.getRendererCapabilities())
+          : {};
+      } catch (_) {
+        platform = {};
+      }
+      return {
+        api: typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext
+          ? 'webgl2'
+          : 'webgl1',
+        backend,
+        vendor: String(vendor || ''),
+        renderer: String(renderer || ''),
+        version: String(version || ''),
+        shadingLanguageVersion: String(shadingLanguageVersion || ''),
+        resolution: Number(app?.renderer?.resolution || 1),
+        devicePixelRatio: Number(window.devicePixelRatio || 1),
+        canvasPixels: {
+          width: Number(app?.view?.width || 0),
+          height: Number(app?.view?.height || 0),
+        },
+        software: /swiftshader|llvmpipe|software/.test(backendValue),
+        contextRequest: rendererContextRequest ? {
+          selectedApi: rendererContextRequest.selectedApi,
+          forceWebGl1: rendererContextRequest.forceWebGl1,
+          requestedApiOrder: rendererContextRequest.requestedApiOrder,
+          failures: rendererContextRequest.failures,
+          attributes: rendererContextRequest.attributes,
+        } : null,
+        platform,
+      };
+    };
+
+    const evaluateRendererPolicy = diagnostics => {
+      const backend = diagnostics?.backend || 'unavailable';
+      const platform = diagnostics?.platform || {};
+      const usingVulkan = backend === 'vulkan-via-angle';
+      const usingOpenGl = backend === 'opengl-es-via-webgl';
+      const nativeProbe = platform.nativeProbe || {};
+      return {
+        preference: 'hardware-webgl2-then-webgl1',
+        requestedApiOrder: diagnostics?.contextRequest?.requestedApiOrder || [],
+        selectedWebGlApi: diagnostics?.api || 'unavailable',
+        backendSelectionOwner: 'Android System WebView / ANGLE',
+        deviceAdvertisesVulkan: platform.vulkanAdvertised === true,
+        preferredNativeBackend: nativeProbe.preferredNativeBackend || 'unknown',
+        actualBackend: backend,
+        usingVulkan,
+        usingOpenGlFallback: !usingVulkan && usingOpenGl,
+        fallbackControlledByApp: false,
+        backendVerified: usingVulkan || usingOpenGl,
+        nativeProbeIsNotLive2dBackend: true,
+        appControlledVulkanFallbackAvailable: false,
+        appControlledVulkanFallbackRequirement: 'Cubism SDK for Native 5 renderer',
+      };
+    };
+
+    window.Talk2UAvatar = {
+      setMouth(value) {
+        if (!model) return false;
+        mouthTarget = Math.max(0, Math.min(1, Number(value) || 0));
+        lastMouthSignalAt = performance.now();
+        return true;
+      },
+      setSpeaking(value) {
+        const wasSpeaking = speaking;
+        speaking = Boolean(value);
+        if (speaking && !wasSpeaking) resetExpression();
+        if (!speaking) mouthTarget = 0;
+        return Boolean(model);
+      },
+      motion(group, index) {
+        const resolved = resolveMotion({group, index});
+        if (!resolved || !model) return false;
+        model.motion(resolved.group, resolved.index, 3);
+        return true;
+      },
+      expression(name) { return playExpression(name); },
+      resetExpression,
+      perform(cue) {
+        const normalizedCue = String(cue || 'neutral');
+        if (normalizedCue === 'neutral') resetExpression();
+        return playConfiguredCue(normalizedCue) || playFallbackCue(normalizedCue);
+      },
+      diagnostics() {
+        return JSON.stringify({
+          lipSyncIds,
+          coreVersion: coreVersion(),
+          cueCoverage,
+          invalidConfiguredCues,
+          renderer: rendererDiagnostics,
+          rendererPolicy,
+          naturalCapabilities,
+          modelVersion: modelSettings?.Version,
+          frameworkVersion: PIXI?.live2d?.VERSION || 'unknown',
+          avatarConfig,
+          modelGeometry: getModelGeometryDiagnostics(),
+        });
+      }
+    };
+
+    (async () => {
+      try {
+        const modelUrl = new URLSearchParams(location.search).get('model');
+        if (!modelUrl) throw new Error('未配置 .model3.json 模型路径');
+
+        const runtimeSources = {};
+        runtimeSources.core = await loadScript([
+          'vendor/live2dcubismcore.min.js',
+          'https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js'
+        ]);
+        const version = coreVersion();
+        if (!version || version.major < 5) {
+          const current = version ? `${version.major}.${version.minor}` : '未知';
+          throw new Error(`当前 Cubism Core ${current} 低于模型要求的 5.0`);
+        }
+        runtimeSources.pixi = await loadScript([
+          'vendor/pixi.min.js',
+          'https://cdn.jsdelivr.net/npm/pixi.js@6.5.10/dist/browser/pixi.min.js'
+        ]);
+        runtimeSources.framework = await loadScript([
+          'vendor/cubism4.min.js',
+          'https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js'
+        ]);
+
+        modelSettings = await loadJson(modelUrl);
+        try {
+          avatarConfig = await loadJson(siblingUrl(modelUrl, 'talk2u.avatar.json'));
+        } catch (_) {
+          avatarConfig = {};
+        }
+        lipSyncIds = await discoverLipSyncIds(modelUrl, modelSettings, avatarConfig);
+
+        if (PIXI.settings && PIXI.ENV && 'PREFER_ENV' in PIXI.settings) {
+          PIXI.settings.PREFER_ENV = PIXI.ENV.WEBGL2;
+        }
+
+        const canvas = document.getElementById('avatar');
+        const renderResolution = Math.max(
+          1,
+          Math.min(Number(window.devicePixelRatio) || 1, 3),
+        );
+        if (PIXI.settings) PIXI.settings.RESOLUTION = renderResolution;
+        rendererContextRequest = createWebGlContext(canvas);
+        installContextRecovery(canvas, rendererContextRequest.selectedApi);
+        pixiApp = new PIXI.Application({
+          view: canvas,
+          context: rendererContextRequest.context,
+          resizeTo: window,
+          resolution: renderResolution,
+          autoDensity: true,
+          backgroundAlpha: 0,
+          autoStart: true,
+          antialias: true,
+          powerPreference: 'high-performance',
+          preserveDrawingBuffer: false,
+        });
+        rendererDiagnostics = detectRenderer(pixiApp);
+        rendererPolicy = evaluateRendererPolicy(rendererDiagnostics);
+        if (rendererDiagnostics.software) {
+          throw new Error('检测到软件 WebGL renderer，拒绝以软件渲染冒充 Vulkan/OpenGL ES');
+        }
+        model = await PIXI.live2d.Live2DModel.from(modelUrl, {autoInteract: false});
+        pixiApp.stage.addChild(model);
+        model.visible = true;
+        model.renderable = true;
+        model.alpha = 1;
+
+        const internalModel = model.internalModel || {};
+        naturalCapabilities = {
+          idleMotion: availableMotionGroups().some(group => normalize(group) === 'idle'),
+          eyeBlink: Boolean(internalModel.eyeBlink),
+          breath: Boolean(internalModel.breath),
+          physics: Boolean(internalModel.physics),
+          pose: Boolean(internalModel.pose),
+          gaze: Boolean(internalModel.focusController),
+        };
+        cueCoverage = calculateCueCoverage();
+
+        const gain = Math.max(0.1, Math.min(3, Number(avatarConfig?.lipSync?.gain) || 1));
+        const legacySmoothing = finiteNumber(avatarConfig?.lipSync?.smoothing, 0.45, 0.05, 1);
+        const attack = finiteNumber(avatarConfig?.lipSync?.attack, Math.max(0.5, legacySmoothing), 0.05, 1);
+        const release = finiteNumber(avatarConfig?.lipSync?.release, Math.min(0.35, legacySmoothing), 0.03, 1);
+        const staleAfterMs = finiteNumber(avatarConfig?.lipSync?.staleAfterMs, 240, 80, 1000);
+        pixiApp.ticker.add(delta => {
+          if (!speaking || performance.now() - lastMouthSignalAt > staleAfterMs) {
+            mouthTarget = 0;
+          }
+          const smoothing = mouthTarget > mouthCurrent ? attack : release;
+          const blend = 1 - Math.pow(1 - smoothing, Math.max(0.1, Number(delta) || 1));
+          mouthCurrent += (mouthTarget - mouthCurrent) * blend;
+        });
+        internalModel.on('beforeModelUpdate', () => {
+          const core = internalModel.coreModel;
+          if (!core || !core.setParameterValueById) return;
+          const value = Math.max(0, Math.min(1, mouthCurrent * gain));
+          lipSyncIds.forEach(id => core.setParameterValueById(id, value));
+        });
+
+        const fit = () => {
+          const viewportWidth = window.innerWidth || canvas.clientWidth || 0;
+          const viewportHeight = window.innerHeight || canvas.clientHeight || 0;
+          if (!(viewportWidth > 0 && viewportHeight > 0)) return false;
+
+          if (!(intrinsicModelWidth > 0 && intrinsicModelHeight > 0)) {
+            try {
+              const bounds = model.getLocalBounds();
+              const width = Number(bounds?.width);
+              const height = Number(bounds?.height);
+              if (Number.isFinite(width) && width > 0) intrinsicModelWidth = width;
+              if (Number.isFinite(height) && height > 0) intrinsicModelHeight = height;
+            } catch (_) {}
+          }
+          if (!(intrinsicModelWidth > 0 && intrinsicModelHeight > 0)) {
+            const scaleX = Math.abs(Number(model.scale?.x)) || 1;
+            const scaleY = Math.abs(Number(model.scale?.y)) || 1;
+            const width = Number(model.width) / scaleX;
+            const height = Number(model.height) / scaleY;
+            if (Number.isFinite(width) && width > 0) intrinsicModelWidth = width;
+            if (Number.isFinite(height) && height > 0) intrinsicModelHeight = height;
+          }
+          if (!(intrinsicModelWidth > 0 && intrinsicModelHeight > 0)) return false;
+
+          const scale = Math.min(
+            viewportWidth / intrinsicModelWidth,
+            viewportHeight / intrinsicModelHeight,
+          ) * 0.92;
+          if (!(Number.isFinite(scale) && scale > 0)) return false;
+          model.scale.set(scale);
+          model.anchor.set(0.5, 0.5);
+          model.position.set(viewportWidth / 2, viewportHeight / 2);
+          model.visible = true;
+          model.renderable = true;
+          model.alpha = 1;
+          modelFitReady = true;
+          return true;
+        };
+        for (let attempt = 0; attempt < 180 && !fit(); attempt += 1) {
+          await new Promise(resolve => requestAnimationFrame(resolve));
+        }
+        if (!modelFitReady) {
+          throw new Error('Live2D model geometry or viewport remained unavailable');
+        }
+        window.addEventListener('resize', fit);
+        scheduleNaturalGaze();
+        scheduleMicroExpression();
+        document.addEventListener('visibilitychange', () => {
+          if (document.hidden) {
+            mouthTarget = 0;
+          } else {
+            scheduleNaturalGaze();
+            scheduleMicroExpression();
+          }
+        });
+        window.addEventListener('pagehide', () => {
+          clearTimeout(contextRecoveryTimer);
+          if (naturalGazeTimer) clearTimeout(naturalGazeTimer);
+          if (microExpressionTimer) clearTimeout(microExpressionTimer);
+          if (expressionResetTimer) clearTimeout(expressionResetTimer);
+        });
+        setTimeout(() => sessionStorage.removeItem('talk2u-webgl-recovery-count'), 30000);
+        report('ready', 'Live2D 已就绪', {
+          coreVersion: version,
+          lipSyncParameterIds: lipSyncIds,
+          runtimeSources,
+          cueCoverage,
+          invalidConfiguredCues,
+          renderer: rendererDiagnostics,
+          rendererPolicy,
+          naturalCapabilities,
+          frameworkVersion: PIXI?.live2d?.VERSION || 'unknown',
+          modelGeometry: getModelGeometryDiagnostics(),
+        });
+      } catch (error) {
+        clearTimeout(contextRecoveryTimer);
+        try {
+          pixiApp?.stop();
+        } catch (_) {}
+        report('error', `Live2D 无法启动：${error.message}`);
+      }
+    })();
+  </script>
+</body>
+</html>

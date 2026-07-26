@@ -5,8 +5,13 @@ import 'package:talk2u/src/pages/character_edit_page.dart';
 
 class CharacterListPage extends StatefulWidget {
   final ValueChanged<Character>? onSelectCharacter;
+  final VoidCallback? onSelectAssistant;
 
-  const CharacterListPage({super.key, this.onSelectCharacter});
+  const CharacterListPage({
+    super.key,
+    this.onSelectCharacter,
+    this.onSelectAssistant,
+  });
 
   @override
   State<CharacterListPage> createState() => _CharacterListPageState();
@@ -191,54 +196,32 @@ class _CharacterListPageState extends State<CharacterListPage> {
       ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
-          : CharacterStore.instance.characters.isEmpty
-          ? _buildEmptyState(theme)
-          : _buildCharacterGrid(theme),
+          : _buildCharacterList(theme),
     );
   }
 
-  Widget _buildEmptyState(ThemeData theme) {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            Icons.person_add_rounded,
-            size: 64,
-            color: theme.colorScheme.outline.withValues(alpha: 0.5),
-          ),
-          const SizedBox(height: 16),
-          Text(
-            '还没有角色',
-            style: theme.textTheme.titleMedium?.copyWith(
-              color: theme.colorScheme.outline,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            '创建一个AI角色开始角色扮演聊天',
-            style: theme.textTheme.bodyMedium?.copyWith(
-              color: theme.colorScheme.outline.withValues(alpha: 0.7),
-            ),
-          ),
-          const SizedBox(height: 24),
-          FilledButton.icon(
-            onPressed: _createCharacter,
-            icon: const Icon(Icons.add_rounded),
-            label: const Text('创建角色'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildCharacterGrid(ThemeData theme) {
+  Widget _buildCharacterList(ThemeData theme) {
     final characters = CharacterStore.instance.characters;
     return ListView.builder(
       padding: const EdgeInsets.all(16),
-      itemCount: characters.length,
+      itemCount: characters.length + 1,
       itemBuilder: (context, index) {
-        final character = characters[index];
+        if (index == 0) {
+          return Card(
+            child: ListTile(
+              leading: CircleAvatar(
+                backgroundColor: theme.colorScheme.primaryContainer,
+                foregroundColor: theme.colorScheme.onPrimaryContainer,
+                child: const Icon(Icons.smart_toy_outlined),
+              ),
+              title: const Text('普通助手'),
+              subtitle: Text(characters.isEmpty ? '无需创建角色，直接开始对话' : '不使用角色设定'),
+              trailing: const Icon(Icons.chevron_right_rounded),
+              onTap: widget.onSelectAssistant,
+            ),
+          );
+        }
+        final character = characters[index - 1];
         return _CharacterCard(
           character: character,
           onTap: () => widget.onSelectCharacter?.call(character),

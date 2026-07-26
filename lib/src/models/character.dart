@@ -19,6 +19,7 @@ class Character {
   final String userName; // 用户名称（AI 对你的称呼）
   final String userSetting; // 用户聊天人设
   final List<String> tags;
+  final String live2dModelPath;
   final int createdAt;
   final int updatedAt;
 
@@ -33,6 +34,7 @@ class Character {
     this.userName = '',
     this.userSetting = '',
     this.tags = const [],
+    this.live2dModelPath = '',
     required this.createdAt,
     required this.updatedAt,
   });
@@ -81,6 +83,7 @@ class Character {
     'userName': userName,
     'userSetting': userSetting,
     'tags': tags,
+    'live2dModelPath': live2dModelPath,
     'createdAt': createdAt,
     'updatedAt': updatedAt,
   };
@@ -96,6 +99,7 @@ class Character {
     userName: json['userName'] as String? ?? '',
     userSetting: json['userSetting'] as String? ?? '',
     tags: (json['tags'] as List<dynamic>?)?.cast<String>() ?? [],
+    live2dModelPath: json['live2dModelPath'] as String? ?? '',
     createdAt: json['createdAt'] as int? ?? 0,
     updatedAt: json['updatedAt'] as int? ?? 0,
   );
@@ -111,6 +115,7 @@ class Character {
     String? userName,
     String? userSetting,
     List<String>? tags,
+    String? live2dModelPath,
     int? createdAt,
     int? updatedAt,
   }) => Character(
@@ -124,6 +129,7 @@ class Character {
     userName: userName ?? this.userName,
     userSetting: userSetting ?? this.userSetting,
     tags: tags ?? this.tags,
+    live2dModelPath: live2dModelPath ?? this.live2dModelPath,
     createdAt: createdAt ?? this.createdAt,
     updatedAt: updatedAt ?? this.updatedAt,
   );

@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "lipSync": {
+    "parameterIds": [
+      "ParamA"
+    ],
+    "gain": 1.0,
+    "smoothing": 0.45,
+    "attack": 0.58,
+    "release": 0.28,
+    "staleAfterMs": 240
+  },
+  "naturalBehavior": {
+    "expressionDurationMs": 4200,
+    "gaze": {
+      "enabled": true,
+      "intervalMinMs": 2600,
+      "intervalMaxMs": 5600,
+      "rangeX": 0.22,
+      "rangeY": 0.12
+    },
+    "microExpressions": []
+  },
+  "cues": {
+    "neutral": {
+      "motion": {
+        "group": "Idle",
+        "index": 0
+      }
+    },
+    "greeting": {
+      "motion": {
+        "group": "",
+        "index": 2
+      },
+      "expression": "exp_02"
+    },
+    "wave": {
+      "motion": {
+        "group": "",
+        "index": 2
+      },
+      "expression": "exp_02"
+    },
+    "nod": {
+      "motion": {
+        "group": "",
+        "index": 0
+      }
+    },
+    "happy": {
+      "expression": "exp_02"
+    },
+    "sad": {
+      "expression": "exp_05"
+    },
+    "angry": {
+      "expression": "exp_08"
+    },
+    "shy": {
+      "expression": "exp_06"
+    },
+    "surprise": {
+      "expression": "exp_04"
+    }
+  }
+}

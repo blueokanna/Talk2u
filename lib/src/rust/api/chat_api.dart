@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'data_models.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `get_config_manager`, `get_conversation_store`, `get_data_path`, `resolve_chat_model`, `resolve_thinking_model`
+// These functions are ignored because they are not marked as `pub`: `create_engine`, `get_config_manager`, `get_conversation_store`, `get_data_path`, `resolve_chat_model`
 
 Future<void> initApp({required String dataPath}) =>
     RustLib.instance.api.crateApiChatApiInitApp(dataPath: dataPath);
@@ -108,6 +108,27 @@ Future<AppSettings> getSettings() =>
 Future<bool> saveSettings({required AppSettings settings}) =>
     RustLib.instance.api.crateApiChatApiSaveSettings(settings: settings);
 
+Future<bool> addUserMessage({
+  required String conversationId,
+  required String content,
+  required String model,
+}) => RustLib.instance.api.crateApiChatApiAddUserMessage(
+  conversationId: conversationId,
+  content: content,
+  model: model,
+);
+
+Future<bool> addAssistantMessageWithModel({
+  required String conversationId,
+  required String content,
+  required String model,
+}) => RustLib.instance.api.crateApiChatApiAddAssistantMessageWithModel(
+  conversationId: conversationId,
+  content: content,
+  model: model,
+);
+
+/// Legacy helper retained for existing clients. New clients save keys per provider.
 Future<void> setApiKey({required String apiKey}) =>
     RustLib.instance.api.crateApiChatApiSetApiKey(apiKey: apiKey);
 
@@ -120,21 +141,25 @@ Future<List<ModelInfo>> getAvailableModels() =>
 Stream<ChatStreamEvent> sendMessage({
   required String conversationId,
   required String content,
+  required String providerId,
   required String model,
   required bool enableThinking,
 }) => RustLib.instance.api.crateApiChatApiSendMessage(
   conversationId: conversationId,
   content: content,
+  providerId: providerId,
   model: model,
   enableThinking: enableThinking,
 );
 
 Stream<ChatStreamEvent> regenerateResponse({
   required String conversationId,
+  required String providerId,
   required String model,
   required bool enableThinking,
 }) => RustLib.instance.api.crateApiChatApiRegenerateResponse(
   conversationId: conversationId,
+  providerId: providerId,
   model: model,
   enableThinking: enableThinking,
 );

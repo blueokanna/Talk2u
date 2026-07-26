@@ -1,23 +1,22 @@
-﻿use super::cognitive_engine::CognitiveEngine;
+use super::cognitive_engine::CognitiveEngine;
 use super::conversation_store::ConversationStore;
 use super::data_models::*;
 use super::error_handler::ChatError;
-use super::jwt_auth::JwtAuth;
 use super::knowledge_store::{FactCategory, KnowledgeStore};
 use super::memory_engine::MemoryEngine;
+use super::provider::ProviderRuntime;
 use super::saydo_detector::SayDoDetector;
 use super::streaming_handler::StreamingHandler;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-
-const BIGMODEL_API_URL: &str = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
 
 const REASONING_TIMEOUT_SECS: u64 = 90;
 const DISTILLATION_TIMEOUT_SECS: u64 = 120;
 const FACT_EXTRACTION_TIMEOUT_SECS: u64 = 60;
 
 pub struct ChatEngine {
-    jwt_auth: std::sync::Mutex<JwtAuth>,
+    provider: ProviderRuntime,
+    auxiliary_model: String,
     conversation_store: ConversationStore,
     memory_engine: MemoryEngine,
     knowledge_store: KnowledgeStore,
@@ -51,11 +50,6 @@ impl ChatEngine {
         enhanced_messages: &[Message],
         on_event: &impl Fn(ChatStreamEvent),
     ) -> Result<(String, String), ChatError> {
-        let token = {
-            let mut auth = self.jwt_auth.lock().unwrap();
-            auth.get_token()
-        };
-
         let attempt_count = std::sync::atomic::AtomicU32::new(0);
         let need_content_reset = std::sync::atomic::AtomicBool::new(false);
         let intermediate_errors = std::sync::Mutex::new(Vec::<String>::new());
@@ -75,9 +69,7 @@ impl ChatEngine {
         };
 
         let request_body = Self::build_request_body(enhanced_messages, model, actual_thinking);
-        match StreamingHandler::stream_chat(BIGMODEL_API_URL, &token, request_body, &filtered_event)
-            .await
-        {
+        match StreamingHandler::stream_chat(&self.provider, request_body, &filtered_event).await {
             Ok((content, thinking)) if !content.trim().is_empty() => {
                 return Ok((content, thinking));
             }
@@ -85,13 +77,8 @@ impl ChatEngine {
                 attempt_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 need_content_reset.store(true, std::sync::atomic::Ordering::Relaxed);
                 let retry_body = Self::build_request_body(enhanced_messages, model, false);
-                match StreamingHandler::stream_chat(
-                    BIGMODEL_API_URL,
-                    &token,
-                    retry_body,
-                    &filtered_event,
-                )
-                .await
+                match StreamingHandler::stream_chat(&self.provider, retry_body, &filtered_event)
+                    .await
                 {
                     Ok((content, thinking)) if !content.trim().is_empty() => {
                         return Ok((content, thinking));
@@ -107,9 +94,7 @@ impl ChatEngine {
         need_content_reset.store(true, std::sync::atomic::Ordering::Relaxed);
         let compact = Self::build_compact_retry_messages(enhanced_messages, 6);
         let compact_body = Self::build_request_body(&compact, model, false);
-        match StreamingHandler::stream_chat(BIGMODEL_API_URL, &token, compact_body, &filtered_event)
-            .await
-        {
+        match StreamingHandler::stream_chat(&self.provider, compact_body, &filtered_event).await {
             Ok((content, thinking)) if !content.trim().is_empty() => {
                 return Ok((content, thinking));
             }
@@ -118,14 +103,13 @@ impl ChatEngine {
 
         need_content_reset.store(true, std::sync::atomic::Ordering::Relaxed);
         let ultra_compact = Self::build_compact_retry_messages(enhanced_messages, 4);
-        let fallback_model = if model != "glm-4.7-flash" {
+        let fallback_model = if self.provider.id == "zhipu" && model != "glm-4.7-flash" {
             "glm-4.7-flash"
         } else {
             model
         };
         let fallback_body = Self::build_request_body(&ultra_compact, fallback_model, false);
-        match StreamingHandler::stream_chat(BIGMODEL_API_URL, &token, fallback_body, on_event).await
-        {
+        match StreamingHandler::stream_chat(&self.provider, fallback_body, on_event).await {
             Ok((content, thinking)) if !content.trim().is_empty() => Ok((content, thinking)),
             Ok(_) => {
                 let diag = if let Ok(errs) = intermediate_errors.lock() {
@@ -179,11 +163,6 @@ impl ChatEngine {
         enhanced_messages: &[Message],
         on_event: &impl Fn(ChatStreamEvent),
     ) -> (String, String) {
-        let token = {
-            let mut auth = self.jwt_auth.lock().unwrap();
-            auth.get_token()
-        };
-
         let mut reasoning_messages = enhanced_messages.to_vec();
         let analysis_instruction = Message {
             id: String::new(),
@@ -243,14 +222,7 @@ impl ChatEngine {
             }
         };
 
-        match StreamingHandler::stream_chat(
-            BIGMODEL_API_URL,
-            &token,
-            request_body,
-            &reasoning_event,
-        )
-        .await
-        {
+        match StreamingHandler::stream_chat(&self.provider, request_body, &reasoning_event).await {
             Ok((content, thinking)) => {
                 let conclusion = if !content.trim().is_empty() {
                     content
@@ -275,17 +247,17 @@ impl ChatEngine {
         }
     }
 
-    pub fn new(api_key: &str, data_path: &str) -> Result<Self, String> {
-        let jwt_auth = JwtAuth::new(api_key)?;
+    pub fn new(provider: ProviderRuntime, auxiliary_model: String, data_path: &str) -> Self {
         let conversation_store = ConversationStore::new(data_path);
         let memory_engine = MemoryEngine::new(data_path);
         let knowledge_store = KnowledgeStore::new(data_path);
-        Ok(Self {
-            jwt_auth: std::sync::Mutex::new(jwt_auth),
+        Self {
+            provider,
+            auxiliary_model,
             conversation_store,
             memory_engine,
             knowledge_store,
-        })
+        }
     }
 
     /// Validate message content — reject blank messages (whitespace-only).
@@ -411,11 +383,6 @@ impl ChatEngine {
         user_content: &str,
         on_event: &impl Fn(ChatStreamEvent),
     ) -> String {
-        let token = {
-            let mut auth = self.jwt_auth.lock().unwrap();
-            auth.get_token()
-        };
-
         // 构建蒸馏请求上下文
         let mut distill_messages = enhanced_messages.to_vec();
 
@@ -479,15 +446,14 @@ impl ChatEngine {
 
         distill_messages.push(distill_instruction);
 
-        let request_body = Self::build_request_body(&distill_messages, "glm-4-long", false);
+        let request_body =
+            Self::build_request_body(&distill_messages, &self.auxiliary_model, false);
 
         // GLM-4-LONG 蒸馏是静默执行的，不向前端推送事件
         let silent_event = |_event: ChatStreamEvent| {};
         let _ = on_event; // 保留参数以维持接口一致性
 
-        match StreamingHandler::stream_chat(BIGMODEL_API_URL, &token, request_body, &silent_event)
-            .await
-        {
+        match StreamingHandler::stream_chat(&self.provider, request_body, &silent_event).await {
             Ok((content, _)) => {
                 if !content.trim().is_empty() {
                     content
@@ -548,11 +514,8 @@ impl ChatEngine {
                     return relevance > 0.1;
                 }
                 // 其他身份事实需要有一定相关性或高置信度
-                let relevance = MemoryEngine::compute_relevance_score(
-                    &f.content,
-                    &active_topics,
-                    user_content,
-                );
+                let relevance =
+                    MemoryEngine::compute_relevance_score(&f.content, &active_topics, user_content);
                 relevance > 0.08 || f.confidence >= 0.95
             })
             .cloned()
@@ -629,11 +592,6 @@ impl ChatEngine {
         _user_content: &str,
         on_event: &impl Fn(ChatStreamEvent),
     ) -> (String, String) {
-        let token = {
-            let mut auth = self.jwt_auth.lock().unwrap();
-            auth.get_token()
-        };
-
         // 在原始上下文基础上追加增强推理指令
         let mut reasoning_messages = enhanced_messages.to_vec();
 
@@ -776,14 +734,7 @@ impl ChatEngine {
             }
         };
 
-        match StreamingHandler::stream_chat(
-            BIGMODEL_API_URL,
-            &token,
-            request_body,
-            &reasoning_event,
-        )
-        .await
-        {
+        match StreamingHandler::stream_chat(&self.provider, request_body, &reasoning_event).await {
             Ok((content, thinking)) => {
                 let conclusion = if !content.trim().is_empty() {
                     content
@@ -873,26 +824,21 @@ impl ChatEngine {
                 role: MessageRole::User,
                 content: prompt,
                 thinking_content: None,
-                model: "glm-4.7-flash".to_string(),
+                model: self.auxiliary_model.clone(),
                 timestamp: 0,
                 message_type: MessageType::Say,
             },
         ];
 
-        let request_body = Self::build_request_body(&extract_messages, "glm-4.7-flash", false);
-
-        let token = {
-            let mut auth = self.jwt_auth.lock().unwrap();
-            auth.get_token()
-        };
+        let request_body =
+            Self::build_request_body(&extract_messages, &self.auxiliary_model, false);
 
         // 静默执行，不向前端发送事件
         let silent_event = |_event: ChatStreamEvent| {};
         let _ = on_event;
 
         if let Ok((text, _)) =
-            StreamingHandler::stream_chat(BIGMODEL_API_URL, &token, request_body, &silent_event)
-                .await
+            StreamingHandler::stream_chat(&self.provider, request_body, &silent_event).await
         {
             let turn = conv.turn_count;
             let new_facts = KnowledgeStore::parse_extracted_facts(&text, turn);
@@ -1070,8 +1016,7 @@ impl ChatEngine {
 
             // 情感弧线描述
             if !short_term.emotional_arc.is_empty() {
-                let arc_desc =
-                    MemoryEngine::describe_emotional_arc(&short_term.emotional_arc);
+                let arc_desc = MemoryEngine::describe_emotional_arc(&short_term.emotional_arc);
                 if !arc_desc.is_empty() {
                     short_term_prompt.push_str(&format!("【短期记忆·情绪轨迹】\n{}\n", arc_desc));
                 }
@@ -1138,9 +1083,7 @@ impl ChatEngine {
                             );
                             // 相关性阈值 0.15：足够宽松以捕捉间接关联，
                             // 又足够严格以过滤完全无关的事实
-                            if relevance > 0.15
-                                && !relevant_facts.iter().any(|(f, _)| f == fact)
-                            {
+                            if relevance > 0.15 && !relevant_facts.iter().any(|(f, _)| f == fact) {
                                 relevant_facts.push((fact.clone(), relevance));
                             }
                         }
@@ -1184,8 +1127,7 @@ impl ChatEngine {
 
             // 注入相关性达标的其他事实
             if !relevant_facts.is_empty() {
-                context
-                    .push_str("▸ 可能与当前话题相关的已知信息（仅在话题涉及时自然提及）：\n");
+                context.push_str("▸ 可能与当前话题相关的已知信息（仅在话题涉及时自然提及）：\n");
                 for (fact, _score) in &relevant_facts {
                     context.push_str(&format!("  · {}\n", fact));
                 }
@@ -1433,8 +1375,8 @@ impl ChatEngine {
         if !ai_recent.is_empty() {
             let last_content = &ai_recent[0].content;
             let last_len = last_content.chars().count();
-            let last_ends_question = last_content.trim_end().ends_with('？')
-                || last_content.trim_end().ends_with('?');
+            let last_ends_question =
+                last_content.trim_end().ends_with('？') || last_content.trim_end().ends_with('?');
             let last_has_action = last_content.contains('*') || last_content.contains('（');
             let last_para_count = last_content
                 .split('\n')
@@ -1447,12 +1389,10 @@ impl ChatEngine {
             if last_len > 100 {
                 structure_guide.push_str("上次回复比较长，如果情境不需要就短一些。");
             } else if last_len < 20 {
-                structure_guide
-                    .push_str("上次回复很短，如果这次话题需要展开，可以多说一些。");
+                structure_guide.push_str("上次回复很短，如果这次话题需要展开，可以多说一些。");
             }
             if last_has_action {
-                structure_guide
-                    .push_str("上次用了动作描写，这次试试纯对话或换种动作。");
+                structure_guide.push_str("上次用了动作描写，这次试试纯对话或换种动作。");
             }
             if last_para_count >= 3 {
                 structure_guide.push_str("上次分了好几段，这次试试一口气说完。");
@@ -2207,7 +2147,11 @@ impl ChatEngine {
             .unwrap_or_default();
 
         // 动态选择总结模型
-        let summary_model = Self::choose_summary_model(&conv.messages);
+        let summary_model = if self.provider.id == "zhipu" {
+            Self::choose_summary_model(&conv.messages)
+        } else {
+            self.auxiliary_model.as_str()
+        };
 
         // ── 阶段1: 生成摘要 ──
         // 当已有多段摘要时，使用长摘要整合 prompt；否则使用标准 prompt
@@ -2247,14 +2191,8 @@ impl ChatEngine {
 
         let request_body = Self::build_request_body(&summary_messages, summary_model, false);
 
-        let token = {
-            let mut auth = self.jwt_auth.lock().unwrap();
-            auth.get_token()
-        };
-
         let (summary_text, _) =
-            StreamingHandler::stream_chat(BIGMODEL_API_URL, &token, request_body, &on_event)
-                .await?;
+            StreamingHandler::stream_chat(&self.provider, request_body, &on_event).await?;
 
         // 解析总结结果
         let parsed = match Self::parse_summary_json(&summary_text) {
@@ -2292,23 +2230,18 @@ impl ChatEngine {
                     role: MessageRole::User,
                     content: verify_prompt,
                     thinking_content: None,
-                    model: "glm-4.7-flash".to_string(),
+                    model: self.auxiliary_model.clone(),
                     timestamp: 0,
                     message_type: MessageType::Say,
                 },
             ];
 
-            let verify_body = Self::build_request_body(&verify_messages, "glm-4.7-flash", false);
-
-            let verify_token = {
-                let mut auth = self.jwt_auth.lock().unwrap();
-                auth.get_token()
-            };
+            let verify_body =
+                Self::build_request_body(&verify_messages, &self.auxiliary_model, false);
 
             // 验证阶段的事件不传递给前端（静默执行）
             if let Ok((verify_text, _)) = StreamingHandler::stream_chat(
-                BIGMODEL_API_URL,
-                &verify_token,
+                &self.provider,
                 verify_body,
                 |_| {}, // 静默，不向前端发送验证阶段的流事件
             )
@@ -2630,6 +2563,26 @@ mod tests {
         let messages = vec![make_message(MessageRole::User, content)];
         let body = ChatEngine::build_request_body(&messages, "glm-4-flash", false);
         assert_eq!(body["messages"][0]["content"], content);
+    }
+
+    #[test]
+    fn test_request_context_survives_provider_model_switches() {
+        let mut deepseek_reply = make_message(MessageRole::Assistant, "DeepSeek reply");
+        deepseek_reply.model = "deepseek-chat".to_string();
+        let mut openai_question = make_message(MessageRole::User, "Continue with this context");
+        openai_question.model = "gpt-4.1-mini".to_string();
+        let messages = vec![
+            make_message(MessageRole::User, "Original question"),
+            deepseek_reply,
+            openai_question,
+        ];
+
+        let body = ChatEngine::build_request_body(&messages, "gpt-4.1-mini", false);
+        assert_eq!(body["model"], "gpt-4.1-mini");
+        assert_eq!(body["messages"][0]["content"], "Original question");
+        assert_eq!(body["messages"][1]["role"], "assistant");
+        assert_eq!(body["messages"][1]["content"], "DeepSeek reply");
+        assert_eq!(body["messages"][2]["content"], "Continue with this context");
     }
 
     #[test]

@@ -28,6 +28,31 @@ android {
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
+        externalNativeBuild {
+            cmake {
+                cppFlags += listOf("-std=c++17")
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
+    packaging {
+        jniLibs {
+            // Some transitive Flutter plugins bundle JNI helpers for every ABI.
+            // Keep the APK honest: Flutter, Rust and Live2D are shipped together
+            // as one complete arm64-v8a runtime.
+            excludes += setOf(
+                "lib/armeabi-v7a/**",
+                "lib/x86/**",
+                "lib/x86_64/**",
+            )
+        }
     }
 
     buildTypes {

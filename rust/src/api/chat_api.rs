@@ -4,9 +4,9 @@ use super::chat_engine::ChatEngine;
 use super::config_manager::ConfigManager;
 use super::conversation_store::ConversationStore;
 use super::data_models::*;
-use super::jwt_auth::JwtAuth;
 use super::knowledge_store::KnowledgeStore;
 use super::memory_engine::MemoryEngine;
+use super::provider::ProviderRuntime;
 
 static CONFIG_MANAGER: OnceLock<ConfigManager> = OnceLock::new();
 static CONVERSATION_STORE: OnceLock<ConversationStore> = OnceLock::new();
@@ -32,21 +32,23 @@ fn get_conversation_store() -> &'static ConversationStore {
 
 /// 解析对话模型：如果用户选择的是推理模型，自动回退到对话模型
 /// （推理模型不直接对话，仅在双模型管线中作为思考引擎使用）
-fn resolve_chat_model(requested_model: &str, settings: &AppSettings) -> String {
-    if requested_model.is_empty() || requested_model == settings.thinking_model {
-        settings.chat_model.clone()
+fn resolve_chat_model(requested_model: &str, provider: &ProviderConfig) -> String {
+    if requested_model.trim().is_empty()
+        || provider.thinking_model.as_deref() == Some(requested_model)
+    {
+        provider.chat_model.clone()
     } else {
         requested_model.to_string()
     }
 }
 
-/// 解析推理模型：从设置读取，默认 glm-4-air
-fn resolve_thinking_model(settings: &AppSettings) -> String {
-    if settings.thinking_model.trim().is_empty() {
-        "glm-4-air".to_string()
-    } else {
-        settings.thinking_model.clone()
-    }
+fn create_engine(
+    settings: &AppSettings,
+    provider_id: &str,
+) -> Result<(ChatEngine, ProviderConfig), String> {
+    let (runtime, provider) = ProviderRuntime::from_settings(settings, provider_id)?;
+    let engine = ChatEngine::new(runtime, provider.chat_model.clone(), get_data_path());
+    Ok((engine, provider))
 }
 
 // ── Conversation management ──
@@ -123,12 +125,8 @@ pub fn add_assistant_message(conversation_id: String, content: String) -> bool {
 
 pub fn restart_story(conversation_id: String) -> bool {
     let settings = get_config_manager().load_settings();
-    let api_key = match settings.api_key {
-        Some(key) => key,
-        None => return false,
-    };
-    match ChatEngine::new(&api_key, get_data_path()) {
-        Ok(engine) => engine.restart_story(&conversation_id).is_ok(),
+    match create_engine(&settings, &settings.selected_provider) {
+        Ok((engine, _)) => engine.restart_story(&conversation_id).is_ok(),
         Err(_) => false,
     }
 }
@@ -176,19 +174,60 @@ pub fn save_settings(settings: AppSettings) -> bool {
     get_config_manager().save_settings(&settings).is_ok()
 }
 
+pub fn add_user_message(conversation_id: String, content: String, model: String) -> bool {
+    let msg = Message {
+        id: uuid::Uuid::new_v4().to_string(),
+        role: MessageRole::User,
+        content,
+        thinking_content: None,
+        model,
+        timestamp: chrono::Utc::now().timestamp_millis(),
+        message_type: MessageType::Say,
+    };
+    get_conversation_store()
+        .add_message(&conversation_id, msg)
+        .is_ok()
+}
+
+pub fn add_assistant_message_with_model(
+    conversation_id: String,
+    content: String,
+    model: String,
+) -> bool {
+    let msg = Message {
+        id: uuid::Uuid::new_v4().to_string(),
+        role: MessageRole::Assistant,
+        content,
+        thinking_content: None,
+        model,
+        timestamp: chrono::Utc::now().timestamp_millis(),
+        message_type: MessageType::Say,
+    };
+    get_conversation_store()
+        .add_message(&conversation_id, msg)
+        .is_ok()
+}
+
+/// Legacy helper retained for existing clients. New clients save keys per provider.
 pub fn set_api_key(api_key: String) -> Result<(), String> {
-    if !JwtAuth::validate_api_key_format(&api_key) {
-        return Err("Invalid API key format. Expected: user_id.user_secret".to_string());
-    }
     let mut settings = get_config_manager().load_settings();
-    settings.api_key = Some(api_key);
+    settings.api_key = Some(api_key.clone());
+    if let Ok(mut providers) = serde_json::from_str::<Vec<ProviderConfig>>(&settings.providers_json)
+    {
+        if let Some(zhipu) = providers.iter_mut().find(|p| p.id == "zhipu") {
+            zhipu.api_key = Some(api_key);
+        }
+        if let Ok(json) = serde_json::to_string(&providers) {
+            settings.providers_json = json;
+        }
+    }
     get_config_manager()
         .save_settings(&settings)
         .map_err(|e| e.to_string())
 }
 
 pub fn validate_api_key(api_key: String) -> bool {
-    JwtAuth::validate_api_key_format(&api_key)
+    !api_key.trim().is_empty()
 }
 
 pub fn get_available_models() -> Vec<ModelInfo> {
@@ -221,33 +260,26 @@ pub fn get_available_models() -> Vec<ModelInfo> {
 pub async fn send_message(
     conversation_id: String,
     content: String,
+    provider_id: String,
     model: String,
     enable_thinking: bool,
     sink: crate::frb_generated::StreamSink<ChatStreamEvent>,
 ) {
     let settings = get_config_manager().load_settings();
-    let api_key = match settings.api_key.clone() {
-        Some(key) => key,
-        None => {
-            let _ = sink.add(ChatStreamEvent::Error(
-                "未配置 API Key，请在设置中填写您的智谱 API Key".to_string(),
-            ));
-            let _ = sink.add(ChatStreamEvent::Done);
-            return;
-        }
-    };
-
-    let chat_model = resolve_chat_model(&model, &settings);
-    let thinking_model = resolve_thinking_model(&settings);
-
-    let engine = match ChatEngine::new(&api_key, get_data_path()) {
-        Ok(e) => e,
+    let (engine, provider) = match create_engine(&settings, &provider_id) {
+        Ok(value) => value,
         Err(err) => {
             let _ = sink.add(ChatStreamEvent::Error(err));
             let _ = sink.add(ChatStreamEvent::Done);
             return;
         }
     };
+    let chat_model = resolve_chat_model(&model, &provider);
+    let thinking_model = provider
+        .thinking_model
+        .clone()
+        .unwrap_or_else(|| provider.chat_model.clone());
+    let use_thinking_pipeline = enable_thinking && provider.thinking_model.is_some();
 
     // 使用 done_sent 标记确保 Done 事件只发送一次
     let done_sent = std::sync::atomic::AtomicBool::new(false);
@@ -260,7 +292,7 @@ pub async fn send_message(
             &content,
             &chat_model,
             &thinking_model,
-            enable_thinking,
+            use_thinking_pipeline,
             |event| {
                 if let ChatStreamEvent::Done = &event {
                     done_sent.store(true, std::sync::atomic::Ordering::Release);
@@ -299,33 +331,26 @@ pub async fn send_message(
 
 pub async fn regenerate_response(
     conversation_id: String,
+    provider_id: String,
     model: String,
     enable_thinking: bool,
     sink: crate::frb_generated::StreamSink<ChatStreamEvent>,
 ) {
     let settings = get_config_manager().load_settings();
-    let api_key = match settings.api_key.clone() {
-        Some(key) => key,
-        None => {
-            let _ = sink.add(ChatStreamEvent::Error(
-                "未配置 API Key，请在设置中填写您的智谱 API Key".to_string(),
-            ));
-            let _ = sink.add(ChatStreamEvent::Done);
-            return;
-        }
-    };
-
-    let chat_model = resolve_chat_model(&model, &settings);
-    let thinking_model = resolve_thinking_model(&settings);
-
-    let engine = match ChatEngine::new(&api_key, get_data_path()) {
-        Ok(e) => e,
+    let (engine, provider) = match create_engine(&settings, &provider_id) {
+        Ok(value) => value,
         Err(err) => {
             let _ = sink.add(ChatStreamEvent::Error(err));
             let _ = sink.add(ChatStreamEvent::Done);
             return;
         }
     };
+    let chat_model = resolve_chat_model(&model, &provider);
+    let thinking_model = provider
+        .thinking_model
+        .clone()
+        .unwrap_or_else(|| provider.chat_model.clone());
+    let use_thinking_pipeline = enable_thinking && provider.thinking_model.is_some();
 
     let done_sent = std::sync::atomic::AtomicBool::new(false);
 
@@ -335,7 +360,7 @@ pub async fn regenerate_response(
             &conversation_id,
             &chat_model,
             &thinking_model,
-            enable_thinking,
+            use_thinking_pipeline,
             |event| {
                 if let ChatStreamEvent::Done = &event {
                     done_sent.store(true, std::sync::atomic::Ordering::Release);
@@ -374,13 +399,8 @@ pub async fn trigger_memory_summarize(
     sink: crate::frb_generated::StreamSink<ChatStreamEvent>,
 ) {
     let settings = get_config_manager().load_settings();
-    let api_key = match settings.api_key {
-        Some(key) => key,
-        None => return,
-    };
-
-    let engine = match ChatEngine::new(&api_key, get_data_path()) {
-        Ok(e) => e,
+    let engine = match create_engine(&settings, &settings.selected_provider) {
+        Ok((engine, _)) => engine,
         Err(_) => return,
     };
 

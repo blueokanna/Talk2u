@@ -31,7 +31,10 @@ migrate_working_dir/
 .pub-cache/
 .pub/
 /build/
+/.android-sdk/
+/.tools/
 /coverage/
+/assets/live2d/vendor/live2dcubismcore.min.js
 
 # Symbolication related
 app.*.symbols
