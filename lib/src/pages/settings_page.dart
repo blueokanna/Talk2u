@@ -5,6 +5,7 @@ import 'package:talk2u/src/rust/api/chat_api.dart' as rust_api;
 import 'package:talk2u/src/rust/api/data_models.dart';
 import 'package:talk2u/src/services/offline_llm_service.dart';
 import 'package:talk2u/src/services/offline_speech_service.dart';
+import 'package:talk2u/src/services/moss_tts_service.dart';
 import 'package:talk2u/src/services/sherpa_speech_service.dart';
 
 class SettingsPage extends StatefulWidget {
@@ -28,6 +29,7 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _obscureKey = true;
   bool _loading = true;
   bool _saving = false;
+  bool _testingConnection = false;
 
   ProviderProfile get _selected =>
       _providers.firstWhere((item) => item.id == _selectedId);
@@ -138,6 +140,30 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
+  Future<void> _testConnection() async {
+    if (!_formKey.currentState!.validate()) return;
+    _commitEditors();
+    final provider = _selected;
+    if (provider.isLocal) return;
+
+    setState(() => _testingConnection = true);
+    try {
+      final result = await rust_api.validateApiKey(
+        providerId: provider.id,
+        apiKey: provider.apiKey ?? '',
+        apiUrl: provider.apiUrl,
+        model: provider.chatModel,
+        protocol: provider.protocol,
+        maxOutputTokens: provider.maxOutputTokens,
+      );
+      if (mounted) _showMessage(result);
+    } catch (error) {
+      if (mounted) _showMessage('连接测试失败: $error', isError: true);
+    } finally {
+      if (mounted) setState(() => _testingConnection = false);
+    }
+  }
+
   void _showMessage(String message, {bool isError = false}) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -202,17 +228,58 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
-  Future<void> _downloadSherpaTts() async {
+  Future<void> _downloadMossTts() async {
     try {
-      await SherpaSpeechService.instance.downloadTts();
+      await MossTtsService.instance.downloadModel();
       await OfflineSpeechService.instance.initialize();
-      if (mounted) _showMessage('Matcha 离线语音模型已安装');
+      if (mounted) _showMessage('MOSS-TTS-Nano 端侧模型已安装');
     } catch (error) {
-      if (mounted) _showMessage('Matcha 下载失败: $error', isError: true);
+      if (mounted) _showMessage('MOSS-TTS-Nano 下载失败: $error', isError: true);
+    }
+  }
+
+  Future<void> _deleteMossTts() async {
+    try {
+      await MossTtsService.instance.deleteModel();
+      await OfflineSpeechService.instance.initialize();
+      if (mounted) _showMessage('已删除 MOSS-TTS-Nano 端侧模型');
+    } catch (error) {
+      if (mounted) _showMessage('无法删除 MOSS-TTS-Nano: $error', isError: true);
+    }
+  }
+
+  Future<void> _selectMossVoice(String? voiceId) async {
+    if (voiceId == null) return;
+    try {
+      await MossTtsService.instance.selectVoice(voiceId);
+      if (mounted) _showMessage('已切换 MOSS 内置克隆音色');
+    } catch (error) {
+      if (mounted) _showMessage('无法切换 MOSS 音色: $error', isError: true);
+    }
+  }
+
+  Future<void> _previewMossVoice() async {
+    try {
+      await MossTtsService.instance.speak('你好，很高兴认识你。今天想聊些什么？我会认真听，也会自然地回应你。');
+    } catch (error) {
+      if (mounted) _showMessage('MOSS-TTS-Nano 试听失败: $error', isError: true);
+    }
+  }
+
+  Future<void> _selectSystemTtsVoice(String? name) async {
+    if (name == null || name.isEmpty) return;
+    try {
+      await OfflineSpeechService.instance.selectTtsVoice(name);
+      if (mounted) _showMessage('已切换离线音色');
+    } catch (error) {
+      if (mounted) _showMessage('无法切换离线音色: $error', isError: true);
     }
   }
 
   String _formatBytes(int bytes) {
+    if (bytes >= 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+    }
     if (bytes >= 1024 * 1024) {
       return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
     }
@@ -375,7 +442,7 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
             const SizedBox(height: 24),
             FilledButton.icon(
-              onPressed: _saving ? null : _save,
+              onPressed: _saving || _testingConnection ? null : _save,
               icon: _saving
                   ? const SizedBox.square(
                       dimension: 18,
@@ -387,6 +454,24 @@ class _SettingsPageState extends State<SettingsPage> {
                 minimumSize: const Size.fromHeight(48),
               ),
             ),
+            if (!_selected.isLocal) ...[
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: _saving || _testingConnection
+                    ? null
+                    : _testConnection,
+                icon: _testingConnection
+                    ? const SizedBox.square(
+                        dimension: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.network_check_outlined),
+                label: const Text('测试连接'),
+                style: OutlinedButton.styleFrom(
+                  minimumSize: const Size.fromHeight(48),
+                ),
+              ),
+            ],
             const SizedBox(height: 32),
             if (OfflineLlmService.instance.supported) ...[
               Text('设备端侧 AI', style: Theme.of(context).textTheme.titleMedium),
@@ -507,38 +592,6 @@ class _SettingsPageState extends State<SettingsPage> {
                                 icon: const Icon(Icons.download_outlined),
                               ),
                       ),
-                      ListTile(
-                        contentPadding: EdgeInsets.zero,
-                        leading: Icon(
-                          sherpa.ttsReady
-                              ? Icons.record_voice_over_outlined
-                              : Icons.download_for_offline_outlined,
-                        ),
-                        title: const Text(SherpaSpeechService.ttsModelName),
-                        subtitle: Text(
-                          sherpa.downloading &&
-                                  (sherpa.operationLabel.contains('Matcha') ||
-                                      sherpa.operationLabel.contains('声码器'))
-                              ? '${_formatBytes(sherpa.downloadedBytes)} / '
-                                    '${_formatBytes(sherpa.totalDownloadBytes)}'
-                              : sherpa.ttsReady
-                              ? '已就绪 · 中英双语 · 完全离线'
-                              : '约 126.8 MB · 中英双语合成',
-                        ),
-                        trailing: sherpa.downloading
-                            ? const SizedBox.shrink()
-                            : sherpa.ttsReady
-                            ? IconButton(
-                                tooltip: '删除 Matcha',
-                                onPressed: sherpa.deleteTts,
-                                icon: const Icon(Icons.delete_outline),
-                              )
-                            : IconButton(
-                                tooltip: '下载 Matcha',
-                                onPressed: _downloadSherpaTts,
-                                icon: const Icon(Icons.download_outlined),
-                              ),
-                      ),
                       if (sherpa.downloading)
                         LinearProgressIndicator(value: sherpa.downloadProgress),
                       if (sherpa.extracting) const LinearProgressIndicator(),
@@ -546,6 +599,120 @@ class _SettingsPageState extends State<SettingsPage> {
                         const SizedBox(height: 8),
                         Text(
                           sherpa.lastError!,
+                          style: TextStyle(
+                            color: Theme.of(context).colorScheme.error,
+                          ),
+                        ),
+                      ],
+                    ],
+                  );
+                },
+              ),
+              const SizedBox(height: 24),
+            ],
+            if (MossTtsService.instance.supported) ...[
+              Text('MOSS 端侧语音', style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 8),
+              AnimatedBuilder(
+                animation: MossTtsService.instance,
+                builder: (context, _) {
+                  final moss = MossTtsService.instance;
+                  return Column(
+                    children: [
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(
+                          moss.ready
+                              ? Icons.record_voice_over_outlined
+                              : Icons.download_for_offline_outlined,
+                        ),
+                        title: const Text(MossTtsService.modelName),
+                        subtitle: Text(
+                          moss.downloading
+                              ? '${moss.operationLabel}\n'
+                                    '${_formatBytes(moss.downloadedBytes)} / '
+                                    '${_formatBytes(moss.totalDownloadBytes)}'
+                              : moss.generating
+                              ? '正在进行端侧语音推理'
+                              : moss.ready
+                              ? '已就绪 · ${moss.accelerationLabel} · 48 kHz · 中文/英文/日文'
+                              : '${_formatBytes(MossTtsService.modelBytes)} · ${moss.accelerationLabel}',
+                        ),
+                        trailing: moss.downloading
+                            ? IconButton(
+                                tooltip: '暂停下载',
+                                onPressed: moss.pauseDownload,
+                                icon: const Icon(Icons.pause_circle_outline),
+                              )
+                            : moss.ready
+                            ? IconButton(
+                                tooltip: '删除 MOSS-TTS-Nano',
+                                onPressed: _deleteMossTts,
+                                icon: const Icon(Icons.delete_outline),
+                              )
+                            : IconButton(
+                                tooltip: '下载 MOSS-TTS-Nano',
+                                onPressed: _downloadMossTts,
+                                icon: const Icon(Icons.download_outlined),
+                              ),
+                      ),
+                      if (moss.ready)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 12),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(
+                                child: DropdownButtonFormField<String>(
+                                  key: ValueKey(moss.voiceId),
+                                  initialValue: moss.voiceId,
+                                  isExpanded: true,
+                                  decoration: const InputDecoration(
+                                    labelText: 'MOSS 内置克隆音色',
+                                    prefixIcon: Icon(Icons.record_voice_over),
+                                    border: OutlineInputBorder(),
+                                  ),
+                                  items: MossTtsService.voices
+                                      .map(
+                                        (voice) => DropdownMenuItem(
+                                          value: voice.id,
+                                          child: Text(
+                                            voice.displayLabel,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ),
+                                      )
+                                      .toList(growable: false),
+                                  onChanged: moss.generating || moss.speaking
+                                      ? null
+                                      : _selectMossVoice,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              IconButton.filledTonal(
+                                tooltip: moss.generating || moss.speaking
+                                    ? '停止试听'
+                                    : '试听当前音色',
+                                onPressed: moss.generating || moss.speaking
+                                    ? moss.stopSpeaking
+                                    : _previewMossVoice,
+                                icon: Icon(
+                                  moss.generating || moss.speaking
+                                      ? Icons.stop
+                                      : Icons.volume_up_outlined,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      if (moss.downloading)
+                        LinearProgressIndicator(value: moss.downloadProgress),
+                      if (moss.generating) const LinearProgressIndicator(),
+                      if (moss.lastError != null) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          moss.lastError!,
                           style: TextStyle(
                             color: Theme.of(context).colorScheme.error,
                           ),
@@ -590,6 +757,42 @@ class _SettingsPageState extends State<SettingsPage> {
                               _openSpeechSetup(speech.installOfflineTtsData),
                         ),
                       ),
+                      if (capabilities.offlineTts &&
+                          capabilities.ttsVoices.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 12),
+                          child: DropdownButtonFormField<String>(
+                            key: ValueKey(capabilities.ttsVoice),
+                            initialValue:
+                                capabilities.ttsVoices.any(
+                                  (voice) =>
+                                      voice.name == capabilities.ttsVoice,
+                                )
+                                ? capabilities.ttsVoice
+                                : capabilities.ttsVoices.first.name,
+                            isExpanded: true,
+                            decoration: const InputDecoration(
+                              labelText: '离线朗读音色',
+                              prefixIcon: Icon(
+                                Icons.spatial_audio_off_outlined,
+                              ),
+                              border: OutlineInputBorder(),
+                            ),
+                            items: capabilities.ttsVoices
+                                .map(
+                                  (voice) => DropdownMenuItem(
+                                    value: voice.name,
+                                    child: Text(
+                                      voice.displayLabel,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                )
+                                .toList(growable: false),
+                            onChanged: _selectSystemTtsVoice,
+                          ),
+                        ),
                       ListTile(
                         contentPadding: EdgeInsets.zero,
                         leading: Icon(

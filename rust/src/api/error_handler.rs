@@ -7,33 +7,14 @@ use tokio::time::sleep;
 #[frb(opaque)]
 #[derive(Debug, Clone)]
 pub enum ChatError {
-    ApiError {
-        status: u16,
-        message: String,
-    },
-    NetworkError {
-        message: String,
-    },
-    RateLimitError {
-        retry_after_secs: u64,
-    },
-    AuthError {
-        message: String,
-    },
-    StorageError {
-        message: String,
-    },
-    ValidationError {
-        message: String,
-    },
-    StreamError {
-        message: String,
-    },
-    /// GLM 业务错误（携带业务错误码，便于精确分类）
-    GlmBusinessError {
-        code: String,
-        message: String,
-    },
+    ApiError { status: u16, message: String },
+    NetworkError { message: String },
+    RateLimitError { retry_after_secs: u64 },
+    AuthError { message: String },
+    StorageError { message: String },
+    ValidationError { message: String },
+    StreamError { message: String },
+    GlmBusinessError { code: String, message: String },
 }
 
 impl fmt::Display for ChatError {
@@ -70,15 +51,6 @@ impl fmt::Display for ChatError {
 impl std::error::Error for ChatError {}
 
 impl ChatError {
-    /// Returns true if this error type should be retried.
-    /// Used by RetryHandler for automatic retry logic on transient failures.
-    ///
-    /// 参考 GLM 错误码文档：
-    /// - 5xx 服务端错误：可重试
-    /// - 429 频率/并发限制：可重试（含业务码 1302/1303/1305）
-    /// - 400/401/434/435：不可重试
-    /// - 业务码 1304/1308/1310（配额耗尽）：不可重试
-    /// - 业务码 1113（余额不足）：不可重试
     pub fn is_retryable(&self) -> bool {
         match self {
             ChatError::NetworkError { .. } => true,
@@ -92,10 +64,6 @@ impl ChatError {
         }
     }
 
-    /// 根据 GLM API 响应体解析错误
-    /// 响应格式: {"error": {"code": "1002", "message": "..."}}
-    ///
-    /// 参考: https://docs.bigmodel.cn/cn/api/api-code
     pub fn from_glm_response(status_code: u16, body_text: &str) -> Self {
         let parsed = serde_json::from_str::<serde_json::Value>(body_text);
         if let Ok(json) = parsed {
@@ -123,20 +91,8 @@ impl ChatError {
         }
     }
 
-    /// 根据 GLM 业务错误码分类为具体 ChatError 变体
-    ///
-    /// 错误码映射（参考 https://docs.bigmodel.cn/cn/api/api-code）：
-    /// - 1001~1004: 认证/Token 错误 → AuthError
-    /// - 1110~1121: 账户异常 → AuthError
-    /// - 1113: 余额不足 → GlmBusinessError（不可重试）
-    /// - 1210~1215: API 参数错误 → ValidationError
-    /// - 1301: 内容安全 → ValidationError
-    /// - 1302/1303/1305: 并发/频率/流量限制 → RateLimitError（可重试）
-    /// - 1304/1308/1310: 配额耗尽 → GlmBusinessError（不可重试）
-    /// - 500: 服务端内部错误 → ApiError
     fn classify_glm_error(status_code: u16, code: &str, message: &str) -> Self {
         match code {
-            // ── 认证错误 ──
             "1001" => ChatError::AuthError {
                 message: "请求头中未包含 Authorization 参数，请检查 API Key 配置".to_string(),
             },
@@ -149,7 +105,6 @@ impl ChatError {
             "1004" => ChatError::AuthError {
                 message: "Authorization Token 验证失败，请检查 API Key".to_string(),
             },
-            // ── 账户错误 ──
             "1110" => ChatError::AuthError {
                 message: "账户当前处于非活动状态，请检查账户信息".to_string(),
             },
@@ -169,7 +124,6 @@ impl ChatError {
             "1121" => ChatError::AuthError {
                 message: "账户因违规行为已被锁定，请联系客服".to_string(),
             },
-            // ── API 参数错误 ──
             "1210" => ChatError::ValidationError {
                 message: format!("API 调用参数有误: {}", message),
             },
@@ -188,11 +142,9 @@ impl ChatError {
             "1215" => ChatError::ValidationError {
                 message: format!("参数冲突: {}", message),
             },
-            // ── 内容安全 ──
             "1301" => ChatError::ValidationError {
                 message: "内容包含不安全或敏感内容，请修改后重试".to_string(),
             },
-            // ── 频率/并发限制（可重试）──
             "1302" => ChatError::RateLimitError {
                 retry_after_secs: 3,
             },
@@ -202,7 +154,6 @@ impl ChatError {
             "1305" => ChatError::RateLimitError {
                 retry_after_secs: 5,
             },
-            // ── 配额耗尽（不可重试）──
             "1304" => ChatError::GlmBusinessError {
                 code: code.to_string(),
                 message: "已达今日 API 调用次数限额，请明日再试或联系客服".to_string(),
@@ -215,12 +166,10 @@ impl ChatError {
                 code: code.to_string(),
                 message: format!("已达每周/每月使用上限: {}", message),
             },
-            // ── 服务端内部错误 ──
             "500" => ChatError::ApiError {
                 status: 500,
                 message: format!("服务器内部错误，请稍后重试: {}", message),
             },
-            // ── 未知业务码：按 HTTP 状态码回退 ──
             _ => match status_code {
                 401 => ChatError::AuthError {
                     message: message.to_string(),
@@ -362,7 +311,6 @@ mod tests {
         }
         .is_retryable());
 
-        // GLM 业务码
         assert!(ChatError::GlmBusinessError {
             code: "1302".into(),
             message: "并发".into()
@@ -437,7 +385,6 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        // 1 initial + 2 retries = 3 total calls
         assert_eq!(call_count.load(Ordering::SeqCst), 3);
     }
 
@@ -459,7 +406,6 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        // Should only be called once — no retries for ValidationError
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
 
@@ -508,13 +454,11 @@ mod tests {
 
         let elapsed = start.elapsed();
         assert_eq!(result.unwrap(), 99);
-        // Should have waited ~1 second for the rate limit
         assert!(elapsed >= Duration::from_millis(900));
     }
 
     #[tokio::test]
     async fn test_retry_success_transparent() {
-        // Requirement 7.5: when retry succeeds, result is identical to direct success
         let handler = RetryHandler::new(3, 10);
         let cc = Arc::new(AtomicU32::new(0));
         let cc2 = cc.clone();

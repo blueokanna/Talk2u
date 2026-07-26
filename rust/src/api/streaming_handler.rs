@@ -9,38 +9,32 @@ use rustglm::{
     ZhipuConfig,
 };
 
-/// 流式请求的超时配置（按模型角色分级）
 struct StreamTimeoutConfig {
     connect_timeout_secs: u64,
-    /// 首个数据块的最大等待时间（模型推理预热，可能较长）
     first_chunk_timeout_secs: u64,
-    /// 后续数据块之间的最大间隔
     subsequent_chunk_timeout_secs: u64,
     tcp_keepalive_secs: u64,
 }
 
 impl StreamTimeoutConfig {
-    /// 根据模型选择合适的超时配置
-    /// 推理模型（glm-4-air）需要更长的首 token 等待时间
-    /// 长上下文模型（glm-4-long）处理大量输入需要更多时间
     fn for_model(model: &str) -> Self {
         match model {
             "glm-4-air" => Self {
                 connect_timeout_secs: 30,
-                first_chunk_timeout_secs: 300, // 推理模型首 token 最长等 5 分钟
-                subsequent_chunk_timeout_secs: 120, // 推理链中间段可能有长停顿
+                first_chunk_timeout_secs: 300,
+                subsequent_chunk_timeout_secs: 120,
                 tcp_keepalive_secs: 15,
             },
             "glm-4-long" => Self {
                 connect_timeout_secs: 30,
-                first_chunk_timeout_secs: 300, // 长上下文处理预热长
+                first_chunk_timeout_secs: 300,
                 subsequent_chunk_timeout_secs: 120,
                 tcp_keepalive_secs: 15,
             },
             _ => Self {
                 connect_timeout_secs: 30,
-                first_chunk_timeout_secs: 180, // 标准模型首 token 最长 3 分钟
-                subsequent_chunk_timeout_secs: 90, // 正常对话块间不应超过 90 秒
+                first_chunk_timeout_secs: 180,
+                subsequent_chunk_timeout_secs: 90,
                 tcp_keepalive_secs: 15,
             },
         }
@@ -51,31 +45,27 @@ impl StreamTimeoutConfig {
 pub struct StreamingHandler {}
 
 impl StreamingHandler {
-    /// 流式聊天请求，带完善的中断恢复机制
-    ///
-    /// 核心改进（解决「AI响应中断」）：
-    /// 1. 按模型分级超时：推理模型(5min) > 长上下文(5min) > 对话(3min)
-    /// 2. 流中断时保留已收到的内容（partial recovery）
-    /// 3. 连接级重试（3次）+ 数据块超时容忍
-    /// 4. TCP keepalive防止NAT/代理断开空闲连接
-    /// 5. 更细粒度的错误分类，便于上层决策
     pub async fn stream_chat(
         provider: &ProviderRuntime,
         request_body: serde_json::Value,
         on_event: impl Fn(ChatStreamEvent),
     ) -> Result<(String, String), ChatError> {
+        if let Err(message) = crate::ensure_platform_tls_ready() {
+            on_event(ChatStreamEvent::Error(message.clone()));
+            return Err(ChatError::NetworkError { message });
+        }
+
         if provider.id == "zhipu" {
             return Self::stream_zhipu_chat(provider, request_body, &on_event).await;
         }
 
-        let retry_handler = RetryHandler::new(3, 1000); // 重试间隔从800ms提升到1000ms
+        let retry_handler = RetryHandler::new(3, 1000);
         let url_owned = provider.api_url.clone();
         let headers = provider
             .request_headers()
             .map_err(|message| ChatError::AuthError { message })?;
         let body_clone = provider.adapt_request_body(request_body.clone());
 
-        // 记录请求模型和 token 预算，便于调试
         let model_name = request_body
             .get("model")
             .and_then(|v| v.as_str())
@@ -85,19 +75,12 @@ impl StreamingHandler {
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
 
-        // 根据模型选择超时配置
         let timeout_config = StreamTimeoutConfig::for_model(model_name);
 
-        // ═══ HTTP 客户端：移除 read_timeout，改用手动 per-chunk 超时 ═══
-        // read_timeout 会在 SSE 流中模型推理间歇（两个 chunk 之间）误杀连接，
-        // 这是「AI 响应中断」的主要原因。改用 tokio::time::timeout 对每个 chunk
-        // 单独计时，首 chunk 允许更长等待（模型预热），后续 chunk 更短。
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(
                 timeout_config.connect_timeout_secs,
             ))
-            // 不设 read_timeout — 由下方 per-chunk tokio::time::timeout 接管
-            // 不设 timeout — 对 SSE 流式响应，总超时会误杀正常传输
             .tcp_keepalive(std::time::Duration::from_secs(
                 timeout_config.tcp_keepalive_secs,
             ))
@@ -122,7 +105,6 @@ impl StreamingHandler {
                         .send()
                         .await
                         .map_err(|e| {
-                            // 区分超时和其他网络错误，给用户更有意义的提示
                             if e.is_timeout() {
                                 ChatError::NetworkError {
                                     message: format!("连接超时，请检查网络后重试: {}", e),
@@ -141,7 +123,6 @@ impl StreamingHandler {
                     let status = resp.status();
                     if !status.is_success() {
                         let status_code = status.as_u16();
-                        // 先尝试读取 retry-after 头（429 专用）
                         let retry_after_header = resp
                             .headers()
                             .get("retry-after")
@@ -152,7 +133,6 @@ impl StreamingHandler {
 
                         let mut err = Self::classify_http_error(status_code, &body_text);
 
-                        // 如果 HTTP 头中有 retry-after，优先使用头部指定的等待时间
                         if let Some(retry_secs) = retry_after_header {
                             if matches!(err, ChatError::RateLimitError { .. }) {
                                 err = ChatError::RateLimitError {
@@ -175,16 +155,13 @@ impl StreamingHandler {
             })?;
 
         let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
+        let mut buffer = Vec::<u8>::new();
         let mut full_content = String::new();
         let mut full_thinking = String::new();
         let mut raw_response_preview = String::new();
         let mut chunk_count: u32 = 0;
+        let mut saw_done = false;
 
-        // ═══ Per-chunk 超时：替代 reqwest read_timeout ═══
-        // 首个 chunk 允许更长等待（模型推理预热），后续缩短。
-        // 这比 read_timeout 更精确：read_timeout 会在推理间歇误杀整个流，
-        // 而 per-chunk 超时只在真正无响应时触发。
         let first_chunk_timeout =
             std::time::Duration::from_secs(timeout_config.first_chunk_timeout_secs);
         let subsequent_chunk_timeout =
@@ -199,22 +176,8 @@ impl StreamingHandler {
 
             let chunk_result = match tokio::time::timeout(chunk_timeout, stream.next()).await {
                 Ok(Some(result)) => result,
-                Ok(None) => break, // Stream ended normally
+                Ok(None) => break,
                 Err(_elapsed) => {
-                    // ═══ Per-chunk 超时触发 ═══
-                    let has_partial = !full_content.is_empty() || !full_thinking.is_empty();
-                    if has_partial {
-                        // 已收到部分内容时发生超时：保留并返回已接收内容，不作为致命错误上报
-                        // （下游 Dart 会将 Error 事件设为持久 _errorMessage，影响用户体验）
-                        let warn_msg = format!(
-                            "[{}] 服务器 {}秒 未返回新数据（已收到 {} 字），保留已接收内容",
-                            model_name,
-                            chunk_timeout.as_secs(),
-                            full_content.len() + full_thinking.len()
-                        );
-                        eprintln!("{}", warn_msg);
-                        return Ok((full_content, full_thinking));
-                    }
                     let err_msg = if chunk_count == 0 {
                         format!(
                             "[{}] 等待首个响应超时（{}秒），服务器可能过载，请重试",
@@ -223,9 +186,9 @@ impl StreamingHandler {
                         )
                     } else {
                         format!(
-                            "[{}] 读取超时（{}秒无新数据），请重试",
-                            model_name,
-                            chunk_timeout.as_secs()
+                            "[{}] 流式响应中断：{}秒未收到新数据（已收到{}字），截断内容未保存，请重试",
+                            model_name, chunk_timeout.as_secs(),
+                            full_content.chars().count() + full_thinking.chars().count()
                         )
                     };
                     let err = ChatError::StreamError {
@@ -239,25 +202,15 @@ impl StreamingHandler {
             let chunk = match chunk_result {
                 Ok(bytes) => bytes,
                 Err(e) => {
-                    // ═══ 流中断恢复机制 ═══
-                    // 如果已经收到了部分内容，不立即报错，尝试保留已有内容
                     let has_partial_content = !full_content.is_empty() || !full_thinking.is_empty();
-
-                    if has_partial_content {
-                        // 已收到部分内容 → 视为「不完整但可用」的响应
-                        // 不再发送 Error 事件，避免 Dart 侧设为持久 _errorMessage
-                        let warn_msg = format!(
-                            "[{}] 数据流在传输中断开（已收到{}字），保留已接收内容",
+                    let err_msg = if has_partial_content {
+                        format!(
+                            "[{}] 数据流在传输中断开（已收到{}字），截断内容未保存，请重试: {}",
                             model_name,
-                            full_content.len() + full_thinking.len()
-                        );
-                        eprintln!("{}", warn_msg);
-                        // 直接返回已收到的内容（partial recovery）
-                        return Ok((full_content, full_thinking));
-                    }
-
-                    // 没有收到任何内容 → 才报真正的错误
-                    let err_msg = if e.is_timeout() {
+                            full_content.chars().count() + full_thinking.chars().count(),
+                            e
+                        )
+                    } else if e.is_timeout() {
                         format!("[{}] 读取超时（服务器长时间未响应），请重试", model_name)
                     } else if e.is_connect() {
                         format!("[{}] 连接中断，请检查网络后重试", model_name)
@@ -272,18 +225,29 @@ impl StreamingHandler {
                 }
             };
 
-            let text = String::from_utf8_lossy(&chunk);
             chunk_count += 1;
 
-            if raw_response_preview.len() < 2000 {
-                raw_response_preview.push_str(&text);
-            }
+            buffer.extend_from_slice(&chunk);
 
-            buffer.push_str(&text);
+            while let Some(newline_pos) = buffer.iter().position(|byte| *byte == b'\n') {
+                let mut line_bytes: Vec<u8> = buffer.drain(..=newline_pos).collect();
+                line_bytes.pop();
+                if line_bytes.last() == Some(&b'\r') {
+                    line_bytes.pop();
+                }
+                let line = match String::from_utf8(line_bytes) {
+                    Ok(line) => line,
+                    Err(error) => {
+                        let message = format!("[{model_name}] SSE 返回了无效 UTF-8: {error}");
+                        on_event(ChatStreamEvent::Error(message.clone()));
+                        return Err(ChatError::StreamError { message });
+                    }
+                };
 
-            while let Some(newline_pos) = buffer.find('\n') {
-                let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
-                buffer = buffer[newline_pos + 1..].to_string();
+                if raw_response_preview.len() < 2000 {
+                    raw_response_preview.push_str(&line);
+                    raw_response_preview.push('\n');
+                }
 
                 if line.is_empty() {
                     continue;
@@ -300,7 +264,7 @@ impl StreamingHandler {
                             on_event(event);
                         }
                         ChatStreamEvent::Done => {
-                            // Don't forward Done here; caller will send it after saving
+                            saw_done = true;
                         }
                         ChatStreamEvent::Error(_) => {
                             on_event(event);
@@ -310,28 +274,26 @@ impl StreamingHandler {
             }
         }
 
-        if !buffer.trim().is_empty() {
-            for line in buffer.lines() {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                if let Some(event) = Self::parse_sse_line(line) {
-                    match &event {
-                        ChatStreamEvent::ContentDelta(delta) => {
-                            full_content.push_str(delta);
-                            on_event(event);
-                        }
-                        ChatStreamEvent::ThinkingDelta(delta) => {
-                            full_thinking.push_str(delta);
-                            on_event(event);
-                        }
-                        ChatStreamEvent::Done => {
-                            // Don't forward Done here; caller will send it after saving
-                        }
-                        ChatStreamEvent::Error(_) => {
-                            on_event(event);
-                        }
+        if !buffer.is_empty() {
+            if buffer.last() == Some(&b'\r') {
+                buffer.pop();
+            }
+            let line = String::from_utf8(buffer).map_err(|error| ChatError::StreamError {
+                message: format!("[{model_name}] SSE 末尾包含无效 UTF-8: {error}"),
+            })?;
+            if let Some(event) = Self::parse_sse_line(line.trim()) {
+                match &event {
+                    ChatStreamEvent::ContentDelta(delta) => {
+                        full_content.push_str(delta);
+                        on_event(event);
+                    }
+                    ChatStreamEvent::ThinkingDelta(delta) => {
+                        full_thinking.push_str(delta);
+                        on_event(event);
+                    }
+                    ChatStreamEvent::Done => saw_done = true,
+                    ChatStreamEvent::Error(_) => {
+                        on_event(event);
                     }
                 }
             }
@@ -348,13 +310,22 @@ impl StreamingHandler {
             on_event(ChatStreamEvent::Error(debug_msg));
         }
 
-        // 流正常结束但没有任何数据块（连接可能被静默断开）
         if chunk_count == 0 {
-            let debug_msg = format!(
+            let message = format!(
                 "[{}] 未收到任何数据（服务器未返回SSE流）。可能原因：1)网络中断 2)API Key无效 3)服务器过载。请检查网络和API Key后重试。",
                 model_name
             );
-            on_event(ChatStreamEvent::Error(debug_msg));
+            on_event(ChatStreamEvent::Error(message.clone()));
+            return Err(ChatError::StreamError { message });
+        }
+
+        if !saw_done {
+            let message = format!(
+                "[{model_name}] 服务端在发送完成标记前关闭了流（已收到{}字），截断内容未保存，请重试",
+                full_content.chars().count() + full_thinking.chars().count()
+            );
+            on_event(ChatStreamEvent::Error(message.clone()));
+            return Err(ChatError::StreamError { message });
         }
 
         Ok((full_content, full_thinking))
@@ -378,12 +349,10 @@ impl StreamingHandler {
         retry.initial_delay = std::time::Duration::from_secs(1);
         retry.max_delay = std::time::Duration::from_secs(4);
         let http = GlmHttpConfig {
-            // Per-chunk timeouts below provide the user-visible streaming
-            // policy. Keep the SDK request timeout above the longest session.
             timeout: std::time::Duration::from_secs(60 * 60),
             connect_timeout: std::time::Duration::from_secs(timeout_config.connect_timeout_secs),
             pool_idle_timeout: std::time::Duration::from_secs(90),
-            user_agent: format!("Talk2U/1.0 RustGLM/{}", env!("CARGO_PKG_VERSION")),
+            user_agent: "Talk2U/1.0 RustGLM/1.0.0".to_string(),
             retry,
             ..GlmHttpConfig::default()
         };
@@ -404,6 +373,7 @@ impl StreamingHandler {
         let mut chunk_count = 0_u32;
         let mut full_content = String::new();
         let mut full_thinking = String::new();
+        let mut saw_finished = false;
 
         loop {
             let timeout = if chunk_count == 0 {
@@ -414,18 +384,11 @@ impl StreamingHandler {
             let item = match tokio::time::timeout(timeout, stream.next()).await {
                 Ok(Some(item)) => item,
                 Ok(None) => break,
-                Err(_) if !full_content.is_empty() || !full_thinking.is_empty() => {
-                    eprintln!(
-                        "[{model_name}] rustglm stream paused for {}s; preserving {} received bytes",
-                        timeout.as_secs(),
-                        full_content.len() + full_thinking.len()
-                    );
-                    return Ok((full_content, full_thinking));
-                }
                 Err(_) => {
                     let message = format!(
-                        "[{model_name}] 等待智谱流式响应超时（{}秒），请重试",
-                        timeout.as_secs()
+                        "[{model_name}] 智谱流式响应超时（{}秒无新数据，已收到{}字），截断内容未保存，请重试",
+                        timeout.as_secs(),
+                        full_content.chars().count() + full_thinking.chars().count()
                     );
                     on_event(ChatStreamEvent::Error(message.clone()));
                     return Err(ChatError::StreamError { message });
@@ -434,12 +397,6 @@ impl StreamingHandler {
 
             let chunk = match item {
                 Ok(chunk) => chunk,
-                Err(error) if !full_content.is_empty() || !full_thinking.is_empty() => {
-                    eprintln!(
-                        "[{model_name}] rustglm stream ended after partial response: {error}"
-                    );
-                    return Ok((full_content, full_thinking));
-                }
                 Err(error) => {
                     let mapped = Self::map_glm_error(error);
                     on_event(ChatStreamEvent::Error(format!(
@@ -451,6 +408,9 @@ impl StreamingHandler {
             chunk_count += 1;
 
             for choice in chunk.choices {
+                if matches!(choice.finish_reason.as_deref(), Some("stop" | "length")) {
+                    saw_finished = true;
+                }
                 if let Some(thinking) = choice.delta.reasoning_content {
                     if !thinking.is_empty() {
                         full_thinking.push_str(&thinking);
@@ -475,6 +435,15 @@ impl StreamingHandler {
 
         if chunk_count == 0 || (full_content.is_empty() && full_thinking.is_empty()) {
             let message = format!("[{model_name}] 智谱 API 未返回有效的流式内容");
+            on_event(ChatStreamEvent::Error(message.clone()));
+            return Err(ChatError::StreamError { message });
+        }
+
+        if !saw_finished {
+            let message = format!(
+                "[{model_name}] 智谱流在完成标记前关闭（已收到{}字），截断内容未保存，请重试",
+                full_content.chars().count() + full_thinking.chars().count()
+            );
             on_event(ChatStreamEvent::Error(message.clone()));
             return Err(ChatError::StreamError { message });
         }
@@ -560,7 +529,6 @@ impl StreamingHandler {
     pub fn parse_sse_line(line: &str) -> Option<ChatStreamEvent> {
         let trimmed = line.trim();
 
-        // 处理 SSE event 类型行（忽略）
         if trimmed.starts_with("event:") || trimmed.starts_with(": ") || trimmed.starts_with(":") {
             return None;
         }
@@ -621,7 +589,6 @@ impl StreamingHandler {
             return Some(ChatStreamEvent::Error(msg.to_string()));
         }
 
-        // Anthropic Messages streaming protocol.
         if json.get("type").and_then(|v| v.as_str()) == Some("error") {
             let message = json
                 .pointer("/error/message")
@@ -659,7 +626,6 @@ impl StreamingHandler {
             return Some(ChatStreamEvent::Done);
         }
 
-        // Non-streaming Anthropic response (some compatible proxies ignore `stream`).
         if let Some(content) = json.get("content").and_then(|v| v.as_array()) {
             if let Some(text) = content.iter().find_map(|block| {
                 block

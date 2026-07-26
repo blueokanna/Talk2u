@@ -2,16 +2,47 @@
   "version": 1,
   "lipSync": {
     "parameterIds": [
-      "ParamA"
+      "ParamA",
+      "ParamI",
+      "ParamU",
+      "ParamE",
+      "ParamO"
     ],
-    "gain": 1.0,
+    "visemeParameterIds": [
+      "ParamA",
+      "ParamI",
+      "ParamU",
+      "ParamE",
+      "ParamO"
+    ],
+    "mode": "viseme",
+    "gain": 2.1,
     "smoothing": 0.45,
     "attack": 0.58,
     "release": 0.28,
     "staleAfterMs": 240
   },
+  "parameterAliases": {
+    "angleX": ["ParamAngleX"],
+    "angleY": ["ParamAngleY"],
+    "angleZ": ["ParamAngleZ"],
+    "bodyX": ["ParamBodyAngleX"],
+    "bodyY": ["ParamBodyAngleY"],
+    "bodyZ": ["ParamBodyAngleZ"],
+    "armL": ["ParamArmLA01"],
+    "armR": ["ParamArmRA01"],
+    "forearmL": ["ParamArmLA02"],
+    "forearmR": ["ParamArmRA02"],
+    "handL": ["ParamHandL"],
+    "handR": ["ParamHandR"]
+  },
   "naturalBehavior": {
     "expressionDurationMs": 4200,
+    "speechBody": {
+      "enabled": true,
+      "gain": 1.15,
+      "smoothing": 0.12
+    },
     "gaze": {
       "enabled": true,
       "intervalMinMs": 2600,
@@ -48,19 +79,77 @@
         "index": 0
       }
     },
+    "hug": {
+      "motion": {
+        "group": "",
+        "index": 1
+      },
+      "expression": "exp_02"
+    },
+    "talking": {
+      "motion": {
+        "group": "",
+        "index": 1
+      }
+    },
+    "talkingSoft": {
+      "motion": {
+        "group": "",
+        "index": 0
+      }
+    },
+    "emphasis": {
+      "motion": {
+        "group": "",
+        "index": 2
+      }
+    },
+    "thinking": {
+      "motion": {
+        "group": "",
+        "index": 0
+      }
+    },
+    "dramatic": {
+      "motion": {
+        "group": "",
+        "index": 1
+      },
+      "expression": "exp_04"
+    },
     "happy": {
+      "motion": {
+        "group": "",
+        "index": 1
+      },
       "expression": "exp_02"
     },
     "sad": {
+      "motion": {
+        "group": "",
+        "index": 0
+      },
       "expression": "exp_05"
     },
     "angry": {
+      "motion": {
+        "group": "",
+        "index": 1
+      },
       "expression": "exp_08"
     },
     "shy": {
+      "motion": {
+        "group": "",
+        "index": 0
+      },
       "expression": "exp_06"
     },
     "surprise": {
+      "motion": {
+        "group": "",
+        "index": 2
+      },
       "expression": "exp_04"
     }
   }

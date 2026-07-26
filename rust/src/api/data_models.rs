@@ -52,7 +52,6 @@ pub enum DialogueStyle {
     Mixed,
 }
 
-/// 对话
 #[frb]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Conversation {
@@ -88,12 +87,6 @@ pub struct MemorySummary {
     pub fact_tiers: Vec<MemoryTier>,
 }
 
-/// 压缩影响等级 — 随压缩代数递增，逐步影响不同维度
-/// Gen 0-1: 无损（完整保留所有信息）
-/// Gen 2-3: 语气/表达风格可能轻微偏移
-/// Gen 4-5: 性格细节可能模糊（如口癖频率降低）
-/// Gen 6-7: 次要关系/金钱等数值细节可能丢失
-/// Gen 8+:  身份设定的边缘属性可能受影响（核心身份仍保留）
 #[frb]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CompressionImpactLevel {
@@ -104,7 +97,6 @@ pub enum CompressionImpactLevel {
     IdentityErosion,
 }
 
-/// 对话摘要（用于列表展示）
 #[frb]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConversationSummary {
@@ -131,8 +123,6 @@ pub struct AppSettings {
     pub providers_json: String,
 }
 
-/// A saved LLM endpoint. `protocol` is either `openai` or `anthropic`.
-/// Custom endpoints intentionally use the OpenAI-compatible wire format.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderConfig {
     pub id: String,

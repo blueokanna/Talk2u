@@ -267,9 +267,6 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
       if (!mounted || generation != _viewGeneration) return;
       final controller = WebviewManager().createWebView(
         loading: const Center(child: CircularProgressIndicator()),
-        // webview_cef 0.5.1 stores a nullable value in a non-null runtime Map
-        // when this argument is omitted. An empty collection avoids that
-        // plugin-side type error while keeping script injection disabled.
         injectUserScripts: InjectUserScripts(),
       );
       _desktopController = controller;

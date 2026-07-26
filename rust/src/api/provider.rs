@@ -11,7 +11,6 @@ pub enum WireProtocol {
 #[derive(Debug, Clone)]
 pub struct ProviderRuntime {
     pub id: String,
-    pub name: String,
     pub api_url: String,
     pub api_key: String,
     pub protocol: WireProtocol,
@@ -37,7 +36,6 @@ impl ProviderRuntime {
             .cloned()
             .ok_or_else(|| format!("未找到平台配置: {provider_id}"))?;
 
-        // Migrate the legacy single Zhipu key without invalidating old settings files.
         if config.id == "zhipu" && config.api_key.as_deref().unwrap_or("").trim().is_empty() {
             config.api_key = settings.api_key.clone();
         }
@@ -66,7 +64,6 @@ impl ProviderRuntime {
 
         let runtime = Self {
             id: config.id.clone(),
-            name: config.name.clone(),
             api_url: config.api_url.trim().to_string(),
             api_key: config
                 .api_key
@@ -154,7 +151,6 @@ mod tests {
                 "openai"
             }
             .into(),
-            name: "Test".into(),
             api_url: "https://example.test/messages".into(),
             api_key: "secret-key".into(),
             protocol,

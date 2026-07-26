@@ -4,7 +4,7 @@ import 'package:talk2u/src/models/character.dart';
 import 'package:talk2u/src/services/live2d_model_importer.dart';
 
 class CharacterEditPage extends StatefulWidget {
-  final Character? character; // null = 创建新角色
+  final Character? character;
 
   const CharacterEditPage({super.key, this.character});
 
@@ -127,8 +127,14 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
     if (path == null) return;
     setState(() => _isImportingLive2d = true);
     try {
-      final modelPath = await Live2dModelImporter.importArchive(path);
-      if (mounted) setState(() => _live2dModelController.text = modelPath);
+      final modelPaths = await Live2dModelImporter.importArchiveModels(path);
+      if (!mounted) return;
+      final modelPath = await _selectImportedModel(modelPaths);
+      if (modelPath == null || !mounted) return;
+      setState(() => _live2dModelController.text = modelPath);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Live2D 模型已导入，共发现 ${modelPaths.length} 个模型')),
+      );
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -137,6 +143,44 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
     } finally {
       if (mounted) setState(() => _isImportingLive2d = false);
     }
+  }
+
+  Future<String?> _selectImportedModel(List<String> modelPaths) async {
+    if (modelPaths.length == 1) return modelPaths.first;
+    return showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('选择 Live2D 模型'),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420, maxHeight: 360),
+          child: ListView.separated(
+            shrinkWrap: true,
+            itemCount: modelPaths.length,
+            separatorBuilder: (_, _) => const Divider(height: 1),
+            itemBuilder: (_, index) {
+              final path = modelPaths[index];
+              final name = path.replaceAll('\\', '/').split('/').last;
+              return ListTile(
+                leading: const Icon(Icons.view_in_ar_outlined),
+                title: Text(name),
+                subtitle: Text(
+                  path,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                onTap: () => Navigator.pop(dialogContext, path),
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('取消'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _installBundledMao() async {

@@ -4,20 +4,18 @@ import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:file_picker/file_picker.dart';
 
-/// 性别枚举
 enum CharacterGender { male, female, other }
 
-/// AI 角色模型
 class Character {
   final String id;
   final String name;
   final CharacterGender gender;
-  final String description; // 角色简介
-  final String setting; // 角色设定（系统提示词）
-  final String greeting; // 角色开场白
-  final String dialogueExample; // 对话风格示例
-  final String userName; // 用户名称（AI 对你的称呼）
-  final String userSetting; // 用户聊天人设
+  final String description;
+  final String setting;
+  final String greeting;
+  final String dialogueExample;
+  final String userName;
+  final String userSetting;
   final List<String> tags;
   final String live2dModelPath;
   final int createdAt;
@@ -39,7 +37,6 @@ class Character {
     required this.updatedAt,
   });
 
-  /// 构建发送给 API 的系统提示词
   String buildSystemPrompt() {
     final parts = <String>[];
 
@@ -135,7 +132,6 @@ class Character {
   );
 }
 
-/// 角色本地存储管理
 class CharacterStore {
   static CharacterStore? _instance;
   static CharacterStore get instance => _instance ??= CharacterStore._();
@@ -176,7 +172,6 @@ class CharacterStore {
         final json = jsonDecode(content) as Map<String, dynamic>;
         _characters.add(Character.fromJson(json));
       } catch (_) {
-        // 跳过损坏的文件
       }
     }
     _characters.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
@@ -214,7 +209,6 @@ class CharacterStore {
     }
   }
 
-  /// 导出单个角色为 JSON 文件，返回文件路径
   Future<String> exportCharacter(Character character) async {
     final dir = await getApplicationDocumentsDirectory();
     final exportDir = Directory('${dir.path}/character_exports');
@@ -232,7 +226,6 @@ class CharacterStore {
     return filePath;
   }
 
-  /// 批量导出所有角色为单个 JSON 文件，返回文件路径
   Future<String> exportAllCharacters() async {
     final dir = await getApplicationDocumentsDirectory();
     final exportDir = Directory('${dir.path}/character_exports');
@@ -251,15 +244,12 @@ class CharacterStore {
     return filePath;
   }
 
-  /// 从文件路径导入角色（支持单个和批量）
-  /// 返回成功导入的角色数量
   Future<int> importFromFile(String filePath) async {
     try {
       final content = await File(filePath).readAsString();
       final decoded = jsonDecode(content);
 
       if (decoded is Map<String, dynamic>) {
-        // 检查是否是批量导出格式
         if (decoded.containsKey('characters') &&
             decoded['characters'] is List) {
           final list = decoded['characters'] as List;
@@ -275,7 +265,6 @@ class CharacterStore {
           }
           return count;
         } else {
-          // 单个角色格式
           final character = _importSingleCharacter(decoded);
           if (character != null) {
             await save(character);
@@ -290,7 +279,6 @@ class CharacterStore {
     }
   }
 
-  /// 通过 file_picker 选择文件并导入
   Future<int> importFromPicker() async {
     try {
       final result = await FilePicker.platform.pickFiles(
@@ -308,14 +296,11 @@ class CharacterStore {
     }
   }
 
-  /// 解析单个角色 JSON，生成新 ID 避免冲突
   Character? _importSingleCharacter(Map<String, dynamic> json) {
     try {
       final original = Character.fromJson(json);
-      // 检查是否已存在相同 ID
       final existing = getById(original.id);
       if (existing != null) {
-        // ID 冲突，生成新 ID
         final now = DateTime.now().millisecondsSinceEpoch;
         return original.copyWith(
           id: '${now}_${original.id.hashCode.abs()}',

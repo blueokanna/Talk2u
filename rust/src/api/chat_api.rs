@@ -1,4 +1,7 @@
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
+use tokio::sync::watch;
 
 use super::chat_engine::ChatEngine;
 use super::config_manager::ConfigManager;
@@ -7,10 +10,59 @@ use super::data_models::*;
 use super::knowledge_store::KnowledgeStore;
 use super::memory_engine::MemoryEngine;
 use super::provider::ProviderRuntime;
+use super::streaming_handler::StreamingHandler;
 
 static CONFIG_MANAGER: OnceLock<ConfigManager> = OnceLock::new();
 static CONVERSATION_STORE: OnceLock<ConversationStore> = OnceLock::new();
 static DATA_PATH: OnceLock<String> = OnceLock::new();
+static ACTIVE_GENERATIONS: OnceLock<Mutex<HashMap<String, ActiveGeneration>>> = OnceLock::new();
+
+struct ActiveGeneration {
+    request_id: String,
+    cancel: watch::Sender<bool>,
+}
+
+fn active_generations() -> &'static Mutex<HashMap<String, ActiveGeneration>> {
+    ACTIVE_GENERATIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn register_generation(conversation_id: &str) -> (String, watch::Receiver<bool>) {
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let (cancel, receiver) = watch::channel(false);
+    if let Ok(mut active) = active_generations().lock() {
+        if let Some(previous) = active.insert(
+            conversation_id.to_string(),
+            ActiveGeneration {
+                request_id: request_id.clone(),
+                cancel,
+            },
+        ) {
+            let _ = previous.cancel.send(true);
+        }
+    }
+    (request_id, receiver)
+}
+
+fn unregister_generation(conversation_id: &str, request_id: &str) {
+    if let Ok(mut active) = active_generations().lock() {
+        if active
+            .get(conversation_id)
+            .is_some_and(|generation| generation.request_id == request_id)
+        {
+            active.remove(conversation_id);
+        }
+    }
+}
+
+pub fn cancel_generation(conversation_id: String) -> bool {
+    let generation = active_generations()
+        .lock()
+        .ok()
+        .and_then(|mut active| active.remove(&conversation_id));
+    generation
+        .map(|generation| generation.cancel.send(true).is_ok())
+        .unwrap_or(false)
+}
 
 pub fn init_app(data_path: String) {
     DATA_PATH.get_or_init(|| data_path.clone());
@@ -30,8 +82,6 @@ fn get_conversation_store() -> &'static ConversationStore {
     CONVERSATION_STORE.get_or_init(|| ConversationStore::new(get_data_path()))
 }
 
-/// 解析对话模型：如果用户选择的是推理模型，自动回退到对话模型
-/// （推理模型不直接对话，仅在双模型管线中作为思考引擎使用）
 fn resolve_chat_model(requested_model: &str, provider: &ProviderConfig) -> String {
     if requested_model.trim().is_empty()
         || provider.thinking_model.as_deref() == Some(requested_model)
@@ -50,8 +100,6 @@ fn create_engine(
     let engine = ChatEngine::new(runtime, provider.chat_model.clone(), get_data_path());
     Ok((engine, provider))
 }
-
-// ── Conversation management ──
 
 pub fn create_conversation() -> Conversation {
     let conv = get_conversation_store().create_conversation();
@@ -208,7 +256,6 @@ pub fn add_assistant_message_with_model(
         .is_ok()
 }
 
-/// Legacy helper retained for existing clients. New clients save keys per provider.
 pub fn set_api_key(api_key: String) -> Result<(), String> {
     let mut settings = get_config_manager().load_settings();
     settings.api_key = Some(api_key.clone());
@@ -226,12 +273,60 @@ pub fn set_api_key(api_key: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-pub fn validate_api_key(api_key: String) -> bool {
-    !api_key.trim().is_empty()
+pub async fn validate_api_key(
+    provider_id: String,
+    api_key: String,
+    api_url: String,
+    model: String,
+    protocol: String,
+    max_output_tokens: u32,
+) -> Result<String, String> {
+    let config = ProviderConfig {
+        id: provider_id.clone(),
+        name: provider_id.clone(),
+        api_key: if api_key.trim().is_empty() {
+            None
+        } else {
+            Some(api_key)
+        },
+        api_url,
+        chat_model: model.clone(),
+        thinking_model: None,
+        protocol,
+        max_output_tokens,
+    };
+    let settings = AppSettings {
+        selected_provider: provider_id.clone(),
+        providers_json: serde_json::to_string(&vec![config])
+            .map_err(|error| format!("连接测试配置无法序列化: {error}"))?,
+        ..AppSettings::default()
+    };
+    let (provider, _) = ProviderRuntime::from_settings(&settings, &provider_id)?;
+    let request = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": "Reply with OK only."}],
+        "stream": true,
+        "max_tokens": 16
+    });
+
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(45),
+        StreamingHandler::stream_chat(&provider, request, |_| {}),
+    )
+    .await
+    {
+        Ok(Ok((content, thinking)))
+            if !content.trim().is_empty() || !thinking.trim().is_empty() =>
+        {
+            Ok(format!("{model} 连接成功"))
+        }
+        Ok(Ok(_)) => Err(format!("{model} 返回了空响应")),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => Err(format!("{model} 连接测试超过 45 秒，请检查网络或稍后重试")),
+    }
 }
 
 pub fn get_available_models() -> Vec<ModelInfo> {
-    // 参考: https://docs.bigmodel.cn/cn/guide/start/concept-param
     vec![
         ModelInfo {
             id: "glm-4.7".to_string(),
@@ -280,14 +375,12 @@ pub async fn send_message(
         .clone()
         .unwrap_or_else(|| provider.chat_model.clone());
     let use_thinking_pipeline = enable_thinking && provider.thinking_model.is_some();
+    let (request_id, mut cancel) = register_generation(&conversation_id);
 
-    // 使用 done_sent 标记确保 Done 事件只发送一次
     let done_sent = std::sync::atomic::AtomicBool::new(false);
 
-    // 整体管线超时保护（5分钟）：防止多阶段管线累计超过 Flutter 的 10 分钟安全超时
-    let pipeline_result = tokio::time::timeout(
-        std::time::Duration::from_secs(300),
-        engine.send_message(
+    let pipeline_result = tokio::select! {
+        result = engine.send_message(
             &conversation_id,
             &content,
             &chat_model,
@@ -299,25 +392,22 @@ pub async fn send_message(
                 }
                 let _ = sink.add(event);
             },
-        ),
-    )
-    .await;
+        ) => Some(result),
+        _ = cancel.changed() => None,
+    };
+    unregister_generation(&conversation_id, &request_id);
 
-    // 仅在 Done 未发送时报错：Done 已发送说明回复已成功生成并保存，
-    // 后续步骤（如事实提取）超时不应覆盖成功状态
     match pipeline_result {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
+        Some(Ok(())) => {}
+        Some(Err(e)) => {
             if !done_sent.load(std::sync::atomic::Ordering::Acquire) {
                 let _ = sink.add(ChatStreamEvent::Error(e.to_string()));
             }
         }
-        Err(_timeout) => {
-            if !done_sent.load(std::sync::atomic::Ordering::Acquire) {
-                let _ = sink.add(ChatStreamEvent::Error(
-                    "处理超时（5分钟），请缩短对话或重试".to_string(),
-                ));
-            }
+        None => {
+            let _ = sink.add(ChatStreamEvent::Error(
+                "__GENERATION_CANCELLED__".to_string(),
+            ));
         }
     }
 
@@ -325,7 +415,6 @@ pub async fn send_message(
         let _ = sink.add(ChatStreamEvent::Done);
     }
 
-    // 给 FRB 事件队列留出刷新时间，确保 Done 事件在流关闭前送达 Dart
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 }
 
@@ -351,12 +440,12 @@ pub async fn regenerate_response(
         .clone()
         .unwrap_or_else(|| provider.chat_model.clone());
     let use_thinking_pipeline = enable_thinking && provider.thinking_model.is_some();
+    let (request_id, mut cancel) = register_generation(&conversation_id);
 
     let done_sent = std::sync::atomic::AtomicBool::new(false);
 
-    let pipeline_result = tokio::time::timeout(
-        std::time::Duration::from_secs(300),
-        engine.regenerate_response(
+    let pipeline_result = tokio::select! {
+        result = engine.regenerate_response(
             &conversation_id,
             &chat_model,
             &thinking_model,
@@ -367,23 +456,22 @@ pub async fn regenerate_response(
                 }
                 let _ = sink.add(event);
             },
-        ),
-    )
-    .await;
+        ) => Some(result),
+        _ = cancel.changed() => None,
+    };
+    unregister_generation(&conversation_id, &request_id);
 
     match pipeline_result {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
+        Some(Ok(())) => {}
+        Some(Err(e)) => {
             if !done_sent.load(std::sync::atomic::Ordering::Acquire) {
                 let _ = sink.add(ChatStreamEvent::Error(e.to_string()));
             }
         }
-        Err(_timeout) => {
-            if !done_sent.load(std::sync::atomic::Ordering::Acquire) {
-                let _ = sink.add(ChatStreamEvent::Error(
-                    "处理超时（5分钟），请缩短对话或重试".to_string(),
-                ));
-            }
+        None => {
+            let _ = sink.add(ChatStreamEvent::Error(
+                "__GENERATION_CANCELLED__".to_string(),
+            ));
         }
     }
 

@@ -9,12 +9,18 @@ import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.view.View
+import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.webkit.WebViewAssetLoader
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -22,6 +28,13 @@ import io.flutter.plugin.platform.PlatformView
 import io.flutter.plugin.platform.PlatformViewFactory
 import io.flutter.plugin.common.StandardMessageCodec
 import org.json.JSONObject
+import java.io.ByteArrayInputStream
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+
+private const val LIVE2D_CORE_URL =
+    "https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"
 
 internal object GpuBackendProbe {
     private val loadError: String?
@@ -78,7 +91,13 @@ private class Live2dView(
     creationParams: Map<*, *>,
 ) : PlatformView, MethodChannel.MethodCallHandler {
     private val webView = WebView(context)
+    private val userAgent = webView.settings.userAgentString
+    private val coreCacheFile = File(context.filesDir, "live2d_runtime/live2dcubismcore.min.js")
     private val channel = MethodChannel(messenger, "talk2u/live2d_$viewId")
+    private val assetLoader = WebViewAssetLoader.Builder()
+        .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context))
+        .addPathHandler("/files/", WebViewAssetLoader.InternalStoragePathHandler(context, context.filesDir))
+        .build()
     private var lastStatus: String? = null
     private var disposed = false
 
@@ -96,6 +115,38 @@ private class Live2dView(
         webView.settings.allowFileAccessFromFileURLs = true
         webView.settings.allowUniversalAccessFromFileURLs = true
         webView.webViewClient = object : WebViewClient() {
+            override fun shouldInterceptRequest(
+                view: WebView?,
+                request: WebResourceRequest,
+            ): WebResourceResponse? {
+                if (request.url.toString() == LIVE2D_CORE_URL) {
+                    return fetchLive2dCore()
+                }
+                return assetLoader.shouldInterceptRequest(request.url)
+            }
+
+            override fun onReceivedError(
+                view: WebView?,
+                request: WebResourceRequest?,
+                error: WebResourceError?,
+            ) {
+                Log.e(
+                    "Talk2U.Live2D",
+                    "Resource failed: ${request?.url} (${error?.errorCode}) ${error?.description}",
+                )
+            }
+
+            override fun onReceivedHttpError(
+                view: WebView?,
+                request: WebResourceRequest?,
+                errorResponse: WebResourceResponse?,
+            ) {
+                Log.e(
+                    "Talk2U.Live2D",
+                    "HTTP failed: ${request?.url} (${errorResponse?.statusCode}) ${errorResponse?.reasonPhrase}",
+                )
+            }
+
             override fun onRenderProcessGone(
                 view: WebView?,
                 detail: RenderProcessGoneDetail?,
@@ -115,7 +166,16 @@ private class Live2dView(
                 return true
             }
         }
-        webView.webChromeClient = WebChromeClient()
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+                Log.i(
+                    "Talk2U.Live2D",
+                    "${consoleMessage?.messageLevel()} ${consoleMessage?.sourceId()}:" +
+                        "${consoleMessage?.lineNumber()} ${consoleMessage?.message()}",
+                )
+                return true
+            }
+        }
         webView.addJavascriptInterface(
             StatusBridge(
                 onStatus = { message ->
@@ -131,14 +191,31 @@ private class Live2dView(
         val modelPath = creationParams["modelPath"] as? String ?: ""
         val modelUri = when {
             modelPath.startsWith("asset:///") ->
-                "file:///android_asset/flutter_assets/${modelPath.removePrefix("asset:///")}"
+                "https://${WebViewAssetLoader.DEFAULT_DOMAIN}/assets/flutter_assets/" +
+                    modelPath.removePrefix("asset:///")
             modelPath.startsWith("http://") ||
                 modelPath.startsWith("https://") ||
                 modelPath.startsWith("file://") -> modelPath
-            else -> Uri.fromFile(java.io.File(modelPath)).toString()
+            else -> {
+                val modelFile = java.io.File(modelPath).canonicalFile
+                val filesRoot = context.filesDir.canonicalFile
+                if (modelFile.path.startsWith(filesRoot.path + java.io.File.separator)) {
+                    val relative = modelFile.relativeTo(filesRoot).invariantSeparatorsPath
+                    "https://${WebViewAssetLoader.DEFAULT_DOMAIN}/files/$relative"
+                } else {
+                    Uri.fromFile(modelFile).toString()
+                }
+            }
         }
-        val page = "file:///android_asset/flutter_assets/assets/live2d/index.html" +
-            "?model=${Uri.encode(modelUri)}"
+        val hasLocalCore = runCatching {
+            context.assets.open(
+                "flutter_assets/assets/live2d/vendor/live2dcubismcore.min.js",
+            ).use { }
+            true
+        }.getOrDefault(false)
+        val page = "https://${WebViewAssetLoader.DEFAULT_DOMAIN}/assets/flutter_assets/" +
+            "assets/live2d/index.html" +
+            "?model=${Uri.encode(modelUri)}&localCore=${if (hasLocalCore) 1 else 0}"
         webView.loadUrl(page)
     }
 
@@ -183,6 +260,88 @@ private class Live2dView(
             result.error("live2d_javascript_failed", error.message, null)
         }
     }
+
+    private fun fetchLive2dCore(): WebResourceResponse {
+        readCoreCache()?.let {
+            Log.i("Talk2U.Live2D", "Cubism Core served from app-private cache")
+            return coreResponse(it, "app-private-cache")
+        }
+        var lastFailure = "unknown error"
+        repeat(2) { attempt ->
+            var connection: HttpURLConnection? = null
+            try {
+                connection = URL(LIVE2D_CORE_URL).openConnection() as HttpURLConnection
+                connection.connectTimeout = 7000
+                connection.readTimeout = 12000
+                connection.instanceFollowRedirects = true
+                connection.useCaches = false
+                connection.setRequestProperty("Accept", "application/javascript,text/javascript,*/*;q=0.8")
+                connection.setRequestProperty("User-Agent", userAgent)
+                val statusCode = connection.responseCode
+                val response = if (statusCode in 200..299) {
+                    connection.inputStream
+                } else {
+                    connection.errorStream
+                }
+                val bytes = response?.use { it.readBytes() } ?: ByteArray(0)
+                if (statusCode in 200..299 && isValidCore(bytes)) {
+                    writeCoreCache(bytes)
+                    Log.i("Talk2U.Live2D", "Cubism Core fetched and cached on attempt ${attempt + 1}")
+                    return coreResponse(bytes, "official-live2d-cdn")
+                }
+                lastFailure = "HTTP $statusCode ${connection.responseMessage.orEmpty()}"
+            } catch (error: Exception) {
+                lastFailure = error.message ?: error.javaClass.simpleName
+                Log.w("Talk2U.Live2D", "Cubism Core fetch attempt ${attempt + 1} failed", error)
+            } finally {
+                connection?.disconnect()
+            }
+        }
+        val message = "Android HTTPS fallback failed after retry: $lastFailure"
+        Log.e("Talk2U.Live2D", message)
+        return WebResourceResponse(
+            "text/plain",
+            "UTF-8",
+            502,
+            "Bad Gateway",
+            emptyMap(),
+            ByteArrayInputStream(message.toByteArray(Charsets.UTF_8)),
+        )
+    }
+
+    private fun readCoreCache(): ByteArray? = runCatching {
+        if (!coreCacheFile.isFile) return@runCatching null
+        coreCacheFile.readBytes().takeIf(::isValidCore)
+    }.getOrNull()
+
+    private fun writeCoreCache(bytes: ByteArray) {
+        runCatching {
+            coreCacheFile.parentFile?.mkdirs()
+            val temporary = File(coreCacheFile.parentFile, "${coreCacheFile.name}.tmp")
+            temporary.writeBytes(bytes)
+            if (!temporary.renameTo(coreCacheFile)) {
+                temporary.copyTo(coreCacheFile, overwrite = true)
+                temporary.delete()
+            }
+        }.onFailure { Log.w("Talk2U.Live2D", "Unable to persist Cubism Core cache", it) }
+    }
+
+    private fun isValidCore(bytes: ByteArray): Boolean =
+        bytes.size > 1024 && bytes.toString(Charsets.UTF_8).contains("Live2DCubismCore")
+
+    private fun coreResponse(bytes: ByteArray, source: String): WebResourceResponse =
+        WebResourceResponse(
+            "application/javascript",
+            "UTF-8",
+            200,
+            "OK",
+            mapOf(
+                "Access-Control-Allow-Origin" to "*",
+                "Cache-Control" to "private, max-age=31536000, immutable",
+                "X-Talk2U-Core-Source" to source,
+            ),
+            ByteArrayInputStream(bytes),
+        )
 
     private fun reportError(
         message: String,

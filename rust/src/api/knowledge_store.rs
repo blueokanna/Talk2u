@@ -14,77 +14,39 @@ const CONTEXT_DEDUP_SIMILARITY_THRESHOLD: f64 = 0.88;
 const NON_CRITICAL_UPDATE_FLOOR: f64 = 0.55;
 const MAX_RELATED_FACTS_IN_CONTEXT: usize = 12;
 
-// ═══════════════════════════════════════════════════════════════════
-//  本地知识库 (Knowledge Store) — 专家系统式事实存储与检索
-//  ─────────────────────────────────────────────────────────────────
-//  设计理念：
-//    1. 持久化存储对话中提取的事实，形成本地知识图谱
-//    2. 对话时自动检索相关事实，注入上下文增强对话质量
-//    3. 分类索引 + BM25+语义融合检索，确保检索精度
-//    4. 参考智谱增强型上下文技术，为每条知识附加结构化元信息
-//
-//  存储结构：
-//    knowledge_base/
-//      {conversation_id}_facts.json     — 事实库
-//      {conversation_id}_index.json     — 倒排索引
-//      global_facts.json                — 全局共享事实
-// ═══════════════════════════════════════════════════════════════════
-
-/// 事实分类 — 决定事实的存储优先级和检索权重
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum FactCategory {
-    /// 身份信息：姓名、年龄、职业、性格设定（永不过期）
     Identity,
-    /// 人物关系：A和B的关系（高优先级，可更新）
     Relationship,
-    /// 偏好习惯：喜好、习惯、口癖（中优先级）
     Preference,
-    /// 关键事件：已发生的重要事件（永不过期）
     Event,
-    /// 当前状态：情绪、位置、正在做的事（可被新状态覆盖）
     CurrentState,
-    /// 承诺约定：双方的承诺和约定（高优先级）
     Promise,
-    /// 共识观点：双方达成的共识（中优先级）
     Consensus,
 }
 
-/// 单条事实
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Fact {
     pub id: String,
     pub content: String,
     pub category: FactCategory,
-    /// 事实来源：从哪轮对话中提取
     pub source_turn: u32,
-    /// 创建时间
     pub created_at: i64,
-    /// 最后确认/更新时间
     pub last_confirmed_at: i64,
-    /// 关键词索引（用于BM25检索）
     pub keywords: Vec<String>,
-    /// 关联实体（用于关系图检索）
     pub entities: Vec<String>,
-    /// 置信度 0.0-1.0（多次确认的事实置信度更高）
     pub confidence: f64,
-    /// 被引用次数（检索命中次数，用于热度排序）
     pub hit_count: u32,
-    /// 上下文卡片：结构化元信息（参考智谱增强型上下文）
     pub context_snippet: String,
 }
 
-/// 知识库索引
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeIndex {
-    /// 关键词 → 事实ID列表（倒排索引）
     pub keyword_index: HashMap<String, Vec<String>>,
-    /// 实体 → 事实ID列表
     pub entity_index: HashMap<String, Vec<String>>,
-    /// 分类 → 事实ID列表
     pub category_index: HashMap<String, Vec<String>>,
 }
 
-/// 检索结果
 #[derive(Debug, Clone)]
 pub struct FactSearchResult {
     pub fact: Fact,
@@ -125,8 +87,6 @@ impl KnowledgeStore {
             .join(format!("{}_index.json", conversation_id)))
     }
 
-    // ── 事实存储 ──
-
     pub fn save_facts(&self, conversation_id: &str, facts: &[Fact]) -> Result<(), ChatError> {
         let path = self.facts_path(conversation_id)?;
         let json = serde_json::to_string_pretty(facts).map_err(|e| ChatError::StorageError {
@@ -150,12 +110,10 @@ impl KnowledgeStore {
         })
     }
 
-    /// 添加新事实（自动去重和更新）
     pub fn add_facts(&self, conversation_id: &str, new_facts: Vec<Fact>) -> Result<(), ChatError> {
         let mut existing = self.load_facts(conversation_id)?;
 
         for new_fact in new_facts {
-            // 检查是否已存在相似事实
             let existing_idx = existing.iter().position(|f| {
                 Self::facts_are_similar(&f.content, &new_fact.content)
                     || (f.category == new_fact.category
@@ -167,7 +125,6 @@ impl KnowledgeStore {
                 let similarity =
                     Self::semantic_similarity_score(&existing[idx].content, &new_fact.content);
 
-                // 更新已有事实
                 let should_replace_content = Self::is_critical_category(&existing[idx].category)
                     || similarity >= NON_CRITICAL_UPDATE_FLOOR;
 
@@ -180,7 +137,6 @@ impl KnowledgeStore {
 
                 existing[idx].last_confirmed_at = new_fact.last_confirmed_at;
                 existing[idx].confidence = (existing[idx].confidence + 0.1).min(1.0);
-            // 每次确认增加置信度
             } else {
                 existing.push(new_fact);
             }
@@ -191,7 +147,6 @@ impl KnowledgeStore {
         Ok(())
     }
 
-    /// 判断两条事实是否语义相似
     fn facts_are_similar(a: &str, b: &str) -> bool {
         Self::semantic_similarity_score(a, b) >= FACT_SIMILARITY_THRESHOLD
     }
@@ -306,12 +261,9 @@ impl KnowledgeStore {
         )
     }
 
-    /// 判断实体列表是否有重叠
     fn entities_overlap(a: &[String], b: &[String]) -> bool {
         a.iter().any(|ea| b.iter().any(|eb| ea == eb))
     }
-
-    // ── 倒排索引 ──
 
     fn rebuild_index(&self, conversation_id: &str, facts: &[Fact]) -> Result<(), ChatError> {
         let mut keyword_index: HashMap<String, Vec<String>> = HashMap::new();
@@ -319,21 +271,18 @@ impl KnowledgeStore {
         let mut category_index: HashMap<String, Vec<String>> = HashMap::new();
 
         for fact in facts {
-            // 关键词索引
             for kw in &fact.keywords {
                 keyword_index
                     .entry(kw.clone())
                     .or_default()
                     .push(fact.id.clone());
             }
-            // 实体索引
             for entity in &fact.entities {
                 entity_index
                     .entry(entity.clone())
                     .or_default()
                     .push(fact.id.clone());
             }
-            // 分类索引
             let cat_key = format!("{:?}", fact.category);
             category_index
                 .entry(cat_key)
@@ -356,10 +305,6 @@ impl KnowledgeStore {
         })
     }
 
-    // ── 事实检索（BM25 + 语义融合）──
-
-    /// 根据查询内容检索相关事实
-    /// 使用 BM25 + 余弦相似度融合排序
     pub fn search_facts(
         &self,
         conversation_id: &str,
@@ -377,7 +322,6 @@ impl KnowledgeStore {
 
         let query_keywords = MemoryEngine::extract_keywords(query);
         if query_keywords.is_empty() {
-            // 无关键词时，返回高优先级事实
             return Self::get_priority_facts(&facts, top_k);
         }
 
@@ -402,7 +346,6 @@ impl KnowledgeStore {
 
         let avg_doc_len = total_len as f64 / total_docs as f64;
 
-        // BM25 得分
         let mut bm25_scores: Vec<(usize, f64)> = all_doc_keywords
             .iter()
             .enumerate()
@@ -414,16 +357,13 @@ impl KnowledgeStore {
                     total_docs,
                     &doc_freq,
                 );
-                // 高优先级事实加权
                 let category_boost = Self::category_weight(&facts[i].category);
-                // 置信度加权
                 let confidence_boost = 0.5 + facts[i].confidence * 0.5;
                 (i, score * category_boost * confidence_boost)
             })
             .collect();
         bm25_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // 语义相似度得分
         let mut semantic_scores: Vec<(usize, f64)> = all_doc_keywords
             .iter()
             .enumerate()
@@ -435,7 +375,6 @@ impl KnowledgeStore {
             .collect();
         semantic_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // RRF 融合
         let fused =
             MemoryEngine::weighted_rrf_fusion(&bm25_scores, &semantic_scores, 0.55, 0.45, 60.0);
 
@@ -450,7 +389,6 @@ impl KnowledgeStore {
             .collect()
     }
 
-    /// 获取所有高优先级事实（身份、承诺等永不过期的事实）
     fn get_priority_facts(facts: &[Fact], top_k: usize) -> Vec<FactSearchResult> {
         let mut priority: Vec<&Fact> = facts
             .iter()
@@ -476,12 +414,10 @@ impl KnowledgeStore {
             .collect()
     }
 
-    /// 获取全部事实（用于上下文注入）
     pub fn get_all_facts(&self, conversation_id: &str) -> Vec<Fact> {
         self.load_facts(conversation_id).unwrap_or_default()
     }
 
-    /// 分类权重：高优先级事实在检索中获得更高权重
     fn category_weight(category: &FactCategory) -> f64 {
         match category {
             FactCategory::Identity => 2.0,
@@ -494,9 +430,6 @@ impl KnowledgeStore {
         }
     }
 
-    // ── 事实提取（从对话内容中自动提取事实）──
-
-    /// 从AI生成的事实JSON中解析事实列表
     pub fn parse_extracted_facts(json_text: &str, turn: u32) -> Vec<Fact> {
         let json_str = if let Some(start) = json_text.find('[') {
             if let Some(end) = json_text.rfind(']') {
@@ -505,7 +438,6 @@ impl KnowledgeStore {
                 json_text
             }
         } else if let Some(start) = json_text.find('{') {
-            // 可能是 { "facts": [...] } 格式
             if let Some(end) = json_text.rfind('}') {
                 let obj_str = &json_text[start..=end];
                 if let Ok(obj) = serde_json::from_str::<serde_json::Value>(obj_str) {
@@ -590,7 +522,6 @@ impl KnowledgeStore {
             .collect()
     }
 
-    /// 构建事实提取 prompt（用于让AI从对话中提取事实）
     pub fn build_fact_extraction_prompt(
         recent_messages: &[Message],
         existing_facts: &[Fact],
@@ -600,7 +531,6 @@ impl KnowledgeStore {
         prompt.push_str("【事实提取任务】\n");
         prompt.push_str("从以下对话中提取所有可以作为持久化知识存储的事实。\n\n");
 
-        // 已有事实（避免重复提取）
         if !existing_facts.is_empty() {
             prompt.push_str("【已存储的事实（不要重复）】\n");
             for (i, fact) in existing_facts.iter().take(20).enumerate() {
@@ -665,8 +595,6 @@ impl KnowledgeStore {
         }
     }
 
-    /// 构建知识库上下文注入 prompt
-    /// 将检索到的事实格式化为系统提示，注入对话上下文
     pub fn build_knowledge_context(
         search_results: &[FactSearchResult],
         all_identity_facts: &[Fact],
@@ -677,7 +605,6 @@ impl KnowledgeStore {
 
         let mut context = String::from("【本地知识库 — 已确认事实，必须严格遵守】\n");
 
-        // 永久事实（身份、承诺）始终注入
         if !all_identity_facts.is_empty() {
             context.push_str("▸ 不可变事实：\n");
             for fact in all_identity_facts {
@@ -689,7 +616,6 @@ impl KnowledgeStore {
             }
         }
 
-        // 检索到的相关事实
         if !search_results.is_empty() {
             context.push_str("▸ 与当前话题相关的事实：\n");
 
@@ -737,7 +663,6 @@ impl KnowledgeStore {
         context
     }
 
-    /// 清除对话的知识库
     pub fn delete_knowledge(&self, conversation_id: &str) -> Result<(), ChatError> {
         let facts_path = self.facts_path(conversation_id)?;
         let index_path = self.index_path(conversation_id)?;
@@ -754,7 +679,6 @@ impl KnowledgeStore {
         Ok(())
     }
 
-    /// 更新事实的命中计数
     pub fn record_hits(&self, conversation_id: &str, fact_ids: &[String]) -> Result<(), ChatError> {
         let mut facts = self.load_facts(conversation_id)?;
         for fact in &mut facts {

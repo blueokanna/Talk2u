@@ -15,6 +15,13 @@ class OfflineChatMessage {
   const OfflineChatMessage({required this.role, required this.content});
 }
 
+class OfflineGenerationCancelled implements Exception {
+  const OfflineGenerationCancelled();
+
+  @override
+  String toString() => '端侧生成已停止';
+}
+
 class OfflineLlmService extends ChangeNotifier {
   OfflineLlmService._();
 
@@ -46,6 +53,7 @@ class OfflineLlmService extends ChangeNotifier {
   Future<void>? _initializing;
   String? _modelPath;
   double? _contextId;
+  bool _stopRequested = false;
   HttpClientRequest? _downloadRequest;
   bool _cancelRequested = false;
 
@@ -314,6 +322,7 @@ class OfflineLlmService extends ChangeNotifier {
     if (generating) throw StateError('端侧模型正在生成上一条回复');
     final contextId = await _ensureContext();
     generating = true;
+    _stopRequested = false;
     lastError = null;
     notifyListeners();
 
@@ -342,6 +351,7 @@ class OfflineLlmService extends ChangeNotifier {
         stop: const ['<|im_end|>', '<|endoftext|>'],
         emitRealtimeCompletion: true,
       );
+      if (_stopRequested) throw const OfflineGenerationCancelled();
       var text = buffer.toString().trim();
       if (text.isEmpty) {
         text = (result?['text'] ?? result?['content'] ?? '').toString().trim();
@@ -349,17 +359,18 @@ class OfflineLlmService extends ChangeNotifier {
       if (text.isEmpty) throw StateError('端侧模型没有返回文本');
       return text;
     } catch (error) {
-      lastError = error.toString();
+      if (error is! OfflineGenerationCancelled) {
+        lastError = error.toString();
+      }
       rethrow;
     } finally {
       await subscription?.cancel();
+      _stopRequested = false;
       generating = false;
       notifyListeners();
     }
   }
 
-  /// Formats Qwen chat messages in Dart to avoid fcllama 0.0.3's broken
-  /// Android `List -> HashMap[]` bridge in `getFormattedChat`.
   @visibleForTesting
   static String formatQwenChatPrompt(List<OfflineChatMessage> messages) {
     final output = StringBuffer();
@@ -384,7 +395,8 @@ class OfflineLlmService extends ChangeNotifier {
 
   Future<void> stopGeneration() async {
     final contextId = _contextId;
-    if (contextId != null) {
+    if (contextId != null && generating) {
+      _stopRequested = true;
       await FCllama.instance()!.stopCompletion(contextId: contextId);
     }
   }

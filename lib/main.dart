@@ -87,7 +87,6 @@ class _StartupGateState extends State<_StartupGate> {
           onTimeout: () => throw TimeoutException('本地数据初始化超时'),
         );
 
-    // Optional device capabilities must never hold the first Flutter frame.
     unawaited(
       OfflineSpeechService.instance.initialize().timeout(
         const Duration(seconds: 8),

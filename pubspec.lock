@@ -241,6 +241,14 @@ packages:
       url: "https://pub.flutter-io.cn"
     source: hosted
     version: "1.0.9"
+  dart_sentencepiece_tokenizer:
+    dependency: "direct main"
+    description:
+      name: dart_sentencepiece_tokenizer
+      sha256: "85825632845cf6427ea0cd13dfba96b4341cf63525165155e5b9b97011239289"
+      url: "https://pub.flutter-io.cn"
+    source: hosted
+    version: "1.3.2"
   dart_style:
     dependency: transitive
     description:

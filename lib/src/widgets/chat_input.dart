@@ -3,52 +3,41 @@ import 'package:flutter/material.dart';
 class ChatInput extends StatefulWidget {
   final bool isStreaming;
   final ValueChanged<String> onSend;
+  final VoidCallback? onStop;
   final VoidCallback? onVoiceInput;
   final bool isListening;
   final bool voiceEnabled;
   final String dictatedText;
+  final int maxLines;
 
   const ChatInput({
     super.key,
     required this.isStreaming,
     required this.onSend,
+    this.onStop,
     this.onVoiceInput,
     this.isListening = false,
     this.voiceEnabled = false,
     this.dictatedText = '',
-  });
+    this.maxLines = 5,
+  }) : assert(maxLines > 0);
 
   @override
   State<ChatInput> createState() => _ChatInputState();
 }
 
-class _ChatInputState extends State<ChatInput>
-    with SingleTickerProviderStateMixin {
+class _ChatInputState extends State<ChatInput> {
   final _controller = TextEditingController();
   final _focusNode = FocusNode();
   bool _hasText = false;
-  late AnimationController _sendButtonController;
-  late Animation<double> _sendButtonScale;
 
   @override
   void initState() {
     super.initState();
-    _sendButtonController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 150),
-    );
-    _sendButtonScale = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _sendButtonController, curve: Curves.easeOutBack),
-    );
     _controller.addListener(() {
       final hasText = _controller.text.trim().isNotEmpty;
       if (hasText != _hasText) {
         setState(() => _hasText = hasText);
-        if (hasText) {
-          _sendButtonController.forward();
-        } else {
-          _sendButtonController.reverse();
-        }
       }
     });
   }
@@ -69,7 +58,6 @@ class _ChatInputState extends State<ChatInput>
   void dispose() {
     _controller.dispose();
     _focusNode.dispose();
-    _sendButtonController.dispose();
     super.dispose();
   }
 
@@ -116,7 +104,7 @@ class _ChatInputState extends State<ChatInput>
                 controller: _controller,
                 focusNode: _focusNode,
                 enabled: !widget.isStreaming,
-                maxLines: 5,
+                maxLines: widget.maxLines,
                 minLines: 1,
                 textInputAction: TextInputAction.newline,
                 onSubmitted: (_) => _handleSend(),
@@ -138,16 +126,21 @@ class _ChatInputState extends State<ChatInput>
               ),
             ),
             const SizedBox(width: 6),
-            ScaleTransition(
-              scale: _sendButtonScale,
-              child: IconButton.filled(
-                onPressed: _hasText && !widget.isStreaming ? _handleSend : null,
-                icon: const Icon(Icons.arrow_upward_rounded, size: 22),
-                style: IconButton.styleFrom(
-                  backgroundColor: theme.colorScheme.primary,
-                  foregroundColor: theme.colorScheme.onPrimary,
-                  fixedSize: const Size(40, 40),
-                ),
+            IconButton.filled(
+              tooltip: widget.isStreaming ? '停止生成' : '发送',
+              onPressed: widget.isStreaming
+                  ? widget.onStop
+                  : (_hasText ? _handleSend : null),
+              icon: Icon(
+                widget.isStreaming
+                    ? Icons.stop_rounded
+                    : Icons.arrow_upward_rounded,
+                size: 22,
+              ),
+              style: IconButton.styleFrom(
+                backgroundColor: theme.colorScheme.primary,
+                foregroundColor: theme.colorScheme.onPrimary,
+                fixedSize: const Size(40, 40),
               ),
             ),
           ],

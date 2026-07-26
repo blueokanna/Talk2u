@@ -15,19 +15,28 @@ class Live2dModelImporter {
   static const _maximumEntries = 8192;
 
   static Future<String> importArchive(String archivePath) async {
+    final models = await importArchiveModels(archivePath);
+    return models.first;
+  }
+
+  static Future<List<String>> importArchiveModels(String archivePath) async {
     if (defaultTargetPlatform == TargetPlatform.android) {
-      final modelPath = await _channel.invokeMethod<String>('importArchive', {
-        'path': archivePath,
-      });
-      if (modelPath == null || modelPath.isEmpty) {
-        throw const FormatException('原生端没有返回 Live2D 模型路径');
+      final modelPaths = await _channel.invokeListMethod<String>(
+        'importArchiveModels',
+        {'path': archivePath},
+      );
+      final paths = modelPaths
+          ?.where((path) => path.trim().isNotEmpty)
+          .toList(growable: false);
+      if (paths == null || paths.isEmpty) {
+        throw const FormatException('原生端没有返回 Live2D 模型列表');
       }
-      return modelPath;
+      return paths;
     }
     if (defaultTargetPlatform == TargetPlatform.windows ||
         defaultTargetPlatform == TargetPlatform.linux ||
         defaultTargetPlatform == TargetPlatform.macOS) {
-      return _importArchiveOnDesktop(archivePath);
+      return _importArchiveModelsOnDesktop(archivePath);
     }
     throw UnsupportedError('当前平台暂不支持导入 Live2D ZIP');
   }
@@ -49,9 +58,21 @@ class Live2dModelImporter {
   static Future<String> importArchiveOnDesktopForTesting(
     String archivePath,
     Directory supportDirectory,
-  ) => _importArchiveOnDesktop(archivePath, supportDirectory: supportDirectory);
+  ) async => (await _importArchiveModelsOnDesktop(
+    archivePath,
+    supportDirectory: supportDirectory,
+  )).first;
 
-  static Future<String> _importArchiveOnDesktop(
+  @visibleForTesting
+  static Future<List<String>> importArchiveModelsOnDesktopForTesting(
+    String archivePath,
+    Directory supportDirectory,
+  ) => _importArchiveModelsOnDesktop(
+    archivePath,
+    supportDirectory: supportDirectory,
+  );
+
+  static Future<List<String>> _importArchiveModelsOnDesktop(
     String archivePath, {
     Directory? supportDirectory,
   }) async {
@@ -110,21 +131,22 @@ class Live2dModelImporter {
         }
       }
 
-      final modelFiles = destination
-          .listSync(recursive: true, followLinks: false)
-          .whereType<File>()
-          .where((file) => file.path.toLowerCase().endsWith('.model3.json'))
-          .toList();
-      if (modelFiles.length != 1) {
-        throw FormatException(
-          modelFiles.isEmpty
-              ? 'ZIP 中没有 .model3.json'
-              : 'ZIP 中包含多个 .model3.json，请只打包一个模型',
-        );
+      final modelFiles =
+          destination
+              .listSync(recursive: true, followLinks: false)
+              .whereType<File>()
+              .where((file) => file.path.toLowerCase().endsWith('.model3.json'))
+              .toList()
+            ..sort((left, right) => left.path.compareTo(right.path));
+      if (modelFiles.isEmpty) {
+        throw const FormatException('ZIP 中没有 .model3.json');
       }
-      final modelFile = modelFiles.single;
-      _validateAndNormalizeModel(modelFile, destination);
-      return modelFile.absolute.path;
+      for (final modelFile in modelFiles) {
+        _validateAndNormalizeModel(modelFile, destination);
+      }
+      return List.unmodifiable(
+        modelFiles.map((modelFile) => modelFile.absolute.path),
+      );
     } catch (_) {
       if (destination.existsSync()) destination.deleteSync(recursive: true);
       rethrow;
@@ -238,17 +260,137 @@ class Live2dModelImporter {
       handle.closeSync();
     }
 
+    Map<String, dynamic>? displayInfoJson;
     final displayInfo = references['DisplayInfo'];
     if (displayInfo is String && displayInfo.isNotEmpty) {
-      final displayInfoJson = jsonDecode(
+      final value = jsonDecode(
         File(p.join(modelDirectory.path, displayInfo)).readAsStringSync(),
       );
-      if (displayInfoJson is! Map || displayInfoJson['Version'] != 3) {
+      if (value is! Map || value['Version'] != 3) {
         throw const FormatException('cdi3.json 的 Version 必须为 3');
       }
+      displayInfoJson = Map<String, dynamic>.from(value);
     }
+    _writeAvatarConfig(modelDirectory, decoded, references, displayInfoJson);
     modelFile.writeAsStringSync(
       const JsonEncoder.withIndent('  ').convert(decoded),
+    );
+  }
+
+  static void _writeAvatarConfig(
+    Directory modelDirectory,
+    Map<String, dynamic> model,
+    Map<String, dynamic> references,
+    Map<String, dynamic>? displayInfo,
+  ) {
+    final configFile = File(p.join(modelDirectory.path, 'talk2u.avatar.json'));
+    final config = configFile.existsSync()
+        ? Map<String, dynamic>.from(jsonDecode(configFile.readAsStringSync()))
+        : <String, dynamic>{};
+    Map<String, dynamic> object(Map<String, dynamic> parent, String key) {
+      final value = parent[key];
+      if (value is Map) return parent[key] = Map<String, dynamic>.from(value);
+      return parent[key] = <String, dynamic>{};
+    }
+
+    config['version'] = 1;
+    final parameterIds = (displayInfo?['Parameters'] as List? ?? const [])
+        .whereType<Map>()
+        .map((item) => item['Id'])
+        .whereType<String>()
+        .where((id) => id.isNotEmpty)
+        .toSet();
+    final groupedLipSyncIds = (model['Groups'] as List? ?? const [])
+        .whereType<Map>()
+        .where((group) => '${group['Name']}'.toLowerCase() == 'lipsync')
+        .expand(
+          (group) => (group['Ids'] as List? ?? const []).whereType<String>(),
+        )
+        .toSet();
+    final vowelIds = [
+      'ParamA',
+      'ParamI',
+      'ParamU',
+      'ParamE',
+      'ParamO',
+    ].where(parameterIds.contains).toList(growable: false);
+    final openIds = parameterIds
+        .where((id) => id == 'ParamMouthOpenY')
+        .followedBy(groupedLipSyncIds)
+        .toSet()
+        .toList(growable: false);
+    final lipSync = object(config, 'lipSync');
+    if (vowelIds.length >= 3) {
+      lipSync.putIfAbsent('mode', () => 'viseme');
+      lipSync.putIfAbsent('parameterIds', () => vowelIds);
+      lipSync.putIfAbsent('visemeParameterIds', () => vowelIds);
+    } else {
+      lipSync.putIfAbsent('mode', () => 'open');
+      lipSync.putIfAbsent('parameterIds', () => openIds);
+    }
+    lipSync.putIfAbsent('gain', () => 1.8);
+    lipSync.putIfAbsent('smoothing', () => 0.45);
+    lipSync.putIfAbsent('attack', () => 0.58);
+    lipSync.putIfAbsent('release', () => 0.28);
+    lipSync.putIfAbsent('staleAfterMs', () => 240);
+
+    final naturalBehavior = object(config, 'naturalBehavior');
+    naturalBehavior.putIfAbsent('expressionDurationMs', () => 4200);
+    final speechBody = object(naturalBehavior, 'speechBody');
+    speechBody.putIfAbsent('enabled', () => true);
+    speechBody.putIfAbsent('gain', () => 1.15);
+    speechBody.putIfAbsent('smoothing', () => 0.12);
+    final gaze = object(naturalBehavior, 'gaze');
+    gaze.putIfAbsent('enabled', () => true);
+    gaze.putIfAbsent('intervalMinMs', () => 2600);
+    gaze.putIfAbsent('intervalMaxMs', () => 5600);
+    gaze.putIfAbsent('rangeX', () => 0.22);
+    gaze.putIfAbsent('rangeY', () => 0.12);
+    naturalBehavior.putIfAbsent('microExpressions', () => <dynamic>[]);
+
+    final aliases = object(config, 'parameterAliases');
+    const candidates = <String, List<String>>{
+      'angleX': ['ParamAngleX', 'AngleX'],
+      'angleY': ['ParamAngleY', 'AngleY'],
+      'angleZ': ['ParamAngleZ', 'AngleZ'],
+      'bodyX': ['ParamBodyAngleX', 'ParamBodyAngleX3', 'Param92'],
+      'bodyY': ['ParamBodyAngleY', 'ParamBodyAngleY2', 'Param93'],
+      'bodyZ': ['ParamBodyAngleZ', 'ParamBodyAngleZ2', 'Param94'],
+      'shoulder': ['ParamShoulderY', 'ParamBodyAngleZ3'],
+      'armL': ['ParamArmLA01', 'ParamArmLA', 'Param104'],
+      'armR': ['ParamArmRA01', 'ParamArmRA', 'Param431'],
+      'forearmL': ['ParamArmLA02', 'ParamArmLB01', 'Param105'],
+      'forearmR': ['ParamArmRA02', 'ParamArmRB01', 'Param432'],
+      'handL': ['ParamHandL', 'Param106'],
+      'handR': ['ParamHandR', 'Param433'],
+    };
+    for (final entry in candidates.entries) {
+      final values = entry.value
+          .where(parameterIds.contains)
+          .toList(growable: false);
+      if (values.isNotEmpty) aliases.putIfAbsent(entry.key, () => values);
+    }
+
+    final capabilities = object(config, 'modelCapabilities');
+    capabilities['expressions'] =
+        (references['Expressions'] as List? ?? const [])
+            .whereType<Map>()
+            .map((item) => item['Name'])
+            .whereType<String>()
+            .toList(growable: false);
+    final motions = <String, int>{};
+    final motionGroups = references['Motions'];
+    if (motionGroups is Map) {
+      for (final entry in motionGroups.entries) {
+        if (entry.value is List) {
+          motions['${entry.key}'] = (entry.value as List).length;
+        }
+      }
+    }
+    capabilities['motions'] = motions;
+    config.putIfAbsent('cues', () => <String, dynamic>{});
+    configFile.writeAsStringSync(
+      const JsonEncoder.withIndent('  ').convert(config),
     );
   }
 

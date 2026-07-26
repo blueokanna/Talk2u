@@ -31,7 +31,6 @@ impl ConversationStore {
         Ok(self.conversations_dir()?.join(format!("{}.msgpack", id)))
     }
 
-    /// Migrate old .json files to .msgpack on first access
     fn migrate_json_if_needed(&self, id: &str) -> Result<(), ChatError> {
         let dir = self.conversations_dir()?;
         let json_path = dir.join(format!("{}.json", id));
@@ -77,7 +76,6 @@ impl ConversationStore {
     }
 
     pub fn load_conversation(&self, id: &str) -> Result<Conversation, ChatError> {
-        // Try migration first
         let _ = self.migrate_json_if_needed(id);
 
         let path = self.conversation_path(id)?;
@@ -112,7 +110,6 @@ impl ConversationStore {
                         rmp_serde::from_slice(&data).ok()?
                     }
                     "json" => {
-                        // Legacy support
                         let json = fs::read_to_string(&path).ok()?;
                         serde_json::from_str(&json).ok()?
                     }
@@ -141,7 +138,6 @@ impl ConversationStore {
 
     pub fn delete_conversation(&self, id: &str) -> Result<(), ChatError> {
         let path = self.conversation_path(id)?;
-        // Also try to delete legacy json
         let dir = self.conversations_dir()?;
         let json_path = dir.join(format!("{}.json", id));
         let _ = fs::remove_file(&json_path);
@@ -168,7 +164,6 @@ impl ConversationStore {
         self.save_conversation(&conv)
     }
 
-    /// Delete a single message from a conversation by message ID.
     pub fn delete_message(&self, conversation_id: &str, message_id: &str) -> Result<(), ChatError> {
         let mut conv = self.load_conversation(conversation_id)?;
         let original_len = conv.messages.len();
@@ -182,14 +177,12 @@ impl ConversationStore {
         self.save_conversation(&conv)
     }
 
-    /// Increment the turn count for a conversation.
     pub fn increment_turn_count(&self, conversation_id: &str) -> Result<(), ChatError> {
         let mut conv = self.load_conversation(conversation_id)?;
         conv.turn_count += 1;
         self.save_conversation(&conv)
     }
 
-    /// Update memory summaries for a conversation.
     pub fn update_memory_summaries(
         &self,
         conversation_id: &str,
@@ -201,7 +194,6 @@ impl ConversationStore {
         self.save_conversation(&conv)
     }
 
-    /// Edit a message's content in a conversation.
     pub fn edit_message(
         &self,
         conversation_id: &str,
@@ -223,8 +215,6 @@ impl ConversationStore {
         }
     }
 
-    /// Rollback: delete the target message and all messages after it.
-    /// Returns the IDs of deleted messages.
     pub fn rollback_to_message(
         &self,
         conversation_id: &str,
@@ -245,7 +235,6 @@ impl ConversationStore {
         Ok(deleted_ids)
     }
 
-    /// Update dialogue style for a conversation.
     pub fn set_dialogue_style(
         &self,
         conversation_id: &str,
@@ -257,7 +246,6 @@ impl ConversationStore {
         self.save_conversation(&conv)
     }
 
-    /// Get the turn count for a conversation.
     pub fn get_turn_count(&self, conversation_id: &str) -> Result<u32, ChatError> {
         let conv = self.load_conversation(conversation_id)?;
         Ok(conv.turn_count)

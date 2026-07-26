@@ -433,7 +433,7 @@ std::string BuildResultJson() {
     return output.str();
 }
 
-}  // namespace
+}
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_blue_talk2u_GpuBackendProbe_nativeProbe(JNIEnv* environment, jobject) {

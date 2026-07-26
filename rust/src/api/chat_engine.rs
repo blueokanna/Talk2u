@@ -50,15 +50,9 @@ impl ChatEngine {
         enhanced_messages: &[Message],
         on_event: &impl Fn(ChatStreamEvent),
     ) -> Result<(String, String), ChatError> {
-        let attempt_count = std::sync::atomic::AtomicU32::new(0);
         let need_content_reset = std::sync::atomic::AtomicBool::new(false);
-        let intermediate_errors = std::sync::Mutex::new(Vec::<String>::new());
         let filtered_event = |event: ChatStreamEvent| match event {
-            ChatStreamEvent::Error(ref msg) => {
-                if let Ok(mut errs) = intermediate_errors.lock() {
-                    errs.push(msg.clone());
-                }
-            }
+            ChatStreamEvent::Error(_) => {}
             ChatStreamEvent::ContentDelta(_) | ChatStreamEvent::ThinkingDelta(_) => {
                 if need_content_reset.swap(false, std::sync::atomic::Ordering::Relaxed) {
                     on_event(ChatStreamEvent::Error("__RETRY_RESET__".to_string()));
@@ -74,79 +68,48 @@ impl ChatEngine {
                 return Ok((content, thinking));
             }
             Ok((_, ref thinking)) if actual_thinking && !thinking.trim().is_empty() => {
-                attempt_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 need_content_reset.store(true, std::sync::atomic::Ordering::Relaxed);
                 let retry_body = Self::build_request_body(enhanced_messages, model, false);
-                match StreamingHandler::stream_chat(&self.provider, retry_body, &filtered_event)
-                    .await
+                return match StreamingHandler::stream_chat(
+                    &self.provider,
+                    retry_body,
+                    &filtered_event,
+                )
+                .await
                 {
                     Ok((content, thinking)) if !content.trim().is_empty() => {
-                        return Ok((content, thinking));
+                        Ok((content, thinking))
                     }
-                    _ => {}
-                }
+                    Ok(_) => Err(ChatError::ApiError {
+                        status: 0,
+                        message: "API 只返回了思考过程，没有返回最终回复".to_string(),
+                    }),
+                    Err(error) => Err(error),
+                };
             }
             Ok(_) => {}
-            Err(_) => {}
+            Err(error) => return Err(error),
         }
 
-        attempt_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         need_content_reset.store(true, std::sync::atomic::Ordering::Relaxed);
         let compact = Self::build_compact_retry_messages(enhanced_messages, 6);
         let compact_body = Self::build_request_body(&compact, model, false);
         match StreamingHandler::stream_chat(&self.provider, compact_body, &filtered_event).await {
-            Ok((content, thinking)) if !content.trim().is_empty() => {
-                return Ok((content, thinking));
-            }
-            _ => {}
-        }
-
-        need_content_reset.store(true, std::sync::atomic::Ordering::Relaxed);
-        let ultra_compact = Self::build_compact_retry_messages(enhanced_messages, 4);
-        let fallback_model = if self.provider.id == "zhipu" && model != "glm-4.7-flash" {
-            "glm-4.7-flash"
-        } else {
-            model
-        };
-        let fallback_body = Self::build_request_body(&ultra_compact, fallback_model, false);
-        match StreamingHandler::stream_chat(&self.provider, fallback_body, on_event).await {
             Ok((content, thinking)) if !content.trim().is_empty() => Ok((content, thinking)),
-            Ok(_) => {
-                let diag = if let Ok(errs) = intermediate_errors.lock() {
-                    if errs.is_empty() {
-                        "API 多次返回空内容".to_string()
-                    } else {
-                        format!(
-                            "API 多次未能生成内容。诊断: {}",
-                            errs.last().unwrap_or(&String::new())
-                        )
-                    }
-                } else {
-                    "API 多次返回空内容".to_string()
-                };
-                Err(ChatError::ApiError {
-                    status: 0,
-                    message: diag,
-                })
-            }
-            Err(e) => Err(e),
+            Ok(_) => Err(ChatError::ApiError {
+                status: 0,
+                message: "API 连续两次返回空内容".to_string(),
+            }),
+            Err(error) => Err(error),
         }
     }
 
-    /// ══ 推理模型调用（Phase 1）══
-    /// 调用推理模型（glm-4-air）进行深度分析，返回 (推理结论, 完整思考链)。
-    /// - 推理结论：glm-4-air 的 content 输出（供对话模型参考的结构化分析）
-    /// - 完整思考链：glm-4-air 的 reasoning_content（实时流式推送给前端）
-    ///
-    /// 此方法为"尽力而为"：推理失败不阻断对话，仅返回空串。
-    /// 增加超时保护：最多等待 REASONING_TIMEOUT_SECS 秒。
     async fn request_reasoning(
         &self,
         thinking_model: &str,
         enhanced_messages: &[Message],
         on_event: &impl Fn(ChatStreamEvent),
     ) -> (String, String) {
-        // 使用 tokio::time::timeout 保护推理调用，防止无限等待
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(REASONING_TIMEOUT_SECS),
             self.request_reasoning_inner(thinking_model, enhanced_messages, on_event),
@@ -156,7 +119,6 @@ impl ChatEngine {
         result.unwrap_or_default()
     }
 
-    /// request_reasoning 的内部实现（无超时保护）
     async fn request_reasoning_inner(
         &self,
         thinking_model: &str,
@@ -205,7 +167,6 @@ impl ChatEngine {
             message_type: MessageType::Say,
         };
 
-        // 将分析指令插入到最后一条用户消息之前
         let last_user_idx = reasoning_messages
             .iter()
             .rposition(|m| m.role == MessageRole::User);
@@ -260,7 +221,6 @@ impl ChatEngine {
         }
     }
 
-    /// Validate message content — reject blank messages (whitespace-only).
     pub fn validate_message(content: &str) -> Result<(), ChatError> {
         if content.trim().is_empty() {
             return Err(ChatError::ValidationError {
@@ -270,37 +230,23 @@ impl ChatEngine {
         Ok(())
     }
 
-    /// 自动检测消息的 say/do 类型
     pub fn detect_message_type(content: &str) -> MessageType {
         SayDoDetector::detect(content)
     }
 
-    /// 根据模型判断是否允许启用思考（用于 build_request_body 的安全守卫）
-    ///
-    /// 参考 GLM 思考模式文档: https://docs.bigmodel.cn/cn/guide/capabilities/thinking-mode
-    /// - GLM-4.7: 默认开启 Thinking，支持轮级思考、交错式思考、保留式思考
-    /// - GLM-4-AIR: 推理专用模型，支持思考
-    /// - GLM-4.7-FLASH: 快速模型，不支持思考
     pub fn should_enable_thinking(model: &str, user_preference: bool) -> bool {
         match model {
-            // GLM-4.7: 文档明确支持思考模式（默认开启）
             "glm-4.7" => user_preference,
-            // GLM-4-AIR: 推理模型，支持思考
             "glm-4-air" => user_preference,
-            // GLM-4.7-FLASH: 快速对话模型，不支持思考
             "glm-4.7-flash" => false,
             _ => false,
         }
     }
 
-    /// 估算消息列表的 token 数
-    /// 改进版：基于字符数而非 UTF-8 字节数，对中文更准确
-    /// 中文 1 字 ≈ 1.5 token，英文 1 词 ≈ 1 token
     pub fn estimate_token_count(messages: &[Message]) -> usize {
         let mut total_tokens: usize = 0;
         for msg in messages {
             let char_count = msg.content.chars().count();
-            // 统计中文字符占比，动态调整 token 估算系数
             let cjk_chars = msg
                 .content
                 .chars()
@@ -311,17 +257,13 @@ impl ChatEngine {
                 .split_whitespace()
                 .filter(|w| w.is_ascii())
                 .count();
-            // 中文按 1.5 token/字，英文按 1 token/词，其他按 1
             total_tokens += (cjk_chars as f64 * 1.5) as usize
                 + ascii_words
                 + (char_count - cjk_chars - ascii_words);
         }
-        // 加上消息格式开销（每条消息约 4 token 的格式开销）
         total_tokens + messages.len() * 4
     }
 
-    /// 根据上下文长度选择总结模型
-    /// 超过 128K token 使用 glm-4-long，否则使用 glm-4.7-flash
     pub fn choose_summary_model(messages: &[Message]) -> &'static str {
         let estimated_tokens = Self::estimate_token_count(messages);
         if estimated_tokens > 128_000 {
@@ -331,8 +273,6 @@ impl ChatEngine {
         }
     }
 
-    /// 评估上下文复杂度，决定是否需要 GLM-4-LONG 辅助处理
-    /// 返回: (是否需要长上下文蒸馏, 估算总 token 数)
     fn assess_context_needs(
         messages: &[Message],
         memory_summaries: &[MemorySummary],
@@ -343,17 +283,10 @@ impl ChatEngine {
             .map(|s| s.summary.len() / 2 + s.core_facts.iter().map(|f| f.len() / 2).sum::<usize>())
             .sum();
         let total_tokens = msg_tokens + memory_tokens;
-        // 当总 token 超过 48K 或记忆条目超过 15 条时，使用 GLM-4-LONG
         let needs_long = total_tokens > 48_000 || memory_summaries.len() > 15;
         (needs_long, total_tokens)
     }
 
-    /// ══ 长上下文蒸馏（GLM-4-LONG）══
-    /// 当对话历史+记忆超过 GLM-4-AIR 的有效处理范围时，
-    /// 先用 GLM-4-LONG 进行无损信息蒸馏，提取核心脉络，
-    /// 再将蒸馏结果注入后续管线。
-    ///
-    /// 增加超时保护：最多等待 DISTILLATION_TIMEOUT_SECS 秒。
     async fn request_long_context_distillation(
         &self,
         enhanced_messages: &[Message],
@@ -375,7 +308,6 @@ impl ChatEngine {
         result.unwrap_or_default()
     }
 
-    /// request_long_context_distillation 的内部实现
     async fn request_long_context_distillation_inner(
         &self,
         enhanced_messages: &[Message],
@@ -383,10 +315,8 @@ impl ChatEngine {
         user_content: &str,
         on_event: &impl Fn(ChatStreamEvent),
     ) -> String {
-        // 构建蒸馏请求上下文
         let mut distill_messages = enhanced_messages.to_vec();
 
-        // 构建完整记忆摘要（不依赖搜索，全量注入）
         let mut full_memory = String::new();
         if !memory_summaries.is_empty() {
             full_memory.push_str("【全量记忆存档】\n");
@@ -449,9 +379,8 @@ impl ChatEngine {
         let request_body =
             Self::build_request_body(&distill_messages, &self.auxiliary_model, false);
 
-        // GLM-4-LONG 蒸馏是静默执行的，不向前端推送事件
         let silent_event = |_event: ChatStreamEvent| {};
-        let _ = on_event; // 保留参数以维持接口一致性
+        let _ = on_event;
 
         match StreamingHandler::stream_chat(&self.provider, request_body, &silent_event).await {
             Ok((content, _)) => {
@@ -461,50 +390,30 @@ impl ChatEngine {
                     String::new()
                 }
             }
-            Err(_) => {
-                // GLM-4-LONG 蒸馏失败是非致命的，继续用原始上下文
-                String::new()
-            }
+            Err(_) => String::new(),
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  知识库增强管线 — 本地事实检索 + GLM-4-AIR 深度检索 + GLM-4.7 二次整合
-    // ═══════════════════════════════════════════════════════════════════
-
-    /// ══ 知识检索增强（Phase 0.3）══
-    /// 从本地知识库中检索与当前对话相关的事实，注入上下文
-    /// ═══ 核心改进 ═══
-    /// 不再无差别注入所有身份/承诺事实，而是：
-    ///   1. BM25+语义检索相关事实（已有的 top 10）
-    ///   2. 身份事实仅在与当前话题有一定关联时作为背景注入
-    ///   3. 完全无关的事实不注入，避免 AI 在不相关的回复中提及
     fn retrieve_knowledge_context(
         &self,
         conversation_id: &str,
         user_content: &str,
         enhanced_messages: &mut Vec<Message>,
     ) {
-        // 检索相关事实（top 10，已通过 BM25 + 语义排序）
         let search_results = self
             .knowledge_store
             .search_facts(conversation_id, user_content, 10);
 
-        // 获取身份/承诺类永久事实
         let all_facts = self.knowledge_store.get_all_facts(conversation_id);
         let active_topics = MemoryEngine::extract_active_topics_from_text(user_content);
 
-        // 对身份事实进行相关性门控
-        // 核心身份（名字等）始终注入，其他身份事实需要有一定相关性
         let identity_facts: Vec<_> = all_facts
             .iter()
             .filter(|f| matches!(f.category, FactCategory::Identity | FactCategory::Promise))
             .filter(|f| {
-                // 核心身份事实（高置信度）始终注入
                 if f.confidence >= 0.9 && f.category == FactCategory::Identity {
                     return true;
                 }
-                // 承诺类事实需要有一定相关性
                 if f.category == FactCategory::Promise {
                     let relevance = MemoryEngine::compute_relevance_score(
                         &f.content,
@@ -513,7 +422,6 @@ impl ChatEngine {
                     );
                     return relevance > 0.1;
                 }
-                // 其他身份事实需要有一定相关性或高置信度
                 let relevance =
                     MemoryEngine::compute_relevance_score(&f.content, &active_topics, user_content);
                 relevance > 0.08 || f.confidence >= 0.95
@@ -521,12 +429,10 @@ impl ChatEngine {
             .cloned()
             .collect();
 
-        // 构建知识上下文
         let knowledge_context =
             KnowledgeStore::build_knowledge_context(&search_results, &identity_facts);
 
         if !knowledge_context.is_empty() {
-            // 记录命中的事实ID（用于更新热度）
             let hit_ids: Vec<String> = search_results.iter().map(|r| r.fact.id.clone()).collect();
             let _ = self.knowledge_store.record_hits(conversation_id, &hit_ids);
 
@@ -539,7 +445,6 @@ impl ChatEngine {
                 timestamp: 0,
                 message_type: MessageType::Say,
             };
-            // 插入到最后一条用户消息之前
             let last_user_idx = enhanced_messages
                 .iter()
                 .rposition(|m| m.role == MessageRole::User);
@@ -551,14 +456,6 @@ impl ChatEngine {
         }
     }
 
-    /// ══ GLM-4-AIR 深度检索分析（Phase 1 增强）══
-    /// 在原有推理分析的基础上，增加对本地知识库的深度检索指令
-    /// GLM-4-AIR 负责：
-    ///   1. 分析用户意图，判断需要哪些知识
-    ///   2. 基于注入的知识库事实进行深度推理
-    ///   3. 输出结构化分析结论，供 GLM-4.7 参考
-    ///
-    /// 增加超时保护：最多等待 REASONING_TIMEOUT_SECS 秒。
     async fn request_enhanced_reasoning(
         &self,
         thinking_model: &str,
@@ -567,7 +464,6 @@ impl ChatEngine {
         _user_content: &str,
         on_event: &impl Fn(ChatStreamEvent),
     ) -> (String, String) {
-        // 使用 tokio::time::timeout 保护增强推理调用
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(REASONING_TIMEOUT_SECS),
             self.request_enhanced_reasoning_inner(
@@ -583,7 +479,6 @@ impl ChatEngine {
         result.unwrap_or_default()
     }
 
-    /// request_enhanced_reasoning 的内部实现（无超时保护）
     async fn request_enhanced_reasoning_inner(
         &self,
         thinking_model: &str,
@@ -592,10 +487,8 @@ impl ChatEngine {
         _user_content: &str,
         on_event: &impl Fn(ChatStreamEvent),
     ) -> (String, String) {
-        // 在原始上下文基础上追加增强推理指令
         let mut reasoning_messages = enhanced_messages.to_vec();
 
-        // 获取知识库概况（辅助推理）
         let all_facts = self.knowledge_store.get_all_facts(conversation_id);
         let fact_summary = if !all_facts.is_empty() {
             let mut summary = String::from("【本地知识库概况】\n");
@@ -648,7 +541,6 @@ impl ChatEngine {
                     summary.push_str(&format!("  {} 类事实: {} 条\n", cat, count));
                 }
             }
-            // 列出高置信度事实
             let mut high_conf: Vec<_> = all_facts.iter().filter(|f| f.confidence >= 0.8).collect();
             high_conf.sort_by(|a, b| {
                 b.confidence
@@ -715,7 +607,6 @@ impl ChatEngine {
             message_type: MessageType::Say,
         };
 
-        // 将分析指令插入到最后一条用户消息之前
         let last_user_idx = reasoning_messages
             .iter()
             .rposition(|m| m.role == MessageRole::User);
@@ -727,7 +618,6 @@ impl ChatEngine {
 
         let request_body = Self::build_request_body(&reasoning_messages, thinking_model, true);
 
-        // 仅转发 ThinkingDelta 事件
         let reasoning_event = |event: ChatStreamEvent| {
             if let ChatStreamEvent::ThinkingDelta(_) = &event {
                 on_event(event)
@@ -745,18 +635,10 @@ impl ChatEngine {
                 };
                 (conclusion, thinking)
             }
-            Err(_) => {
-                // 推理失败是非致命的
-                (String::new(), String::new())
-            }
+            Err(_) => (String::new(), String::new()),
         }
     }
 
-    /// ══ 异步事实提取（后台任务）══
-    /// 在对话完成后，使用 GLM-4.7-flash 从最近对话中提取新事实
-    /// 存入本地知识库，供后续对话检索
-    ///
-    /// 增加超时保护：最多等待 FACT_EXTRACTION_TIMEOUT_SECS 秒。
     async fn extract_and_store_facts(
         &self,
         conversation_id: &str,
@@ -768,12 +650,9 @@ impl ChatEngine {
         )
         .await;
 
-        if result.is_err() {
-            // 超时不影响主流程
-        }
+        if result.is_err() {}
     }
 
-    /// extract_and_store_facts 的内部实现
     async fn extract_and_store_facts_inner(
         &self,
         conversation_id: &str,
@@ -784,7 +663,6 @@ impl ChatEngine {
             Err(_) => return,
         };
 
-        // 获取最近 10 条非 system 消息
         let recent_messages: Vec<Message> = conv
             .messages
             .iter()
@@ -803,7 +681,6 @@ impl ChatEngine {
 
         let existing_facts = self.knowledge_store.get_all_facts(conversation_id);
 
-        // 构建事实提取 prompt
         let prompt =
             KnowledgeStore::build_fact_extraction_prompt(&recent_messages, &existing_facts);
 
@@ -833,7 +710,6 @@ impl ChatEngine {
         let request_body =
             Self::build_request_body(&extract_messages, &self.auxiliary_model, false);
 
-        // 静默执行，不向前端发送事件
         let silent_event = |_event: ChatStreamEvent| {};
         let _ = on_event;
 
@@ -848,18 +724,11 @@ impl ChatEngine {
         }
     }
 
-    /// Build the BigModel API request body.
-    ///
-    /// ═══ 核心安全措施：消息格式规范化 ═══
-    /// 将所有 system 消息合并为单条放在开头，
-    /// 防止 system 消息穿插在 user/assistant 之间导致 API 拒绝或返回空内容。
-    /// 智谱 API（OpenAI 兼容格式）要求：[system] → [user/assistant 交替]
     pub fn build_request_body(
         messages: &[Message],
         model: &str,
         enable_thinking: bool,
     ) -> serde_json::Value {
-        // ── 合并所有 system 消息为单条 ──
         let system_content: String = messages
             .iter()
             .filter(|m| m.role == MessageRole::System)
@@ -869,7 +738,6 @@ impl ChatEngine {
 
         let mut api_messages: Vec<serde_json::Value> = Vec::new();
 
-        // 单条合并的 system 消息放在最前面
         if !system_content.is_empty() {
             api_messages.push(serde_json::json!({
                 "role": "system",
@@ -877,7 +745,6 @@ impl ChatEngine {
             }));
         }
 
-        // user/assistant 消息保持原始顺序
         for m in messages.iter().filter(|m| m.role != MessageRole::System) {
             let role = match m.role {
                 MessageRole::User => "user",
@@ -890,14 +757,10 @@ impl ChatEngine {
             }));
         }
 
-        // ═══ 消息交替校验 ═══
-        // 智谱 API（OpenAI 兼容）要求 user/assistant 消息严格交替。
-        // 若因 system 消息被合并等原因产生连续同角色消息，在此合并。
         let mut merged_api_messages: Vec<serde_json::Value> = Vec::new();
         for msg in api_messages {
             if let Some(last) = merged_api_messages.last_mut() {
                 if last["role"] == msg["role"] && msg["role"] != "system" {
-                    // 合并连续同角色消息
                     let existing = last["content"].as_str().unwrap_or("").to_string();
                     let new_part = msg["content"].as_str().unwrap_or("");
                     last["content"] = serde_json::json!(format!("{}\n{}", existing, new_part));
@@ -907,15 +770,6 @@ impl ChatEngine {
             merged_api_messages.push(msg);
         }
         let api_messages = merged_api_messages;
-        // ═══ 动态 max_tokens 计算 ═══
-        // 参考: https://docs.bigmodel.cn/cn/guide/start/concept-param
-        // 原则: input + output ≤ 100K（用户要求每次调用最多 100K token）
-        //
-        // 各模型最大 output token（官方文档）：
-        //   glm-4.7:       默认 65536, 最大 131072
-        //   glm-4.7-flash: 默认 65536, 最大 131072（同系列）
-        //   glm-4-air:     动态计算,  最大 4095
-        //   glm-4-long:    旧模型,    最大 4095
         const TOTAL_TOKEN_BUDGET: usize = 100_000;
 
         let input_estimate = Self::estimate_token_count(messages);
@@ -928,11 +782,10 @@ impl ChatEngine {
             _ => 16384,
         };
 
-        // 可用输出 = 总预算 − 输入估算，下限 1024，上限为模型最大输出
         let available_output = if TOTAL_TOKEN_BUDGET > input_estimate + 1024 {
             (TOTAL_TOKEN_BUDGET - input_estimate) as u32
         } else {
-            2048u32 // 最低保障：即使上下文超预算，也保留 2K 输出空间
+            2048u32
         };
         let max_tokens: u32 = available_output.min(model_max_output).max(1024);
 
@@ -943,15 +796,6 @@ impl ChatEngine {
             "max_tokens": max_tokens,
         });
 
-        // ═══ Thinking 模式控制 ═══
-        // 参考: https://docs.bigmodel.cn/cn/guide/capabilities/thinking-mode
-        //
-        // GLM-4.7: 默认开启 Thinking，必须显式 disabled 才能关闭
-        // GLM-4-AIR: 推理模型，按用户偏好开关
-        // GLM-4.7-FLASH: 快速模型，显式 disabled
-        // 其他模型: 不发送 thinking 字段（旧模型不支持）
-        //
-        // budget_tokens: 思考预算（官方文档推荐），防止思考无限消耗 token
         match model {
             "glm-4.7" | "glm-4-air" => {
                 if Self::should_enable_thinking(model, enable_thinking) {
@@ -973,13 +817,6 @@ impl ChatEngine {
         body
     }
 
-    /// 构建带记忆上下文增强的消息列表
-    /// 实现自我认知架构：
-    ///   层1: 角色身份锚定（system prompt）
-    ///   层2: 记忆上下文注入（历史记忆检索结果）
-    ///   层3: 情感状态追踪（基于最近对话推断当前情绪基线）
-    ///   层4: 对话历史窗口（最近 20 条消息）
-    ///   层5: 风格约束（say/do 模式提示）
     pub fn build_context_enhanced_messages(
         conv: &Conversation,
         user_content: &str,
@@ -987,7 +824,6 @@ impl ChatEngine {
     ) -> Vec<Message> {
         let mut enhanced_messages: Vec<Message> = Vec::new();
 
-        // 层1: 保留角色 system 消息（身份锚定）
         let mut system_token_budget: usize = 0;
         for msg in &conv.messages {
             if msg.role == MessageRole::System {
@@ -997,24 +833,11 @@ impl ChatEngine {
             }
         }
 
-        // 层2: 记忆上下文注入 — 分层检索 + 相关性门控
-        // ═══ 核心改进 ═══
-        // 不再无差别注入所有核心事实，而是：
-        //   (a) 构建短期记忆上下文（情感弧线、活跃话题、回复指纹）
-        //   (b) 通过 TF-IDF 相关性评分，仅注入与当前话题相关的长期记忆
-        //   (c) 身份事实始终保留作为锚点，但以背景方式注入（不强调）
-        //   (d) 未被话题命中的事实不注入，避免 AI 在不相关时主动提及
-        //
-        // 参考：智谱增强型上下文技术 — 上下文感知检索 + 相关性门控
-
-        // 步骤 2.1：构建短期记忆上下文
         let short_term = MemoryEngine::build_short_term_context(&conv.messages);
 
-        // 步骤 2.2：注入短期记忆（情感弧线 + 未展开线索）
         {
             let mut short_term_prompt = String::new();
 
-            // 情感弧线描述
             if !short_term.emotional_arc.is_empty() {
                 let arc_desc = MemoryEngine::describe_emotional_arc(&short_term.emotional_arc);
                 if !arc_desc.is_empty() {
@@ -1022,7 +845,6 @@ impl ChatEngine {
                 }
             }
 
-            // 未展开的对话线索
             if !short_term.pending_threads.is_empty() {
                 short_term_prompt.push_str("【短期记忆·未展开线索】\n");
                 short_term_prompt.push_str(
@@ -1047,17 +869,13 @@ impl ChatEngine {
             }
         }
 
-        // 步骤 2.3：注入相关性门控的长期记忆
         if !memory_summaries.is_empty() {
-            // 提取当前活跃话题
             let active_topics = MemoryEngine::extract_active_topics_from_text(user_content);
 
-            // 检索与当前话题最相关的记忆摘要（BM25 + 语义融合）
             let search_results = MemoryEngine::search_memories(user_content, memory_summaries, 5);
 
-            // 收集所有核心事实并按层级+相关性分类
-            let mut identity_facts: Vec<String> = Vec::new(); // 身份事实（始终注入）
-            let mut relevant_facts: Vec<(String, f64)> = Vec::new(); // 其他事实（相关性门控）
+            let mut identity_facts: Vec<String> = Vec::new();
+            let mut relevant_facts: Vec<(String, f64)> = Vec::new();
 
             for summary in memory_summaries.iter() {
                 for (i, fact) in summary.core_facts.iter().enumerate() {
@@ -1069,20 +887,16 @@ impl ChatEngine {
 
                     match tier {
                         MemoryTier::Identity => {
-                            // 身份事实始终保留（核心锚点）
                             if !identity_facts.contains(fact) {
                                 identity_facts.push(fact.clone());
                             }
                         }
                         _ => {
-                            // 其他事实通过相关性评分门控
                             let relevance = MemoryEngine::compute_relevance_score(
                                 fact,
                                 &active_topics,
                                 user_content,
                             );
-                            // 相关性阈值 0.15：足够宽松以捕捉间接关联，
-                            // 又足够严格以过滤完全无关的事实
                             if relevance > 0.15 && !relevant_facts.iter().any(|(f, _)| f == fact) {
                                 relevant_facts.push((fact.clone(), relevance));
                             }
@@ -1091,19 +905,16 @@ impl ChatEngine {
                 }
             }
 
-            // 按相关性降序排列，取 top 10
             relevant_facts
                 .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             relevant_facts.truncate(10);
 
             let mut context = String::from("【长期记忆上下文】\n");
 
-            // 注入检索到的相关记忆摘要
             if !search_results.is_empty() {
                 context.push_str("▸ 与当前话题相关的历史片段：\n");
                 for result in &search_results {
                     context.push_str(&format!("  · {}\n", result.summary));
-                    // 只注入摘要中与当前话题有一定相关性的核心事实
                     for fact in &result.core_facts {
                         let rel = MemoryEngine::compute_relevance_score(
                             fact,
@@ -1117,7 +928,6 @@ impl ChatEngine {
                 }
             }
 
-            // 注入身份锚点（始终存在，但以背景方式提供）
             if !identity_facts.is_empty() {
                 context.push_str("▸ 基础设定（背景知识）：\n");
                 for fact in &identity_facts {
@@ -1125,7 +935,6 @@ impl ChatEngine {
                 }
             }
 
-            // 注入相关性达标的其他事实
             if !relevant_facts.is_empty() {
                 context.push_str("▸ 可能与当前话题相关的已知信息（仅在话题涉及时自然提及）：\n");
                 for (fact, _score) in &relevant_facts {
@@ -1154,8 +963,6 @@ impl ChatEngine {
             });
         }
 
-        // 层3: 认知思维引擎（替代简单的情感关键词匹配和连贯性检测）
-        // 整合了：情感感知、语言模式检测、意图推断、关系分析、共情策略
         let non_system: Vec<&Message> = conv
             .messages
             .iter()
@@ -1204,9 +1011,6 @@ impl ChatEngine {
             }
         }
 
-        // 层4: 添加最近的对话消息，动态调整数量以适应上下文窗口
-        // 用户要求每次调用最多 100K token（input + output），
-        // 这里预留 ~20K 给 output（max_tokens），input 上限 80K
         let max_context_tokens: usize = 80_000;
         let reserved_tokens = system_token_budget + 4096 + 200;
         let available_for_history = if max_context_tokens > reserved_tokens {
@@ -1217,7 +1021,7 @@ impl ChatEngine {
 
         let mut selected_messages: Vec<Message> = Vec::new();
         let mut accumulated_tokens: usize = 0;
-        let max_messages = 20usize; // 最多保留 20 条
+        let max_messages = 20usize;
 
         for msg in non_system.iter().rev() {
             let msg_tokens = msg.content.len() / 2;
@@ -1236,8 +1040,6 @@ impl ChatEngine {
         selected_messages.reverse();
         enhanced_messages.extend(selected_messages);
 
-        // 层5: 风格约束（say/do 模式提示）— 由调用方在外部注入
-        // 层5.5: 回复多样性约束（防止 AI 回复模式固化）
         let diversity_hint = Self::build_diversity_hint(&non_system);
         if !diversity_hint.is_empty() {
             enhanced_messages.push(Message {
@@ -1254,9 +1056,6 @@ impl ChatEngine {
         enhanced_messages
     }
 
-    /// 分析最近的 AI 回复模式，生成多样性约束提示
-    /// 使用回复指纹系统检测模式固化，生成具体的反公式化建议
-    /// 检测维度：开头模式、结尾模式、长度、段落结构、情感基调、动作描写、列表格式
     fn build_diversity_hint(recent_messages: &[&Message]) -> String {
         let ai_messages: Vec<&&Message> = recent_messages
             .iter()
@@ -1267,7 +1066,6 @@ impl ChatEngine {
             return String::new();
         }
 
-        // 使用回复指纹系统进行结构化分析
         let fingerprints: Vec<super::memory_engine::ResponseFingerprint> = ai_messages
             .iter()
             .rev()
@@ -1303,11 +1101,6 @@ impl ChatEngine {
         hint
     }
 
-    /// 构建“真人感 + 内容密度 + 强上下文联系”的系统提示
-    /// 目标：
-    /// 1) 避免模板化、客服化回复
-    /// 2) 根据用户输入复杂度动态控制回复长度
-    /// 3) 保证至少锚定一个当前消息细节 + 一个历史上下文线索
     fn build_humanization_hint(
         user_content: &str,
         recent_messages: &[&Message],
@@ -1364,7 +1157,6 @@ impl ChatEngine {
         ];
         let has_playful = playful_keywords.iter().any(|k| lower.contains(k));
 
-        // 分析最近AI回复的结构模式，生成针对性的变化指导
         let ai_recent: Vec<&&Message> = recent_messages
             .iter()
             .filter(|m| m.role == MessageRole::Assistant)
@@ -1382,7 +1174,6 @@ impl ChatEngine {
                 .split('\n')
                 .filter(|p| !p.trim().is_empty())
                 .count();
-            // 生成与上次结构不同的建议
             if last_ends_question {
                 structure_guide.push_str("上次你用问句结尾了，这次换个收束方式。");
             }
@@ -1403,7 +1194,6 @@ impl ChatEngine {
             .iter()
             .any(|g| user_content.contains(g));
 
-        // 根据场景动态构建回复节奏指导
         let rhythm_guide = if is_brief {
             "对方只说了几个字，你也不需要长篇大论。\
              一句话、一个动作、一个表情就够了。"
@@ -1419,7 +1209,6 @@ impl ChatEngine {
             "自然对话。长短随心，像和朋友在微信上聊天。"
         };
 
-        // 根据场景动态构建长度和结构建议
         let (length_rule, structure_rule) = match message_type {
             MessageType::Say => {
                 if has_deep_intent || user_len >= 80 {
@@ -1497,16 +1286,6 @@ impl ChatEngine {
         )
     }
 
-    /// Send a message: validate → detect type → persist user msg → build context →
-    /// 三级模型管线（长上下文蒸馏+推理+对话）→ persist assistant msg → check memory.
-    ///
-    /// 三级模型管线（enable_thinking=true 时）：
-    ///   Phase 0: GLM-4-LONG 长上下文蒸馏（仅在上下文超长时触发）
-    ///   Phase 1: GLM-4-AIR 深度推理 → 输出思考链（ThinkingDelta）+ 分析结论
-    ///   Phase 2: 将分析结论注入上下文 → GLM-4.7 生成自然对话回复（ContentDelta）
-    ///
-    /// 单模型模式（enable_thinking=false 时）：
-    ///   直接使用 chat_model 生成对话回复
     pub async fn send_message(
         &self,
         conversation_id: &str,
@@ -1518,7 +1297,6 @@ impl ChatEngine {
     ) -> Result<(), ChatError> {
         Self::validate_message(content)?;
 
-        // 自动检测 say/do 类型
         let message_type = Self::detect_message_type(content);
 
         let user_msg = Message {
@@ -1533,23 +1311,19 @@ impl ChatEngine {
         self.conversation_store
             .add_message(conversation_id, user_msg)?;
 
-        // 增加轮次计数
         self.conversation_store
             .increment_turn_count(conversation_id)?;
 
         let conv = self.conversation_store.load_conversation(conversation_id)?;
 
-        // 加载记忆索引
         let memory_summaries = self
             .memory_engine
             .load_memory_index(conversation_id)
             .unwrap_or_default();
 
-        // 构建上下文增强的消息列表
         let mut enhanced_messages =
             Self::build_context_enhanced_messages(&conv, content, &memory_summaries);
 
-        // 注入 say/do 模式提示（插入到最后一条用户消息之前，确保用户消息是最后一条）
         let style_hint = SayDoDetector::build_style_prompt(&message_type);
         let style_msg = Message {
             id: String::new(),
@@ -1560,7 +1334,6 @@ impl ChatEngine {
             timestamp: 0,
             message_type: MessageType::Say,
         };
-        // 找到最后一条用户消息的位置，将 style hint 插入到它之前
         let last_user_idx = enhanced_messages
             .iter()
             .rposition(|m| m.role == MessageRole::User);
@@ -1595,12 +1368,9 @@ impl ChatEngine {
             enhanced_messages.push(quality_msg);
         }
 
-        // ══ 四级模型管线：知识检索 → 长上下文蒸馏 → 深度推理 → 自然对话 ══
         let (full_content, full_thinking) = if enable_thinking {
-            // ── Phase 0.3: 本地知识库检索（纯本地，零延迟）──
             self.retrieve_knowledge_context(conversation_id, content, &mut enhanced_messages);
 
-            // ── Phase 0.4: 读取已蒸馏的核心状态（若存在）──
             if let Ok(Some(distilled_state)) =
                 self.memory_engine.load_distilled_state(conversation_id)
             {
@@ -1628,7 +1398,6 @@ impl ChatEngine {
                 }
             }
 
-            // ── Phase 0.5: 评估上下文复杂度，决定是否需要 GLM-4-LONG ──
             let memory_summaries_for_assess = self
                 .memory_engine
                 .load_memory_index(conversation_id)
@@ -1636,7 +1405,6 @@ impl ChatEngine {
             let (needs_long_context, _total_tokens) =
                 Self::assess_context_needs(&enhanced_messages, &memory_summaries_for_assess);
 
-            // ── Phase 0.7: 长上下文蒸馏（GLM-4-LONG，仅在上下文超长时触发）──
             if needs_long_context {
                 let distilled = self
                     .request_long_context_distillation(
@@ -1698,7 +1466,6 @@ impl ChatEngine {
                 }
             }
 
-            // ── Phase 1: 推理模型（GLM-4-AIR）知识增强深度分析 ──
             let (mut reasoning_conclusion, mut thinking_text) = self
                 .request_enhanced_reasoning(
                     thinking_model,
@@ -1709,7 +1476,6 @@ impl ChatEngine {
                 )
                 .await;
 
-            // 增强推理失败时回退到基础推理链路，确保该能力在生产链路中可用
             if reasoning_conclusion.trim().is_empty() {
                 let (fallback_conclusion, fallback_thinking) = self
                     .request_reasoning(thinking_model, &enhanced_messages, &on_event)
@@ -1722,7 +1488,6 @@ impl ChatEngine {
                 }
             }
 
-            // ── Phase 2: 将推理结论注入上下文，供对话模型参考 ──
             if !reasoning_conclusion.trim().is_empty() {
                 let reasoning_msg = Message {
                     id: String::new(),
@@ -1744,7 +1509,6 @@ impl ChatEngine {
                     timestamp: 0,
                     message_type: MessageType::Say,
                 };
-                // 插入到最后一条用户消息之前
                 let last_user_idx = enhanced_messages
                     .iter()
                     .rposition(|m| m.role == MessageRole::User);
@@ -1755,21 +1519,17 @@ impl ChatEngine {
                 }
             }
 
-            // ── Phase 3: 对话模型（GLM-4.7）生成自然回复 ──
-            // 对话模型始终关闭思考，由推理模型专责思考
             let (content, _) = self
                 .request_with_fallback(chat_model, false, &enhanced_messages, &on_event)
                 .await?;
 
             (content, thinking_text)
         } else {
-            // ── 单模型模式也注入知识库 ──
             self.retrieve_knowledge_context(conversation_id, content, &mut enhanced_messages);
             self.request_with_fallback(chat_model, false, &enhanced_messages, &on_event)
                 .await?
         };
 
-        // 如果 AI 返回了空内容（已经过多级降级重试），报告最终错误
         if full_content.trim().is_empty() {
             on_event(ChatStreamEvent::Error(
                 "AI 暂时无法生成回复，已自动尝试多种方式均未成功。请重试或缩短之前的对话。"
@@ -1797,18 +1557,14 @@ impl ChatEngine {
         self.conversation_store
             .add_message(conversation_id, assistant_msg)?;
 
-        // Send Done after message is persisted so Flutter reloads the saved data
         on_event(ChatStreamEvent::Done);
 
-        // ── 后台任务：异步提取事实存入知识库 ──
         self.extract_and_store_facts(conversation_id, &on_event)
             .await;
 
         Ok(())
     }
 
-    /// 重新生成AI回复：不添加用户消息，直接基于现有对话上下文重新请求AI
-    /// 同样遵循三级模型管线：GLM-4-LONG蒸馏→GLM-4-AIR推理→GLM-4.7对话
     pub async fn regenerate_response(
         &self,
         conversation_id: &str,
@@ -1819,7 +1575,6 @@ impl ChatEngine {
     ) -> Result<(), ChatError> {
         let conv = self.conversation_store.load_conversation(conversation_id)?;
 
-        // 找到最后一条用户消息的内容（用于构建上下文）
         let last_user_content = conv
             .messages
             .iter()
@@ -1836,17 +1591,14 @@ impl ChatEngine {
 
         let message_type = Self::detect_message_type(&last_user_content);
 
-        // 加载记忆索引
         let memory_summaries = self
             .memory_engine
             .load_memory_index(conversation_id)
             .unwrap_or_default();
 
-        // 构建上下文增强的消息列表
         let mut enhanced_messages =
             Self::build_context_enhanced_messages(&conv, &last_user_content, &memory_summaries);
 
-        // 注入 say/do 模式提示
         let style_hint = SayDoDetector::build_style_prompt(&message_type);
         let style_msg = Message {
             id: String::new(),
@@ -1891,16 +1643,13 @@ impl ChatEngine {
             enhanced_messages.push(quality_msg);
         }
 
-        // ══ 四级模型管线（与 send_message 相同逻辑）══
         let (full_content, full_thinking) = if enable_thinking {
-            // ── Phase 0.3: 本地知识库检索 ──
             self.retrieve_knowledge_context(
                 conversation_id,
                 &last_user_content,
                 &mut enhanced_messages,
             );
 
-            // ── Phase 0.4: 读取已蒸馏的核心状态（若存在）──
             if let Ok(Some(distilled_state)) =
                 self.memory_engine.load_distilled_state(conversation_id)
             {
@@ -1928,7 +1677,6 @@ impl ChatEngine {
                 }
             }
 
-            // ── Phase 0.5: 评估上下文复杂度 ──
             let memory_summaries_for_assess = self
                 .memory_engine
                 .load_memory_index(conversation_id)
@@ -1936,7 +1684,6 @@ impl ChatEngine {
             let (needs_long_context, _total_tokens) =
                 Self::assess_context_needs(&enhanced_messages, &memory_summaries_for_assess);
 
-            // ── Phase 0.7: 长上下文蒸馏（GLM-4-LONG，仅在需要时触发）──
             if needs_long_context {
                 let distilled = self
                     .request_long_context_distillation(
@@ -1998,7 +1745,6 @@ impl ChatEngine {
                 }
             }
 
-            // ── Phase 1: 推理模型（GLM-4-AIR）知识增强深度分析 ──
             let (mut reasoning_conclusion, mut thinking_text) = self
                 .request_enhanced_reasoning(
                     thinking_model,
@@ -2009,7 +1755,6 @@ impl ChatEngine {
                 )
                 .await;
 
-            // 增强推理失败时回退到基础推理链路，确保该能力在生产链路中可用
             if reasoning_conclusion.trim().is_empty() {
                 let (fallback_conclusion, fallback_thinking) = self
                     .request_reasoning(thinking_model, &enhanced_messages, &on_event)
@@ -2022,7 +1767,6 @@ impl ChatEngine {
                 }
             }
 
-            // ── Phase 2: 将推理结论注入上下文 ──
             if !reasoning_conclusion.trim().is_empty() {
                 let reasoning_msg = Message {
                     id: String::new(),
@@ -2054,14 +1798,12 @@ impl ChatEngine {
                 }
             }
 
-            // ── Phase 3: 对话模型（GLM-4.7）生成自然回复 ──
             let (content, _) = self
                 .request_with_fallback(chat_model, false, &enhanced_messages, &on_event)
                 .await?;
 
             (content, thinking_text)
         } else {
-            // ── 单模型模式也注入知识库 ──
             self.retrieve_knowledge_context(
                 conversation_id,
                 &last_user_content,
@@ -2071,7 +1813,6 @@ impl ChatEngine {
                 .await?
         };
 
-        // 如果 AI 返回了空内容（已经过多级降级重试），报告最终错误
         if full_content.trim().is_empty() {
             on_event(ChatStreamEvent::Error(
                 "AI 暂时无法生成回复，已自动尝试多种方式均未成功。请重试或缩短之前的对话。"
@@ -2099,16 +1840,11 @@ impl ChatEngine {
         self.conversation_store
             .add_message(conversation_id, assistant_msg)?;
 
-        // Send Done after message is persisted so Flutter reloads the saved data
         on_event(ChatStreamEvent::Done);
 
         Ok(())
     }
 
-    /// 执行记忆总结（由外部调用，在 send_message 完成后异步触发）
-    /// 采用双阶段验证：
-    ///   阶段1: 使用总结模型生成摘要
-    ///   阶段2: 使用验证 prompt 检查核心事实完整性（当已有摘要时）
     pub async fn summarize_memory(
         &self,
         conversation_id: &str,
@@ -2120,7 +1856,6 @@ impl ChatEngine {
             return Ok(None);
         }
 
-        // 获取需要总结的消息范围
         let turn_start = if conv.turn_count > 10 {
             conv.turn_count - 10 + 1
         } else {
@@ -2128,7 +1863,6 @@ impl ChatEngine {
         };
         let turn_end = conv.turn_count;
 
-        // 获取最近 20 条消息用于总结
         let recent_messages: Vec<Message> = conv
             .messages
             .iter()
@@ -2146,15 +1880,12 @@ impl ChatEngine {
             .load_memory_index(conversation_id)
             .unwrap_or_default();
 
-        // 动态选择总结模型
         let summary_model = if self.provider.id == "zhipu" {
             Self::choose_summary_model(&conv.messages)
         } else {
             self.auxiliary_model.as_str()
         };
 
-        // ── 阶段1: 生成摘要 ──
-        // 当已有多段摘要时，使用长摘要整合 prompt；否则使用标准 prompt
         let prompt = if existing_summaries.len() >= 3 {
             MemoryEngine::build_long_summary_prompt(&existing_summaries, &recent_messages)
         } else {
@@ -2194,7 +1925,6 @@ impl ChatEngine {
         let (summary_text, _) =
             StreamingHandler::stream_chat(&self.provider, request_body, &on_event).await?;
 
-        // 解析总结结果
         let parsed = match Self::parse_summary_json(&summary_text) {
             Ok(p) => p,
             Err(_) => return Ok(None),
@@ -2202,7 +1932,6 @@ impl ChatEngine {
 
         let (final_summary, mut final_core_facts) = parsed;
 
-        // ── 阶段2: 核心事实完整性验证（当已有摘要时） ──
         if !existing_summaries.is_empty() {
             let original_facts: Vec<String> = existing_summaries
                 .iter()
@@ -2239,15 +1968,9 @@ impl ChatEngine {
             let verify_body =
                 Self::build_request_body(&verify_messages, &self.auxiliary_model, false);
 
-            // 验证阶段的事件不传递给前端（静默执行）
-            if let Ok((verify_text, _)) = StreamingHandler::stream_chat(
-                &self.provider,
-                verify_body,
-                |_| {}, // 静默，不向前端发送验证阶段的流事件
-            )
-            .await
+            if let Ok((verify_text, _)) =
+                StreamingHandler::stream_chat(&self.provider, verify_body, |_| {}).await
             {
-                // 尝试解析验证结果
                 if let Some(start) = verify_text.find('{') {
                     if let Some(end) = verify_text.rfind('}') {
                         if let Ok(verify_json) =
@@ -2259,7 +1982,6 @@ impl ChatEngine {
                                 .unwrap_or(true);
 
                             if !is_valid {
-                                // 使用修正后的核心事实
                                 if let Some(corrected) = verify_json
                                     .get("corrected_core_facts")
                                     .and_then(|v| v.as_array())
@@ -2279,7 +2001,6 @@ impl ChatEngine {
             }
         }
 
-        // 构建最终记忆摘要
         let keywords = MemoryEngine::extract_keywords(&final_summary);
         let mut all_keywords = keywords;
         for fact in &final_core_facts {
@@ -2502,10 +2223,8 @@ mod tests {
     #[test]
     fn test_build_request_body_thinking_disabled_explicitly() {
         let messages = vec![make_message(MessageRole::User, "hi")];
-        // glm-4.7 with thinking disabled should explicitly send disabled
         let body = ChatEngine::build_request_body(&messages, "glm-4.7", false);
         assert_eq!(body["thinking"], serde_json::json!({"type": "disabled"}));
-        // glm-4.7-flash with thinking disabled
         let body = ChatEngine::build_request_body(&messages, "glm-4.7-flash", false);
         assert_eq!(body["thinking"], serde_json::json!({"type": "disabled"}));
     }
@@ -2513,11 +2232,9 @@ mod tests {
     #[test]
     fn test_build_request_body_thinking_for_glm4_7_is_forced_disabled() {
         let messages = vec![make_message(MessageRole::User, "think hard")];
-        // GLM-4.7 with enable_thinking=true should now work (per docs)
         let body = ChatEngine::build_request_body(&messages, "glm-4.7", true);
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 16384);
-        // GLM-4.7 with enable_thinking=false should be disabled
         let body = ChatEngine::build_request_body(&messages, "glm-4.7", false);
         assert_eq!(body["thinking"], serde_json::json!({"type": "disabled"}));
     }
@@ -2597,16 +2314,12 @@ mod tests {
 
     #[test]
     fn test_should_enable_thinking() {
-        // GLM-4.7 now supports thinking (per docs)
         assert!(ChatEngine::should_enable_thinking("glm-4.7", true));
         assert!(!ChatEngine::should_enable_thinking("glm-4.7", false));
-        // GLM-4-AIR: reasoning model
         assert!(ChatEngine::should_enable_thinking("glm-4-air", true));
         assert!(!ChatEngine::should_enable_thinking("glm-4-air", false));
-        // Flash: no thinking
         assert!(!ChatEngine::should_enable_thinking("glm-4.7-flash", true));
         assert!(!ChatEngine::should_enable_thinking("glm-4.7-flash", false));
-        // Others: no thinking
         assert!(!ChatEngine::should_enable_thinking("glm-4-long", true));
     }
 

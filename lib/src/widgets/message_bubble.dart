@@ -291,7 +291,6 @@ class _MessageBubbleState extends State<MessageBubble> {
 
     final actions = <Widget>[];
 
-    // 复制按钮 - 始终显示
     actions.add(
       _ActionChip(
         icon: Icons.copy_rounded,
@@ -361,7 +360,6 @@ class _MessageBubbleState extends State<MessageBubble> {
 
     if (actions.isEmpty) return const SizedBox.shrink();
 
-    // 始终显示操作栏，不依赖 hover/tap 切换
     return Padding(
       padding: const EdgeInsets.only(top: 4),
       child: Wrap(spacing: 6, runSpacing: 4, children: actions),
@@ -562,10 +560,8 @@ class _MessageBubbleState extends State<MessageBubble> {
               ? CrossAxisAlignment.end
               : CrossAxisAlignment.start,
           children: [
-            // 思考过程（仅 AI 消息）
             if (!isUser) _buildThinkingSection(theme),
 
-            // 编辑视图 或 消息气泡
             if (_isEditing)
               _buildEditingView(theme)
             else
@@ -642,7 +638,6 @@ class _MessageBubbleState extends State<MessageBubble> {
                       ),
               ),
 
-            // 时间 + 操作栏
             Padding(
               padding: const EdgeInsets.only(top: 4, left: 4, right: 4),
               child: Row(
@@ -670,7 +665,6 @@ class _MessageBubbleState extends State<MessageBubble> {
               ),
             ),
 
-            // 操作按钮栏 - 始终显示
             _buildActionBar(theme),
           ],
         ),

@@ -1,11 +1,9 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
-import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:archive/archive_io.dart';
-import 'package:audioplayers/audioplayers.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
@@ -17,14 +15,12 @@ class _SpeechAsset {
   final String url;
   final int size;
   final String sha256;
-  final bool archive;
 
   const _SpeechAsset({
     required this.fileName,
     required this.url,
     required this.size,
     required this.sha256,
-    this.archive = false,
   });
 
   List<String> get downloadUrls => [
@@ -35,79 +31,27 @@ class _SpeechAsset {
 }
 
 class SherpaSpeechService extends ChangeNotifier {
-  SherpaSpeechService._() {
-    _playerCompleteSubscription = _player.onPlayerComplete.listen((_) {
-      speaking = false;
-      playbackAmplitude = 0;
-      playbackProgress = 1;
-      notifyListeners();
-    });
-    _playerDurationSubscription = _player.onDurationChanged.listen((duration) {
-      _playbackDuration = duration;
-    });
-    _playerPositionSubscription = _player.onPositionChanged.listen((position) {
-      final frame = position.inMilliseconds ~/ amplitudeFrameMilliseconds;
-      final nextAmplitude = frame >= 0 && frame < _amplitudeEnvelope.length
-          ? _amplitudeEnvelope[frame]
-          : 0.0;
-      final durationMs = _playbackDuration.inMilliseconds;
-      playbackProgress = durationMs <= 0
-          ? 0
-          : (position.inMilliseconds / durationMs).clamp(0, 1);
-      playbackAmplitude = nextAmplitude;
-      notifyListeners();
-    });
-  }
+  SherpaSpeechService._();
 
   static final instance = SherpaSpeechService._();
-
-  static const engineName = 'sherpa-onnx 端侧语音';
+  static const engineName = 'sherpa-onnx 端侧识别';
   static const engineLicense = 'Apache-2.0';
   static const asrModelName = 'SenseVoice 2025 INT8';
-  static const ttsModelName = 'Matcha 中英双语';
-  static const amplitudeFrameMilliseconds = 20;
-
+  static const asrArchiveBytes = 165783878;
   static const _asrDirectoryName =
       'sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09';
-  static const _ttsDirectoryName = 'matcha-icefall-zh-en';
-  static const _vocoderFileName = 'vocos-16khz-univ.onnx';
-
   static const _asrAsset = _SpeechAsset(
     fileName: '$_asrDirectoryName.tar.bz2',
     url:
         'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/'
         '$_asrDirectoryName.tar.bz2',
-    size: 165783878,
+    size: asrArchiveBytes,
     sha256: '7305f7905bfcf77fa0b39388a313f3da35c68d971661a65475b56fb2162c8e63',
-    archive: true,
-  );
-
-  static const _ttsAsset = _SpeechAsset(
-    fileName: '$_ttsDirectoryName.tar.bz2',
-    url:
-        'https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/'
-        '$_ttsDirectoryName.tar.bz2',
-    size: 79033838,
-    sha256: '271b804af570400d3bcdcb53bf6e53cc9f75180ee763b9f13eb5eaf2b0d086ef',
-    archive: true,
-  );
-
-  static const _vocoderAsset = _SpeechAsset(
-    fileName: _vocoderFileName,
-    url:
-        'https://github.com/k2-fsa/sherpa-onnx/releases/download/'
-        'vocoder-models/$_vocoderFileName',
-    size: 53882848,
-    sha256: 'b599142a1fb8ff03de3e84ac35ff537c619e56f4267a6fe894851a42844acf9e',
   );
 
   final AudioRecorder _recorder = AudioRecorder();
-  final AudioPlayer _player = AudioPlayer();
   final StreamController<String> _recognitionController =
       StreamController<String>.broadcast();
-  StreamSubscription<void>? _playerCompleteSubscription;
-  StreamSubscription<Duration>? _playerDurationSubscription;
-  StreamSubscription<Duration>? _playerPositionSubscription;
   StreamSubscription<Uint8List>? _recordingSubscription;
   Timer? _recordingTimeout;
   BytesBuilder? _recordedAudio;
@@ -116,16 +60,10 @@ class SherpaSpeechService extends ChangeNotifier {
 
   bool initialized = false;
   bool asrReady = false;
-  bool ttsReady = false;
   bool downloading = false;
   bool extracting = false;
   bool listening = false;
   bool recognizing = false;
-  bool speaking = false;
-  double playbackAmplitude = 0;
-  double playbackProgress = 0;
-  Duration _playbackDuration = Duration.zero;
-  List<double> _amplitudeEnvelope = const [];
   int downloadedBytes = 0;
   int totalDownloadBytes = 0;
   String operationLabel = '';
@@ -151,14 +89,6 @@ class SherpaSpeechService extends ChangeNotifier {
     '${(await _rootDirectory()).path}${Platform.pathSeparator}$_asrDirectoryName',
   );
 
-  Future<Directory> _ttsDirectory() async => Directory(
-    '${(await _rootDirectory()).path}${Platform.pathSeparator}$_ttsDirectoryName',
-  );
-
-  Future<File> _vocoderFile() async => File(
-    '${(await _rootDirectory()).path}${Platform.pathSeparator}$_vocoderFileName',
-  );
-
   Future<void> initialize() async {
     if (initialized || !supported) {
       initialized = true;
@@ -166,10 +96,10 @@ class SherpaSpeechService extends ChangeNotifier {
     }
     try {
       asrReady = await _validateAsr();
-      ttsReady = await _validateTts();
+      await _deleteRemovedTtsAssets();
       lastError = null;
     } catch (error) {
-      lastError = '无法检查 sherpa-onnx 语音模型: $error';
+      lastError = '无法检查 sherpa-onnx 识别模型: $error';
     } finally {
       initialized = true;
       notifyListeners();
@@ -186,22 +116,29 @@ class SherpaSpeechService extends ChangeNotifier {
         ).exists();
   }
 
-  Future<bool> _validateTts() async {
-    final directory = await _ttsDirectory();
-    return await File(
-          '${directory.path}${Platform.pathSeparator}model-steps-3.onnx',
-        ).exists() &&
-        await File(
-          '${directory.path}${Platform.pathSeparator}tokens.txt',
-        ).exists() &&
-        await File(
-          '${directory.path}${Platform.pathSeparator}lexicon.txt',
-        ).exists() &&
-        await (await _vocoderFile()).exists();
+  Future<void> _deleteRemovedTtsAssets() async {
+    final root = await _rootDirectory();
+    final targets = <FileSystemEntity>[
+      Directory(
+        '${root.path}${Platform.pathSeparator}kokoro-int8-multi-lang-v1_1',
+      ),
+      File(
+        '${root.path}${Platform.pathSeparator}kokoro-int8-multi-lang-v1_1.tar.bz2',
+      ),
+      File(
+        '${root.path}${Platform.pathSeparator}kokoro-int8-multi-lang-v1_1.tar.bz2.part',
+      ),
+      File('${root.path}${Platform.pathSeparator}tts-preferences.json'),
+      Directory('${root.path}${Platform.pathSeparator}matcha-icefall-zh-en'),
+      File('${root.path}${Platform.pathSeparator}vocos-16khz-univ.onnx'),
+    ];
+    for (final target in targets) {
+      if (await target.exists()) await target.delete(recursive: true);
+    }
   }
 
   Future<void> downloadAsr() async {
-    if (!supported) throw UnsupportedError('当前平台不支持 sherpa-onnx 语音');
+    if (!supported) throw UnsupportedError('当前平台不支持 sherpa-onnx 语音识别');
     if (downloading || extracting) return;
     await _downloadAndInstallArchive(
       _asrAsset,
@@ -211,25 +148,6 @@ class SherpaSpeechService extends ChangeNotifier {
     if (_cancelRequested) return;
     asrReady = await _validateAsr();
     if (!asrReady) throw const FormatException('SenseVoice 模型文件不完整');
-    notifyListeners();
-  }
-
-  Future<void> downloadTts() async {
-    if (!supported) throw UnsupportedError('当前平台不支持 sherpa-onnx 语音');
-    if (downloading || extracting) return;
-    await _downloadAndInstallArchive(
-      _ttsAsset,
-      expectedDirectoryName: _ttsDirectoryName,
-      label: '正在下载 Matcha',
-    );
-    if (_cancelRequested) return;
-    try {
-      await _downloadAsset(_vocoderAsset, label: '正在下载 Matcha 声码器');
-    } on _SpeechDownloadCancelled {
-      return;
-    }
-    ttsReady = await _validateTts();
-    if (!ttsReady) throw const FormatException('Matcha 模型文件不完整');
     notifyListeners();
   }
 
@@ -249,7 +167,6 @@ class SherpaSpeechService extends ChangeNotifier {
     operationLabel = label;
     lastError = null;
     notifyListeners();
-
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 20);
     IOSink? sink;
@@ -282,7 +199,6 @@ class SherpaSpeechService extends ChangeNotifier {
               ? label
               : '$label（备用源 $sourceIndex）';
           notifyListeners();
-
           final request = await client
               .getUrl(Uri.parse(asset.downloadUrls[sourceIndex]))
               .timeout(const Duration(seconds: 20));
@@ -312,9 +228,8 @@ class SherpaSpeechService extends ChangeNotifier {
           } else if (response.statusCode == HttpStatus.ok) {
             if (existingBytes > 0 && await partial.exists()) {
               await partial.delete();
-              existingBytes = 0;
-              downloadedBytes = 0;
             }
+            downloadedBytes = 0;
           } else {
             await response.drain<void>();
             throw HttpException('语音模型下载返回 HTTP ${response.statusCode}');
@@ -393,7 +308,7 @@ class SherpaSpeechService extends ChangeNotifier {
       if (await staging.exists()) await staging.delete(recursive: true);
       await staging.create(recursive: true);
       extracting = true;
-      operationLabel = '正在安装语音模型';
+      operationLabel = '正在安装语音识别模型';
       notifyListeners();
       try {
         await Isolate.run(() => extractFileToDisk(archive.path, staging.path));
@@ -401,7 +316,7 @@ class SherpaSpeechService extends ChangeNotifier {
           '${staging.path}${Platform.pathSeparator}$expectedDirectoryName',
         );
         if (!await extracted.exists()) {
-          throw const FormatException('语音模型归档目录无效');
+          throw const FormatException('语音识别模型归档目录无效');
         }
         final destination = Directory(
           '${root.path}${Platform.pathSeparator}$expectedDirectoryName',
@@ -423,7 +338,7 @@ class SherpaSpeechService extends ChangeNotifier {
 
   void cancelDownload() {
     _cancelRequested = true;
-    _downloadRequest?.abort(const HttpException('用户取消语音模型下载'));
+    _downloadRequest?.abort(const HttpException('用户取消语音识别模型下载'));
   }
 
   Future<void> deleteAsr() async {
@@ -434,23 +349,11 @@ class SherpaSpeechService extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> deleteTts() async {
-    if (speaking) await stopSpeaking();
-    final directory = await _ttsDirectory();
-    final vocoder = await _vocoderFile();
-    if (await directory.exists()) await directory.delete(recursive: true);
-    if (await vocoder.exists()) await vocoder.delete();
-    ttsReady = false;
-    notifyListeners();
-  }
-
   Future<void> startListening() async {
     await initialize();
     if (!asrReady) throw StateError('请先下载 SenseVoice 离线识别模型');
     if (listening || recognizing) return;
-    if (!await _recorder.hasPermission()) {
-      throw StateError('麦克风权限未授予');
-    }
+    if (!await _recorder.hasPermission()) throw StateError('麦克风权限未授予');
     _recordedAudio = BytesBuilder(copy: false);
     final stream = await _recorder.startStream(
       const RecordConfig(
@@ -490,7 +393,6 @@ class SherpaSpeechService extends ChangeNotifier {
       notifyListeners();
       return null;
     }
-
     recognizing = true;
     notifyListeners();
     try {
@@ -513,56 +415,12 @@ class SherpaSpeechService extends ChangeNotifier {
     }
   }
 
-  Future<void> speak(String text) async {
-    await initialize();
-    if (!ttsReady) throw StateError('请先下载 Matcha 离线语音模型');
-    if (text.trim().isEmpty) return;
-    final directory = await _ttsDirectory();
-    final vocoder = await _vocoderFile();
-    final cache = await getTemporaryDirectory();
-    final output = File(
-      '${cache.path}${Platform.pathSeparator}talk2u-sherpa-tts.wav',
-    );
-    speaking = false;
-    playbackAmplitude = 0;
-    playbackProgress = 0;
-    _playbackDuration = Duration.zero;
-    lastError = null;
-    notifyListeners();
-    try {
-      _amplitudeEnvelope = await Isolate.run(
-        () => _generateMatcha(text, directory.path, vocoder.path, output.path),
-      );
-      speaking = true;
-      notifyListeners();
-      await _player.play(DeviceFileSource(output.path));
-    } catch (error) {
-      speaking = false;
-      lastError = error.toString();
-      notifyListeners();
-      rethrow;
-    }
-  }
-
-  Future<void> stopSpeaking() async {
-    await _player.stop();
-    speaking = false;
-    playbackAmplitude = 0;
-    playbackProgress = 0;
-    _amplitudeEnvelope = const [];
-    notifyListeners();
-  }
-
   @override
   void dispose() {
     _recordingTimeout?.cancel();
     _recordingSubscription?.cancel();
-    _playerCompleteSubscription?.cancel();
-    _playerDurationSubscription?.cancel();
-    _playerPositionSubscription?.cancel();
     _recognitionController.close();
     _recorder.dispose();
-    _player.dispose();
     super.dispose();
   }
 }
@@ -575,8 +433,8 @@ String _recognizeSenseVoice(Uint8List pcm, String model, String tokens) {
   sherpa.initBindings();
   final samples = Float32List(pcm.length ~/ 2);
   final data = ByteData.sublistView(pcm);
-  for (var i = 0; i < samples.length; i++) {
-    samples[i] = data.getInt16(i * 2, Endian.little) / 32768.0;
+  for (var index = 0; index < samples.length; index++) {
+    samples[index] = data.getInt16(index * 2, Endian.little) / 32768.0;
   }
   final recognizer = sherpa.OfflineRecognizer(
     sherpa.OfflineRecognizerConfig(
@@ -605,82 +463,4 @@ String _recognizeSenseVoice(Uint8List pcm, String model, String tokens) {
     stream.free();
     recognizer.free();
   }
-}
-
-List<double> _generateMatcha(
-  String text,
-  String modelDirectory,
-  String vocoder,
-  String output,
-) {
-  sherpa.initBindings();
-  String file(String name) => '$modelDirectory${Platform.pathSeparator}$name';
-  final tts = sherpa.OfflineTts(
-    sherpa.OfflineTtsConfig(
-      model: sherpa.OfflineTtsModelConfig(
-        matcha: sherpa.OfflineTtsMatchaModelConfig(
-          acousticModel: file('model-steps-3.onnx'),
-          vocoder: vocoder,
-          lexicon: file('lexicon.txt'),
-          tokens: file('tokens.txt'),
-          dataDir: file('espeak-ng-data'),
-        ),
-        numThreads: 2,
-        debug: false,
-      ),
-      ruleFsts:
-          [file('phone-zh.fst'), file('date-zh.fst'), file('number-zh.fst')]
-              .map(File.new)
-              .where((item) => item.existsSync())
-              .map((item) => item.path)
-              .join(','),
-      maxNumSenetences: 1,
-    ),
-  );
-  try {
-    final audio = tts.generate(text: text, sid: 0, speed: 1.0);
-    if (audio.samples.isEmpty || audio.sampleRate <= 0) {
-      throw StateError('Matcha 没有生成音频');
-    }
-    if (!sherpa.writeWave(
-      filename: output,
-      samples: audio.samples,
-      sampleRate: audio.sampleRate,
-    )) {
-      throw FileSystemException('无法写入离线 TTS 音频', output);
-    }
-    return buildPcmAmplitudeEnvelope(
-      audio.samples,
-      audio.sampleRate,
-      frameMilliseconds: SherpaSpeechService.amplitudeFrameMilliseconds,
-    );
-  } finally {
-    tts.free();
-  }
-}
-
-@visibleForTesting
-List<double> buildPcmAmplitudeEnvelope(
-  Float32List samples,
-  int sampleRate, {
-  int frameMilliseconds = 20,
-}) {
-  if (samples.isEmpty || sampleRate <= 0 || frameMilliseconds <= 0) {
-    return const [];
-  }
-  final frameSamples = math.max(1, sampleRate * frameMilliseconds ~/ 1000);
-  final output = <double>[];
-  for (var start = 0; start < samples.length; start += frameSamples) {
-    final end = math.min(start + frameSamples, samples.length);
-    var sumSquares = 0.0;
-    for (var index = start; index < end; index++) {
-      final sample = samples[index].clamp(-1.0, 1.0).toDouble();
-      sumSquares += sample * sample;
-    }
-    final rms = math.sqrt(sumSquares / (end - start));
-    output.add(
-      ((rms - 0.015).clamp(0.0, 1.0) * 4.5).clamp(0.0, 1.0).toDouble(),
-    );
-  }
-  return List.unmodifiable(output);
 }

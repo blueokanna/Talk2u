@@ -31,7 +31,6 @@ class _ThinkingBlockState extends State<ThinkingBlock>
       parent: _controller,
       curve: Curves.easeOutCubic,
     );
-    // Auto-expand when streaming
     if (widget.isStreaming) {
       _isExpanded = true;
       _controller.value = 1.0;

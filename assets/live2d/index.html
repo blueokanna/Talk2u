@@ -32,23 +32,28 @@
       return true;
     };
 
-    const loadScript = (sources) => new Promise((resolve, reject) => {
+    const loadScript = (sources, timeoutMs = 15000) => new Promise((resolve, reject) => {
       const remaining = [...sources];
+      const failures = [];
       const next = () => {
         const source = remaining.shift();
-        if (!source) return reject(new Error('运行库加载失败'));
+        if (!source) {
+          return reject(new Error(`运行库加载失败: ${failures.join('; ')}`));
+        }
         const script = document.createElement('script');
         const timer = setTimeout(() => {
+          failures.push(`${source} 超时`);
           script.remove();
           next();
-        }, 15000);
+        }, timeoutMs);
         script.src = source;
         script.onload = () => {
           clearTimeout(timer);
           resolve(source);
         };
-        script.onerror = () => {
+        script.onerror = event => {
           clearTimeout(timer);
+          failures.push(`${source} ${event?.message || '请求失败'}`);
           script.remove();
           next();
         };
@@ -98,47 +103,97 @@
       }
     };
 
-    const discoverLipSyncIds = async (modelUrl, settings, avatarConfig) => {
-      const configured = avatarConfig?.lipSync?.parameterIds;
-      if (Array.isArray(configured) && configured.length) {
-        return [...new Set(configured.filter(Boolean).map(String))];
-      }
+    const uniqueStrings = values => [...new Set(values.filter(Boolean).map(String))];
 
+    const discoverLipSyncProfile = async (modelUrl, settings, avatarConfig) => {
+      const configured = Array.isArray(avatarConfig?.lipSync?.parameterIds)
+        ? avatarConfig.lipSync.parameterIds
+        : [];
+      const configuredVisemes = Array.isArray(avatarConfig?.lipSync?.visemeParameterIds)
+        ? avatarConfig.lipSync.visemeParameterIds
+        : [];
       const group = (settings.Groups || settings.groups || []).find(item =>
         normalize(item.Name || item.name) === 'lipsync');
       const groupIds = group && (group.Ids || group.ids);
-      if (Array.isArray(groupIds) && groupIds.length) {
-        return [...new Set(groupIds.filter(Boolean).map(String))];
-      }
-
+      const grouped = Array.isArray(groupIds) ? groupIds : [];
+      const cdiParameterIds = [];
+      const mouthOpenIds = [];
       const references = settings.FileReferences || settings.fileReferences || {};
       const displayInfo = references.DisplayInfo || references.displayInfo;
       if (displayInfo) {
         try {
           const cdi = await loadJson(siblingUrl(modelUrl, displayInfo));
           const parameters = cdi.Parameters || cdi.parameters || [];
-          const exactIds = new Set(['ParamMouthOpenY', 'ParamA']);
-          const candidates = parameters.filter(item => {
+          parameters.forEach(item => {
             const id = item.Id || item.id;
             const name = normalize(item.Name || item.name);
-            return exactIds.has(id) || name === 'mouthopen' || name === '嘴巴开合';
-          }).map(item => String(item.Id || item.id));
-          if (candidates.length) return [...new Set(candidates)];
-        } catch (_) {
-          // DisplayInfo is optional at runtime; model loading below remains authoritative.
-        }
+            if (!id) return;
+            cdiParameterIds.push(String(id));
+            if (id === 'ParamMouthOpenY' || name === 'mouthopen' || name === '嘴巴开合') {
+              mouthOpenIds.push(String(id));
+            }
+          });
+        } catch (_) {}
       }
-      return ['ParamMouthOpenY', 'ParamA'];
+      const cdiSet = new Set(cdiParameterIds);
+      const vowelOrder = ['ParamA', 'ParamI', 'ParamU', 'ParamE', 'ParamO'];
+      const discoveredVisemes = vowelOrder.filter(id => cdiSet.has(id));
+      const visemeParameterIds = uniqueStrings([
+        ...configuredVisemes,
+        ...discoveredVisemes,
+      ]).filter(id => vowelOrder.includes(id));
+      const openParameterIds = uniqueStrings([
+        ...configured,
+        ...grouped,
+        ...mouthOpenIds,
+      ]).filter(id => !visemeParameterIds.includes(id));
+      const mode = avatarConfig?.lipSync?.mode === 'viseme' || visemeParameterIds.length >= 3
+        ? 'viseme'
+        : 'open';
+      if (mode === 'viseme') {
+        return {
+          mode,
+          parameterIds: visemeParameterIds.length ? visemeParameterIds : ['ParamA'],
+          visemeParameterIds: visemeParameterIds.length ? visemeParameterIds : ['ParamA'],
+        };
+      }
+      const parameterIds = openParameterIds.length
+        ? openParameterIds
+        : ['ParamMouthOpenY', 'ParamA'];
+      return {mode, parameterIds, visemeParameterIds: []};
     };
 
     let model = null;
     let modelSettings = null;
     let avatarConfig = {};
     let lipSyncIds = [];
+    let lipSyncProfile = {mode: 'open', parameterIds: [], visemeParameterIds: []};
+    let coreParameterIds = new Set();
     let mouthTarget = 0;
     let mouthCurrent = 0;
     let speaking = false;
     let lastMouthSignalAt = 0;
+    let speechStartedAt = 0;
+    let activeCue = 'neutral';
+    let bodyBlend = 0;
+    let bodyPhase = Math.random() * Math.PI * 2;
+    const bodyState = {
+      angleX: 0,
+      angleY: 0,
+      angleZ: 0,
+      bodyX: 0,
+      bodyY: 0,
+      bodyZ: 0,
+      eyeX: 0,
+      eyeY: 0,
+      shoulder: 0,
+      armL: 0,
+      armR: 0,
+      forearmL: 0,
+      forearmR: 0,
+      handL: 0,
+      handR: 0,
+    };
     let expressionResetTimer = null;
     let naturalGazeTimer = null;
     let microExpressionTimer = null;
@@ -159,6 +214,180 @@
       return Number.isFinite(parsed)
         ? Math.max(minimum, Math.min(maximum, parsed))
         : fallback;
+    };
+
+    const speechBodyProfile = cue => {
+      const profiles = {
+        neutral: {tempo: 0.82, headX: 1.4, headY: 0.8, headZ: 1.0, bodyX: 0.7, bodyY: 0.5, bodyZ: 0.7, eyeX: 0.05, eyeY: 0.03, offsetY: 0, offsetZ: 0, pulse: 0.35},
+        talking: {tempo: 1.0, headX: 2.4, headY: 1.4, headZ: 1.8, bodyX: 1.3, bodyY: 0.9, bodyZ: 1.1, eyeX: 0.08, eyeY: 0.04, offsetY: 0, offsetZ: 0, pulse: 0.75},
+        talkingSoft: {tempo: 0.78, headX: 1.5, headY: 1.0, headZ: 1.2, bodyX: 0.8, bodyY: 0.6, bodyZ: 0.7, eyeX: 0.06, eyeY: 0.04, offsetY: -0.8, offsetZ: -0.5, pulse: 0.42},
+        emphasis: {tempo: 1.24, headX: 3.8, headY: 2.8, headZ: 3.0, bodyX: 2.0, bodyY: 1.6, bodyZ: 2.2, eyeX: 0.11, eyeY: 0.06, offsetY: 0.8, offsetZ: 0.8, pulse: 1.35},
+        thinking: {tempo: 0.64, headX: 1.4, headY: 1.0, headZ: 2.4, bodyX: 0.7, bodyY: 0.6, bodyZ: 1.0, eyeX: 0.10, eyeY: 0.06, offsetY: -2.2, offsetZ: -1.5, pulse: 0.28},
+        dramatic: {tempo: 0.9, headX: 3.2, headY: 2.0, headZ: 2.7, bodyX: 1.8, bodyY: 1.2, bodyZ: 1.8, eyeX: 0.10, eyeY: 0.06, offsetY: -0.4, offsetZ: 0.3, pulse: 1.0},
+        happy: {tempo: 1.18, headX: 3.4, headY: 2.4, headZ: 3.0, bodyX: 1.9, bodyY: 1.4, bodyZ: 1.7, eyeX: 0.10, eyeY: 0.05, offsetY: 1.2, offsetZ: 0.8, pulse: 1.2},
+        sad: {tempo: 0.58, headX: 1.1, headY: 0.8, headZ: 1.4, bodyX: 0.6, bodyY: 0.5, bodyZ: 0.8, eyeX: 0.04, eyeY: 0.03, offsetY: -3.2, offsetZ: -2.0, pulse: 0.2},
+        angry: {tempo: 1.34, headX: 2.8, headY: 1.8, headZ: 2.2, bodyX: 1.7, bodyY: 1.1, bodyZ: 2.0, eyeX: 0.08, eyeY: 0.04, offsetY: 1.0, offsetZ: 1.4, pulse: 1.15},
+        shy: {tempo: 0.68, headX: 1.3, headY: 0.8, headZ: 2.0, bodyX: 0.7, bodyY: 0.5, bodyZ: 0.8, eyeX: 0.07, eyeY: 0.04, offsetY: -2.6, offsetZ: -1.2, pulse: 0.3},
+        surprise: {tempo: 1.42, headX: 3.0, headY: 3.4, headZ: 2.6, bodyX: 1.6, bodyY: 1.8, bodyZ: 2.0, eyeX: 0.12, eyeY: 0.08, offsetY: 1.8, offsetZ: 1.0, pulse: 1.4},
+        greeting: {tempo: 1.12, headX: 3.0, headY: 2.0, headZ: 2.8, bodyX: 1.6, bodyY: 1.2, bodyZ: 1.5, eyeX: 0.09, eyeY: 0.05, offsetY: 0.8, offsetZ: 0.5, pulse: 1.0},
+        wave: {tempo: 1.16, headX: 3.2, headY: 2.0, headZ: 3.0, bodyX: 1.8, bodyY: 1.2, bodyZ: 1.6, eyeX: 0.09, eyeY: 0.05, offsetY: 0.8, offsetZ: 0.6, pulse: 1.05},
+        nod: {tempo: 0.92, headX: 1.2, headY: 3.2, headZ: 1.2, bodyX: 0.7, bodyY: 1.5, bodyZ: 0.8, eyeX: 0.05, eyeY: 0.05, offsetY: 0.3, offsetZ: 0, pulse: 0.8},
+        hug: {tempo: 0.72, headX: 1.8, headY: 1.2, headZ: 2.0, bodyX: 1.0, bodyY: 0.8, bodyZ: 1.0, eyeX: 0.06, eyeY: 0.04, offsetY: -0.8, offsetZ: -0.5, pulse: 0.45},
+      };
+      return profiles[cue] || profiles.talking;
+    };
+
+    const speechGestureProfile = cue => {
+      const profiles = {
+        neutral: {shoulder: 0.10, armL: 0.06, armR: 0.06, forearmL: 0.04, forearmR: 0.04},
+        talking: {shoulder: 0.30, armL: 0.22, armR: -0.18, forearmL: 0.16, forearmR: -0.13},
+        talkingSoft: {shoulder: 0.16, armL: 0.10, armR: -0.08, forearmL: 0.07, forearmR: -0.06},
+        emphasis: {shoulder: 0.58, armL: 0.48, armR: -0.42, forearmL: 0.40, forearmR: -0.34},
+        thinking: {shoulder: -0.12, armL: 0.12, armR: 0.26, forearmL: 0.08, forearmR: 0.30},
+        dramatic: {shoulder: 0.42, armL: 0.42, armR: -0.38, forearmL: 0.32, forearmR: -0.30},
+        happy: {shoulder: 0.55, armL: 0.46, armR: -0.46, forearmL: 0.38, forearmR: -0.38},
+        sad: {shoulder: -0.28, armL: -0.12, armR: 0.10, forearmL: -0.08, forearmR: 0.07},
+        angry: {shoulder: 0.45, armL: 0.34, armR: -0.34, forearmL: 0.26, forearmR: -0.26},
+        shy: {shoulder: -0.22, armL: 0.20, armR: -0.20, forearmL: 0.24, forearmR: -0.24},
+        surprise: {shoulder: 0.72, armL: 0.54, armR: -0.54, forearmL: 0.44, forearmR: -0.44},
+        greeting: {shoulder: 0.40, armL: 0.16, armR: 0.62, forearmL: 0.12, forearmR: 0.72},
+        wave: {shoulder: 0.46, armL: 0.10, armR: 0.82, forearmL: 0.08, forearmR: 0.92},
+        nod: {shoulder: 0.22, armL: 0.12, armR: -0.10, forearmL: 0.08, forearmR: -0.07},
+        hug: {shoulder: -0.10, armL: 0.60, armR: -0.60, forearmL: 0.68, forearmR: -0.68},
+      };
+      return profiles[cue] || profiles.talking;
+    };
+
+    const updateSpeechBody = (now, delta) => {
+      const behavior = avatarConfig?.naturalBehavior?.speechBody || {};
+      const enabled = behavior.enabled !== false;
+      const gain = finiteNumber(behavior.gain, 1, 0, 2);
+      const smoothing = finiteNumber(behavior.smoothing, 0.14, 0.03, 0.5);
+      const targetBlend = speaking && enabled ? gain * 1.18 : 0;
+      const blendRate = 1 - Math.pow(0.86, Math.max(0.1, Number(delta) || 1));
+      bodyBlend += (targetBlend - bodyBlend) * blendRate;
+      const profile = speechBodyProfile(activeCue);
+      const gesture = speechGestureProfile(activeCue);
+      const elapsed = Math.max(0, now - speechStartedAt) / 1000;
+      const phase = elapsed * profile.tempo + bodyPhase;
+      const energy = Math.max(0, Math.min(1, mouthCurrent));
+      const speechPulse = Math.sin(elapsed * 8.2 + bodyPhase) * energy * profile.pulse;
+      const gestureWave = Math.sin(elapsed * 1.42 + bodyPhase * 0.7);
+      const gestureAccent = Math.pow(Math.max(0, Math.sin(elapsed * 2.15 + bodyPhase)), 3);
+      const gestureEnergy = 0.55 + energy * 0.65;
+      const target = {
+        angleX: (Math.sin(phase * 1.13) * profile.headX + speechPulse * 0.35) * bodyBlend,
+        angleY: (profile.offsetY + Math.sin(phase * 0.71 + 1.3) * profile.headY + speechPulse) * bodyBlend,
+        angleZ: (profile.offsetZ + Math.sin(phase * 0.89 + 2.1) * profile.headZ) * bodyBlend,
+        bodyX: Math.sin(phase * 0.62 + 0.6) * profile.bodyX * bodyBlend,
+        bodyY: (Math.sin(phase * 0.54 + 1.7) * profile.bodyY + speechPulse * 0.35) * bodyBlend,
+        bodyZ: (profile.offsetZ * 0.45 + Math.sin(phase * 0.68 + 2.8) * profile.bodyZ) * bodyBlend,
+        eyeX: Math.sin(phase * 0.43 + 0.4) * profile.eyeX * bodyBlend,
+        eyeY: (Math.sin(phase * 0.37 + 1.1) * profile.eyeY + profile.offsetY * 0.008) * bodyBlend,
+        shoulder: (Math.sin(phase * 0.74 + 0.9) * gesture.shoulder + speechPulse * 0.18 + gestureAccent * 0.16) * bodyBlend,
+        armL: (Math.sin(phase * 0.52 + 0.2) * 0.30 + gesture.armL + gestureAccent * (0.28 + gestureWave * 0.18) * gestureEnergy) * bodyBlend,
+        armR: (Math.sin(phase * 0.48 + 2.4) * 0.30 + gesture.armR - gestureAccent * (0.28 - gestureWave * 0.18) * gestureEnergy) * bodyBlend,
+        forearmL: (Math.sin(phase * 0.66 + 1.1) * 0.26 + gesture.forearmL + gestureAccent * (0.34 + gestureWave * 0.12) * gestureEnergy) * bodyBlend,
+        forearmR: (Math.sin(phase * 0.62 + 2.7) * 0.26 + gesture.forearmR - gestureAccent * (0.34 - gestureWave * 0.12) * gestureEnergy) * bodyBlend,
+        handL: (Math.sin(phase * 1.08 + 0.3) * 0.24 + gestureAccent * (0.35 + gestureWave * 0.2)) * bodyBlend,
+        handR: (Math.sin(phase * 1.02 + 2.1) * 0.24 - gestureAccent * (0.35 - gestureWave * 0.2)) * bodyBlend,
+      };
+      const stateBlend = 1 - Math.pow(1 - smoothing, Math.max(0.1, Number(delta) || 1));
+      Object.keys(bodyState).forEach(key => {
+        bodyState[key] += (target[key] - bodyState[key]) * stateBlend;
+      });
+    };
+
+    const addCoreParameter = (core, id, value) => {
+      if (Math.abs(value) < 0.0001) return;
+      try {
+        if (typeof core.addParameterValueById === 'function') {
+          core.addParameterValueById(id, value);
+        } else if (typeof core.getParameterValueById === 'function' && typeof core.setParameterValueById === 'function') {
+          core.setParameterValueById(id, core.getParameterValueById(id) + value);
+        }
+      } catch (_) {}
+    };
+
+    const refreshCoreParameterIds = core => {
+      try {
+        const ids = core?.getModel?.()?.parameters?.ids || core?._parameterIds || [];
+        coreParameterIds = new Set(Array.from(ids, id => String(id)));
+      } catch (_) {
+        coreParameterIds = new Set();
+      }
+    };
+
+    const parameterAliases = (name, defaults) => uniqueStrings([
+      ...(Array.isArray(avatarConfig?.parameterAliases?.[name])
+        ? avatarConfig.parameterAliases[name]
+        : []),
+      ...defaults,
+    ]);
+
+    const resolveCoreParameter = candidates => candidates.find(id => coreParameterIds.has(id)) || null;
+
+    const setNormalizedCoreParameter = (core, id, value) => {
+      if (!id || !coreParameterIds.has(id)) return false;
+      try {
+        const index = core.getParameterIndex(id);
+        const minimum = Number(core.getParameterMinimumValue(index));
+        const maximum = Number(core.getParameterMaximumValue(index));
+        const normalized = Math.max(0, Math.min(1, Number(value) || 0));
+        const target = Number.isFinite(maximum) && maximum > 0
+          ? normalized * maximum
+          : normalized;
+        core.setParameterValueById(id, Math.max(Number.isFinite(minimum) ? minimum : 0, target));
+        return true;
+      } catch (_) {
+        return false;
+      }
+    };
+
+    const addAliasedCoreParameter = (core, name, defaults, value) => {
+      const id = resolveCoreParameter(parameterAliases(name, defaults));
+      if (id) addCoreParameter(core, id, value);
+    };
+
+    const addNormalizedCoreParameter = (core, name, defaults, value, rangeScale = 0.025) => {
+      const id = resolveCoreParameter(parameterAliases(name, defaults));
+      if (!id || Math.abs(value) < 0.0001) return;
+      try {
+        const index = core.getParameterIndex(id);
+        const minimum = Number(core.getParameterMinimumValue(index));
+        const maximum = Number(core.getParameterMaximumValue(index));
+        const range = Number.isFinite(minimum) && Number.isFinite(maximum) && maximum > minimum
+          ? maximum - minimum
+          : 2;
+        addCoreParameter(core, id, value * range * rangeScale);
+      } catch (_) {}
+    };
+
+    const applyLipSync = (core, value, now) => {
+      const visibleValue = speaking
+        ? Math.pow(Math.max(0, Math.min(1, value)), 0.58)
+        : 0;
+      if (lipSyncProfile.mode !== 'viseme') {
+        lipSyncProfile.parameterIds.forEach(id => setNormalizedCoreParameter(core, id, visibleValue));
+        return;
+      }
+      const order = ['ParamA', 'ParamI', 'ParamU', 'ParamE', 'ParamO']
+        .filter(id => lipSyncProfile.visemeParameterIds.includes(id) && coreParameterIds.has(id));
+      if (!order.length) {
+        lipSyncProfile.parameterIds.forEach(id => setNormalizedCoreParameter(core, id, visibleValue));
+        return;
+      }
+      const phase = Math.max(0, now - speechStartedAt) / 115;
+      const currentIndex = Math.floor(phase) % order.length;
+      const nextIndex = (currentIndex + 1) % order.length;
+      const fraction = phase - Math.floor(phase);
+      const blend = 0.5 - Math.cos(fraction * Math.PI) * 0.5;
+      order.forEach((id, index) => {
+        let weight = 0.035;
+        if (index === currentIndex) weight += 0.965 * (1 - blend);
+        if (index === nextIndex) weight += 0.965 * blend;
+        setNormalizedCoreParameter(core, id, visibleValue * Math.min(1, weight));
+      });
     };
 
     const diagnosticNumber = value => {
@@ -269,6 +498,11 @@
       const groups = availableMotionGroups();
       const aliases = {
         neutral: ['idle'],
+        talking: ['talking', 'talk', 'idle'],
+        talkingSoft: ['talking', 'talk', 'idle'],
+        emphasis: ['emphasis', 'talking', 'talk'],
+        thinking: ['thinking', 'idle'],
+        dramatic: ['dramatic', 'talking', 'talk'],
         greeting: ['greeting', 'hello'],
         wave: ['wave'],
         hug: ['hug', 'embrace'],
@@ -286,9 +520,14 @@
       })).find(item => item !== undefined);
 
       const expressionAliases = {
-        greeting: ['smile', 'happy'], wave: ['smile', 'happy'], hug: ['smile', 'happy'],
-        happy: ['happy', 'smile', 'joy'], sad: ['sad', 'sorrow'], angry: ['angry', 'mad'],
-        shy: ['shy', 'blush'], surprise: ['surprise', 'shock']
+        greeting: ['wavearml', 'wavearmr', 'smile', 'happy', 'hearts'],
+        wave: ['wavearml', 'wavearmr', 'smile', 'happy'],
+        hug: ['shyarml', 'shyarmr', 'hearts', 'smile', 'happy'],
+        happy: ['happy', 'smile', 'joy', 'hearts', 'stars', 'ahogeheart'],
+        sad: ['sad', 'sorrow', 'pleading', 'faceshadow', 'darkeyecircles'],
+        angry: ['angry', 'mad', 'faceshadow', 'hornsbig'],
+        shy: ['shyarml', 'shyarmr', 'shy', 'blush', 'pleading'],
+        surprise: ['surprise', 'shock', 'spirals', 'stars']
       };
       const expression = availableExpressions().find(item => {
         const name = normalize(item);
@@ -307,7 +546,8 @@
 
     const calculateCueCoverage = () => {
       const supported = [
-        'neutral', 'greeting', 'wave', 'hug', 'nod',
+        'neutral', 'talking', 'talkingSoft', 'emphasis', 'thinking', 'dramatic',
+        'greeting', 'wave', 'hug', 'nod',
         'happy', 'sad', 'angry', 'shy', 'surprise'
       ];
       invalidConfiguredCues = Object.keys(avatarConfig?.cues || {}).filter(cue =>
@@ -522,8 +762,16 @@
       setSpeaking(value) {
         const wasSpeaking = speaking;
         speaking = Boolean(value);
-        if (speaking && !wasSpeaking) resetExpression();
-        if (!speaking) mouthTarget = 0;
+        if (speaking && !wasSpeaking) {
+          speechStartedAt = performance.now();
+          bodyPhase = Math.random() * Math.PI * 2;
+          if (activeCue === 'neutral') activeCue = 'talking';
+          resetExpression();
+        }
+        if (!speaking) {
+          mouthTarget = 0;
+          activeCue = 'neutral';
+        }
         return Boolean(model);
       },
       motion(group, index) {
@@ -536,6 +784,7 @@
       resetExpression,
       perform(cue) {
         const normalizedCue = String(cue || 'neutral');
+        activeCue = normalizedCue;
         if (normalizedCue === 'neutral') resetExpression();
         return playConfiguredCue(normalizedCue) || playFallbackCue(normalizedCue);
       },
@@ -558,14 +807,17 @@
 
     (async () => {
       try {
-        const modelUrl = new URLSearchParams(location.search).get('model');
+        const query = new URLSearchParams(location.search);
+        const modelUrl = query.get('model');
         if (!modelUrl) throw new Error('未配置 .model3.json 模型路径');
 
         const runtimeSources = {};
-        runtimeSources.core = await loadScript([
-          'vendor/live2dcubismcore.min.js',
-          'https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js'
-        ]);
+        const coreSources = [];
+        if (query.get('localCore') !== '0') {
+          coreSources.push('vendor/live2dcubismcore.min.js');
+        }
+        coreSources.push('https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js');
+        runtimeSources.core = await loadScript(coreSources, 42000);
         const version = coreVersion();
         if (!version || version.major < 5) {
           const current = version ? `${version.major}.${version.minor}` : '未知';
@@ -586,7 +838,8 @@
         } catch (_) {
           avatarConfig = {};
         }
-        lipSyncIds = await discoverLipSyncIds(modelUrl, modelSettings, avatarConfig);
+        lipSyncProfile = await discoverLipSyncProfile(modelUrl, modelSettings, avatarConfig);
+        lipSyncIds = lipSyncProfile.parameterIds;
 
         if (PIXI.settings && PIXI.ENV && 'PREFER_ENV' in PIXI.settings) {
           PIXI.settings.PREFER_ENV = PIXI.ENV.WEBGL2;
@@ -624,6 +877,7 @@
         model.alpha = 1;
 
         const internalModel = model.internalModel || {};
+        refreshCoreParameterIds(internalModel.coreModel);
         naturalCapabilities = {
           idleMotion: availableMotionGroups().some(group => normalize(group) === 'idle'),
           eyeBlink: Boolean(internalModel.eyeBlink),
@@ -631,6 +885,15 @@
           physics: Boolean(internalModel.physics),
           pose: Boolean(internalModel.pose),
           gaze: Boolean(internalModel.focusController),
+          speechBody: avatarConfig?.naturalBehavior?.speechBody?.enabled !== false,
+          visemeLipSync: lipSyncProfile.mode === 'viseme',
+          shoulderArmSpeech: [
+            ...parameterAliases('shoulder', ['ParamShoulderY', 'ParamBodyAngleZ3']),
+            ...parameterAliases('armL', ['ParamArmLA01', 'ParamArmLA', 'Param104']),
+            ...parameterAliases('armR', ['ParamArmRA01', 'ParamArmRA', 'Param431']),
+            ...parameterAliases('handL', ['ParamHandL', 'Param106']),
+            ...parameterAliases('handR', ['ParamHandR', 'Param433']),
+          ].some(id => coreParameterIds.has(id)),
         };
         cueCoverage = calculateCueCoverage();
 
@@ -640,18 +903,38 @@
         const release = finiteNumber(avatarConfig?.lipSync?.release, Math.min(0.35, legacySmoothing), 0.03, 1);
         const staleAfterMs = finiteNumber(avatarConfig?.lipSync?.staleAfterMs, 240, 80, 1000);
         pixiApp.ticker.add(delta => {
-          if (!speaking || performance.now() - lastMouthSignalAt > staleAfterMs) {
+          const now = performance.now();
+          if (!speaking) {
             mouthTarget = 0;
+          } else if (now - lastMouthSignalAt > staleAfterMs) {
+            const elapsed = Math.max(0, now - speechStartedAt);
+            mouthTarget = 0.12 + Math.abs(Math.sin(elapsed / 118) * Math.cos(elapsed / 263)) * 0.5;
           }
           const smoothing = mouthTarget > mouthCurrent ? attack : release;
           const blend = 1 - Math.pow(1 - smoothing, Math.max(0.1, Number(delta) || 1));
           mouthCurrent += (mouthTarget - mouthCurrent) * blend;
+          updateSpeechBody(now, delta);
         });
         internalModel.on('beforeModelUpdate', () => {
           const core = internalModel.coreModel;
           if (!core || !core.setParameterValueById) return;
           const value = Math.max(0, Math.min(1, mouthCurrent * gain));
-          lipSyncIds.forEach(id => core.setParameterValueById(id, value));
+          applyLipSync(core, value, performance.now());
+          addAliasedCoreParameter(core, 'angleX', ['ParamAngleX', 'AngleX'], bodyState.angleX);
+          addAliasedCoreParameter(core, 'angleY', ['ParamAngleY', 'AngleY'], bodyState.angleY);
+          addAliasedCoreParameter(core, 'angleZ', ['ParamAngleZ', 'AngleZ'], bodyState.angleZ);
+          addAliasedCoreParameter(core, 'bodyX', ['ParamBodyAngleX', 'ParamBodyAngleX3', 'Param92'], bodyState.bodyX);
+          addAliasedCoreParameter(core, 'bodyY', ['ParamBodyAngleY', 'ParamBodyAngleY2', 'Param93'], bodyState.bodyY);
+          addAliasedCoreParameter(core, 'bodyZ', ['ParamBodyAngleZ', 'ParamBodyAngleZ2', 'Param94'], bodyState.bodyZ);
+          addAliasedCoreParameter(core, 'eyeX', ['ParamEyeBallX'], bodyState.eyeX);
+          addAliasedCoreParameter(core, 'eyeY', ['ParamEyeBallY'], bodyState.eyeY);
+          addNormalizedCoreParameter(core, 'shoulder', ['ParamShoulderY', 'ParamBodyAngleZ3'], bodyState.shoulder, 0.050);
+          addNormalizedCoreParameter(core, 'armL', ['ParamArmLA01', 'ParamArmLA', 'Param104'], bodyState.armL, 0.065);
+          addNormalizedCoreParameter(core, 'armR', ['ParamArmRA01', 'ParamArmRA', 'Param431'], bodyState.armR, 0.065);
+          addNormalizedCoreParameter(core, 'forearmL', ['ParamArmLA02', 'ParamArmLB01', 'Param105'], bodyState.forearmL, 0.060);
+          addNormalizedCoreParameter(core, 'forearmR', ['ParamArmRA02', 'ParamArmRB01', 'Param432'], bodyState.forearmR, 0.060);
+          addNormalizedCoreParameter(core, 'handL', ['ParamHandL', 'Param106'], bodyState.handL, 0.050);
+          addNormalizedCoreParameter(core, 'handR', ['ParamHandR', 'Param433'], bodyState.handR, 0.050);
         });
 
         const fit = () => {

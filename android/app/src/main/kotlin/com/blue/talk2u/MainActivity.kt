@@ -2,6 +2,8 @@ package com.blue.talk2u
 
 import android.Manifest
 import android.app.ActivityManager
+import android.content.ComponentCallbacks2
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
@@ -18,6 +20,7 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.speech.tts.Voice
 import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -31,29 +34,83 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.Locale
+import java.util.concurrent.CancellationException
+import java.util.concurrent.Executors
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.ZipInputStream
 import kotlin.math.sqrt
 import org.json.JSONArray
 import org.json.JSONObject
 
 class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
+    private data class TtsSegment(
+        val offset: Int,
+        val first: Boolean,
+        val last: Boolean,
+    )
+
+    private data class TtsChunk(
+        val offset: Int,
+        val text: String,
+        val rate: Float,
+        val pitch: Float,
+        val volume: Float,
+    )
+
+    private data class TtsProsody(
+        val rate: Float,
+        val pitchOffset: Float,
+        val volume: Float,
+    )
+
+    companion object {
+        init {
+            System.loadLibrary("rust_lib_talk2u")
+        }
+    }
+
+    private external fun initializeRustTls(context: Context): Boolean
+
     private val speechChannelName = "talk2u/speech"
     private val speechEventsName = "talk2u/speech_events"
     private val live2dModelsChannelName = "talk2u/live2d_models"
     private val llmRuntimeChannelName = "talk2u/llm_runtime"
+    private val mossTtsChannelName = "talk2u/moss_tts"
     private val recordAudioRequest = 4102
+    private val speechPreferences by lazy {
+        getSharedPreferences("talk2u_speech", Context.MODE_PRIVATE)
+    }
 
     private var textToSpeech: TextToSpeech? = null
     private var ttsReady = false
     private var selectedTtsVoiceName = ""
     private var selectedTtsLocale = ""
+    private var baseTtsPitch = 1.0f
     private var speechRecognizer: SpeechRecognizer? = null
     private var modelDownloadRecognizer: SpeechRecognizer? = null
     private var eventSink: EventChannel.EventSink? = null
     private var pendingRecognitionResult: MethodChannel.Result? = null
     @Volatile private var ttsAudioEncoding = AudioFormat.ENCODING_PCM_16BIT
     @Volatile private var lastAmplitudeEmitAt = 0L
+    @Volatile private var loggedTtsAmplitude = false
     private var ttsInitialized = false
+    private val ttsSegments = ConcurrentHashMap<String, TtsSegment>()
+    private val mossExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "talk2u-moss-tts").apply { priority = Thread.NORM_PRIORITY - 1 }
+    }
+    @Volatile private var mossCancellation = AtomicBoolean(false)
+    @Volatile private var activityDestroyed = false
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        val tlsReady = runCatching { initializeRustTls(applicationContext) }
+            .onFailure { Log.e("Talk2U/TLS", "Unable to initialize Android TLS verifier", it) }
+            .getOrDefault(false)
+        if (!tlsReady) {
+            Log.e("Talk2U/TLS", "Android TLS verifier initialization returned false")
+        }
+        super.onCreate(savedInstanceState)
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -83,6 +140,10 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
                         refreshSpeechCapabilities()
                         result.success(capabilities())
                     }
+                    "selectTtsVoice" -> selectTtsVoice(
+                        call.argument<String>("name").orEmpty(),
+                        result,
+                    )
                     "speak" -> speak(call.argument<String>("text").orEmpty(), result)
                     "stopSpeaking" -> {
                         textToSpeech?.stop()
@@ -111,13 +172,16 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, live2dModelsChannelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
-                    "importArchive" -> {
+                    "importArchive", "importArchiveModels" -> {
                         val archivePath = call.argument<String>("path")
                         if (archivePath.isNullOrBlank()) {
                             result.error("invalid_archive", "未收到 Live2D ZIP 文件路径", null)
                             return@setMethodCallHandler
                         }
-                        runLive2dImport(result) { importLive2dArchive(archivePath) }
+                        runLive2dImport(result) {
+                            val models = importLive2dArchive(archivePath)
+                            if (call.method == "importArchive") models.first() else models
+                        }
                     }
                     "installBundledMao" -> runLive2dImport(result, ::installBundledMao)
                     else -> result.notImplemented()
@@ -132,6 +196,45 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
                 }
             }
 
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, mossTtsChannelName)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "availableStorageBytes" -> result.success(StatFs(filesDir.path).availableBytes)
+                    "probe" -> runCatching { MossOnnxEngine.probeRuntime() }
+                        .fold(
+                            onSuccess = result::success,
+                            onFailure = {
+                                result.error(
+                                    "moss_runtime_unavailable",
+                                    "MOSS-TTS-Nano ONNX Runtime 无法加载: ${it.message}",
+                                    null,
+                                )
+                            },
+                        )
+                    "providers" -> runCatching { MossOnnxEngine.runtimeProviders() }
+                        .fold(
+                            onSuccess = {
+                                Log.i("Talk2U/MOSS", "availableProviders=$it")
+                                result.success(it)
+                            },
+                            onFailure = {
+                                result.error(
+                                    "moss_provider_probe_failed",
+                                    "MOSS-TTS-Nano 无法读取 ONNX Runtime 执行提供程序: ${it.message}",
+                                    null,
+                                )
+                            },
+                        )
+                    "synthesize" -> synthesizeMoss(call.arguments as? Map<*, *>, result)
+                    "cancel" -> {
+                        mossCancellation.set(true)
+                        result.success(null)
+                    }
+                    "release" -> releaseMoss(result)
+                    else -> result.notImplemented()
+                }
+            }
+
         flutterEngine.platformViewsController.registry.registerViewFactory(
             "talk2u/live2d",
             Live2dViewFactory(this, flutterEngine.dartExecutor.binaryMessenger),
@@ -141,29 +244,49 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
     override fun onInit(status: Int) {
         ttsInitialized = true
         ttsReady = status == TextToSpeech.SUCCESS && selectOfflineVoice()
+        Log.i(
+            "Talk2U.Speech",
+            "TTS initialized status=$status ready=$ttsReady voice=$selectedTtsVoiceName locale=$selectedTtsLocale",
+        )
         if (ttsReady) {
             textToSpeech?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                 override fun onStart(utteranceId: String?) {
                     lastAmplitudeEmitAt = 0L
-                    emit(mapOf("type" to "speechStart"))
+                    loggedTtsAmplitude = false
+                    val segment = utteranceId?.let(ttsSegments::get)
+                    Log.i("Talk2U.Speech", "speechStart id=$utteranceId offset=${segment?.offset ?: 0}")
+                    if (segment?.first != false) emit(mapOf("type" to "speechStart"))
                 }
 
                 override fun onDone(utteranceId: String?) {
-                    emit(mapOf("type" to "amplitude", "value" to 0.0))
-                    emit(mapOf("type" to "speechDone"))
+                    val segment = utteranceId?.let(ttsSegments::remove)
+                    Log.i("Talk2U.Speech", "speechDone id=$utteranceId last=${segment?.last != false}")
+                    if (segment?.last != false) {
+                        emit(mapOf("type" to "amplitude", "value" to 0.0))
+                        emit(mapOf("type" to "speechDone"))
+                    }
                 }
 
                 override fun onStop(utteranceId: String?, interrupted: Boolean) {
+                    if (utteranceId == null || ttsSegments.remove(utteranceId) == null) return
+                    ttsSegments.clear()
+                    Log.i("Talk2U.Speech", "speechStop id=$utteranceId interrupted=$interrupted")
                     emit(mapOf("type" to "amplitude", "value" to 0.0))
                     emit(mapOf("type" to "speechDone"))
                 }
 
                 @Suppress("DEPRECATION")
                 override fun onError(utteranceId: String?) {
+                    if (utteranceId == null || ttsSegments.remove(utteranceId) == null) return
+                    ttsSegments.clear()
+                    Log.e("Talk2U.Speech", "speechError id=$utteranceId")
                     emit(mapOf("type" to "error", "message" to "离线 TTS 合成失败"))
                 }
 
                 override fun onError(utteranceId: String?, errorCode: Int) {
+                    if (utteranceId == null || ttsSegments.remove(utteranceId) == null) return
+                    ttsSegments.clear()
+                    Log.e("Talk2U.Speech", "speechError id=$utteranceId code=$errorCode")
                     emit(mapOf("type" to "error", "message" to "离线 TTS 错误: $errorCode"))
                 }
 
@@ -174,6 +297,10 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
                     channelCount: Int,
                 ) {
                     ttsAudioEncoding = audioFormat
+                    Log.i(
+                        "Talk2U.Speech",
+                        "speechSynthesis id=$utteranceId rate=$sampleRateInHz format=$audioFormat channels=$channelCount",
+                    )
                 }
 
                 override fun onRangeStart(
@@ -182,11 +309,13 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
                     end: Int,
                     frame: Int,
                 ) {
+                    val offset = utteranceId?.let(ttsSegments::get)?.offset ?: 0
+                    Log.d("Talk2U.Speech", "speechRange id=$utteranceId start=${offset + start} end=${offset + end}")
                     emit(
                         mapOf(
                             "type" to "speechRange",
-                            "start" to start,
-                            "end" to end,
+                            "start" to offset + start,
+                            "end" to offset + end,
                             "frame" to frame,
                         ),
                     )
@@ -195,6 +324,10 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
                 override fun onAudioAvailable(utteranceId: String?, audio: ByteArray?) {
                     if (audio == null || audio.isEmpty()) return
                     val normalized = calculatePcmAmplitude(audio, ttsAudioEncoding)
+                    if (normalized > 0.01 && !loggedTtsAmplitude) {
+                        loggedTtsAmplitude = true
+                        Log.i("Talk2U.Speech", "speechAmplitude id=$utteranceId value=$normalized")
+                    }
                     emitAmplitude(normalized)
                 }
             })
@@ -204,16 +337,89 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
 
     private fun selectOfflineVoice(): Boolean {
         val engine = textToSpeech ?: return false
-        val voices = engine.voices ?: return false
-        val preferred = voices.firstOrNull {
-            !it.isNetworkConnectionRequired && it.locale.language == Locale.CHINESE.language
-        } ?: voices.firstOrNull { !it.isNetworkConnectionRequired }
-        if (preferred != null) {
-            engine.voice = preferred
-            selectedTtsVoiceName = preferred.name
-            selectedTtsLocale = preferred.locale.toLanguageTag()
-        }
+        val voices = offlineTtsVoices()
+        if (voices.isEmpty()) return false
+        Log.i(
+            "Talk2U.Speech",
+            "TTS voices=" + voices.joinToString(" | ") {
+                "${it.name}:${it.locale.toLanguageTag()}:network=${it.isNetworkConnectionRequired}"
+            },
+        )
+        val savedName = speechPreferences.getString("tts_voice", null)
+        val preferred = voices
+            .sortedByDescending { voiceScore(it) + if (it.name == savedName) 100000 else 0 }
+            .firstOrNull {
+                runCatching { applyTtsVoice(engine, it) }.getOrDefault(false)
+            }
         return preferred != null
+    }
+
+    private fun offlineTtsVoices(): List<Voice> {
+        return textToSpeech?.voices
+            ?.filter { !it.isNetworkConnectionRequired }
+            ?.sortedWith(
+                compareByDescending<Voice> { it.locale.language == Locale.CHINESE.language }
+                    .thenByDescending { it.quality }
+                    .thenBy { it.name },
+            )
+            .orEmpty()
+    }
+
+    private fun voiceScore(voice: Voice): Int {
+        val name = voice.name.lowercase(Locale.ROOT)
+        var score = voice.quality
+        if (voice.locale.language == Locale.CHINESE.language) score += 1000
+        if ("中文" in name || "普通话" in name || "mandarin" in name) score += 900
+        if ("自然" in name || "情感" in name || "neural" in name) score += 160
+        if ("温柔" in name || "warm" in name || "gentle" in name) score += 120
+        if ("英文" in name || "english" in name) score -= 800
+        return score
+    }
+
+    private fun voiceGender(voice: Voice): String {
+        val name = voice.name.lowercase(Locale.ROOT)
+        return when {
+            "女声" in name || "女性" in name || "female" in name || "woman" in name -> "female"
+            "男声" in name || "男性" in name || "male" in name -> "male"
+            else -> "unknown"
+        }
+    }
+
+    private fun applyTtsVoice(engine: TextToSpeech, voice: Voice): Boolean {
+        if (engine.setVoice(voice) == TextToSpeech.ERROR) return false
+        engine.setSpeechRate(0.93f)
+        baseTtsPitch = when (voiceGender(voice)) {
+            "male" -> 0.94f
+            "female" -> 1.03f
+            else -> 1.0f
+        }
+        engine.setPitch(baseTtsPitch)
+        selectedTtsVoiceName = voice.name
+        selectedTtsLocale = voice.locale.toLanguageTag()
+        return true
+    }
+
+    private fun selectTtsVoice(name: String, result: MethodChannel.Result) {
+        val engine = textToSpeech
+        if (!ttsInitialized || engine == null) {
+            result.error("offline_tts_unavailable", "设备离线 TTS 引擎尚未初始化", null)
+            return
+        }
+        val voice = offlineTtsVoices().firstOrNull { it.name == name }
+        if (voice == null) {
+            result.error("tts_voice_unavailable", "选择的离线音色已不可用", null)
+            return
+        }
+        engine.stop()
+        if (!applyTtsVoice(engine, voice)) {
+            result.error("tts_voice_failed", "无法启用选择的离线音色", null)
+            return
+        }
+        speechPreferences.edit().putString("tts_voice", voice.name).apply()
+        ttsReady = true
+        val value = capabilities()
+        emit(mapOf("type" to "capabilities", "value" to value))
+        result.success(value)
     }
 
     private fun capabilities(): Map<String, Any> {
@@ -228,6 +434,13 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
             "audioAmplitude" to (ttsReady && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N),
             "ttsVoice" to selectedTtsVoiceName,
             "ttsLocale" to selectedTtsLocale,
+            "ttsVoices" to offlineTtsVoices().map {
+                mapOf(
+                    "name" to it.name,
+                    "locale" to it.locale.toLanguageTag(),
+                    "gender" to voiceGender(it),
+                )
+            },
             "sttLocale" to if (onDeviceStt) "zh-CN" else "",
         )
     }
@@ -356,7 +569,7 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
         }
         if (sampleCount == 0) return 0.0
         val rms = sqrt(sumSquares / sampleCount)
-        return ((rms - 0.015).coerceAtLeast(0.0) * 4.5).coerceAtMost(1.0)
+        return ((rms - 0.008).coerceAtLeast(0.0) * 8.0).coerceAtMost(1.0)
     }
 
     private fun emitAmplitude(value: Double) {
@@ -366,7 +579,7 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
         emit(mapOf("type" to "amplitude", "value" to value))
     }
 
-    private fun importLive2dArchive(archivePath: String): String {
+    private fun importLive2dArchive(archivePath: String): List<String> {
         val archive = File(archivePath)
         require(archive.isFile) { "找不到选择的 Live2D ZIP 文件" }
         require(archive.length() <= 512L * 1024L * 1024L) {
@@ -384,16 +597,11 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
             extractLive2dArchive(archive, importDir)
             val modelFiles = importDir.walkTopDown()
                 .filter { it.isFile && it.name.lowercase(Locale.ROOT).endsWith(".model3.json") }
+                .sortedBy { it.relativeTo(importDir).path }
                 .toList()
-            require(modelFiles.size == 1) {
-                if (modelFiles.isEmpty()) {
-                    "ZIP 中没有 .model3.json"
-                } else {
-                    "ZIP 中包含多个 .model3.json，请只打包一个模型"
-                }
-            }
-            validateLive2dModel(modelFiles.single(), importDir)
-            return modelFiles.single().canonicalPath
+            require(modelFiles.isNotEmpty()) { "ZIP 中没有 .model3.json" }
+            modelFiles.forEach { validateLive2dModel(it, importDir) }
+            return modelFiles.map { it.canonicalPath }
         } catch (error: Exception) {
             importDir.deleteRecursively()
             throw error
@@ -402,12 +610,12 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
 
     private fun runLive2dImport(
         result: MethodChannel.Result,
-        operation: () -> String,
+        operation: () -> Any,
     ) {
         Thread {
             try {
-                val modelPath = operation()
-                runOnUiThread { result.success(modelPath) }
+                val value = operation()
+                runOnUiThread { result.success(value) }
             } catch (error: Exception) {
                 runOnUiThread {
                     result.error(
@@ -575,7 +783,7 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
         val lipSyncIds = discoverLipSyncIds(json, displayInfo)
 
         validateModelMemory(mocFile, textureFiles)
-        writeAvatarConfig(modelDirectory, lipSyncIds)
+        writeAvatarConfig(modelDirectory, lipSyncIds, json, displayInfo)
         modelFile.writeText(json.toString(2), Charsets.UTF_8)
     }
 
@@ -711,14 +919,16 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
                 }
             }
         }
-        if (result.isNotEmpty()) return result.toList()
-
         displayInfo?.optJSONArray("Parameters")?.let { parameters ->
             for (index in 0 until parameters.length()) {
                 val parameter = parameters.optJSONObject(index) ?: continue
                 val id = parameter.optString("Id")
                 val name = parameter.optString("Name").lowercase(Locale.ROOT)
-                if (id == "ParamMouthOpenY" || id == "ParamA" || name == "mouth open" || name == "嘴巴开合") {
+                if (
+                    id in listOf("ParamMouthOpenY", "ParamA", "ParamI", "ParamU", "ParamE", "ParamO") ||
+                    name == "mouth open" ||
+                    name == "嘴巴开合"
+                ) {
                     result += id
                 }
             }
@@ -765,7 +975,12 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
         }
     }
 
-    private fun writeAvatarConfig(modelDirectory: File, lipSyncIds: List<String>) {
+    private fun writeAvatarConfig(
+        modelDirectory: File,
+        lipSyncIds: List<String>,
+        modelJson: JSONObject,
+        displayInfo: JSONObject?,
+    ) {
         val configFile = File(modelDirectory, "talk2u.avatar.json")
         val config = if (configFile.isFile) {
             JSONObject(configFile.readText(Charsets.UTF_8))
@@ -776,10 +991,26 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
         val lipSync = config.optJSONObject("lipSync") ?: JSONObject().also {
             config.put("lipSync", it)
         }
-        if (lipSync.optJSONArray("parameterIds")?.length() in listOf(null, 0)) {
+        val parameterIds = linkedSetOf<String>()
+        displayInfo?.optJSONArray("Parameters")?.let { parameters ->
+            for (index in 0 until parameters.length()) {
+                parameters.optJSONObject(index)?.optString("Id")
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let(parameterIds::add)
+            }
+        }
+        val vowelIds = listOf("ParamA", "ParamI", "ParamU", "ParamE", "ParamO")
+            .filter(parameterIds::contains)
+        val usesVisemes = vowelIds.size >= 3
+        if (usesVisemes) {
+            lipSync.put("mode", "viseme")
+            lipSync.put("parameterIds", JSONArray(vowelIds))
+            lipSync.put("visemeParameterIds", JSONArray(vowelIds))
+        } else if (lipSync.optJSONArray("parameterIds")?.length() in listOf(null, 0)) {
+            lipSync.put("mode", "open")
             lipSync.put("parameterIds", JSONArray(lipSyncIds))
         }
-        if (!lipSync.has("gain")) lipSync.put("gain", 1.0)
+        if (!lipSync.has("gain")) lipSync.put("gain", 1.8)
         if (!lipSync.has("smoothing")) lipSync.put("smoothing", 0.45)
         if (!lipSync.has("attack")) lipSync.put("attack", 0.58)
         if (!lipSync.has("release")) lipSync.put("release", 0.28)
@@ -790,6 +1021,12 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
         if (!naturalBehavior.has("expressionDurationMs")) {
             naturalBehavior.put("expressionDurationMs", 4200)
         }
+        val speechBody = naturalBehavior.optJSONObject("speechBody") ?: JSONObject().also {
+            naturalBehavior.put("speechBody", it)
+        }
+        if (!speechBody.has("enabled")) speechBody.put("enabled", true)
+        if (!speechBody.has("gain")) speechBody.put("gain", 1.15)
+        if (!speechBody.has("smoothing")) speechBody.put("smoothing", 0.12)
         val gaze = naturalBehavior.optJSONObject("gaze") ?: JSONObject().also {
             naturalBehavior.put("gaze", it)
         }
@@ -801,6 +1038,49 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
         if (!naturalBehavior.has("microExpressions")) {
             naturalBehavior.put("microExpressions", JSONArray())
         }
+        val aliases = config.optJSONObject("parameterAliases") ?: JSONObject().also {
+            config.put("parameterAliases", it)
+        }
+        val aliasCandidates = linkedMapOf(
+            "angleX" to listOf("ParamAngleX", "AngleX"),
+            "angleY" to listOf("ParamAngleY", "AngleY"),
+            "angleZ" to listOf("ParamAngleZ", "AngleZ"),
+            "bodyX" to listOf("ParamBodyAngleX", "ParamBodyAngleX3", "Param92"),
+            "bodyY" to listOf("ParamBodyAngleY", "ParamBodyAngleY2", "Param93"),
+            "bodyZ" to listOf("ParamBodyAngleZ", "ParamBodyAngleZ2", "Param94"),
+            "shoulder" to listOf("ParamShoulderY", "ParamBodyAngleZ3"),
+            "armL" to listOf("ParamArmLA01", "ParamArmLA", "Param104"),
+            "armR" to listOf("ParamArmRA01", "ParamArmRA", "Param431"),
+            "forearmL" to listOf("ParamArmLA02", "ParamArmLB01", "Param105"),
+            "forearmR" to listOf("ParamArmRA02", "ParamArmRB01", "Param432"),
+            "handL" to listOf("ParamHandL", "Param106"),
+            "handR" to listOf("ParamHandR", "Param433"),
+        )
+        for ((name, candidates) in aliasCandidates) {
+            val matched = candidates.filter(parameterIds::contains)
+            if (matched.isNotEmpty()) aliases.put(name, JSONArray(matched))
+        }
+        val references = modelJson.optJSONObject("FileReferences") ?: JSONObject()
+        val capabilities = JSONObject()
+        val expressions = JSONArray()
+        references.optJSONArray("Expressions")?.let { values ->
+            for (index in 0 until values.length()) {
+                values.optJSONObject(index)?.optString("Name")
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let(expressions::put)
+            }
+        }
+        capabilities.put("expressions", expressions)
+        val motions = JSONObject()
+        references.optJSONObject("Motions")?.let { groups ->
+            val names = groups.keys()
+            while (names.hasNext()) {
+                val name = names.next()
+                motions.put(name, groups.optJSONArray(name)?.length() ?: 0)
+            }
+        }
+        capabilities.put("motions", motions)
+        config.put("modelCapabilities", capabilities)
         if (!config.has("cues")) config.put("cues", JSONObject())
         configFile.writeText(config.toString(2), Charsets.UTF_8)
     }
@@ -814,12 +1094,116 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
             result.error("empty_text", "朗读文本不能为空", null)
             return
         }
-        val utteranceId = "talk2u-${System.currentTimeMillis()}"
-        val status = textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, Bundle(), utteranceId)
-        if (status == TextToSpeech.ERROR) {
-            result.error("tts_start_failed", "无法启动离线 TTS", null)
-        } else {
-            result.success(null)
+        val engine = textToSpeech
+        if (engine == null) {
+            result.error("offline_tts_unavailable", "设备离线 TTS 引擎尚未初始化", null)
+            return
+        }
+        val chunks = splitTtsText(text, TextToSpeech.getMaxSpeechInputLength().coerceAtMost(280))
+        val batchId = System.currentTimeMillis()
+        ttsSegments.clear()
+        Log.i("Talk2U.Speech", "speak requested chars=${text.length} chunks=${chunks.size}")
+        for ((index, chunk) in chunks.withIndex()) {
+            val utteranceId = "talk2u-$batchId-$index"
+            ttsSegments[utteranceId] = TtsSegment(
+                offset = chunk.offset,
+                first = index == 0,
+                last = index == chunks.lastIndex,
+            )
+            val queueMode = if (index == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+            engine.setSpeechRate(chunk.rate)
+            engine.setPitch(chunk.pitch)
+            val parameters = Bundle().apply {
+                putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, chunk.volume)
+            }
+            val status = engine.speak(chunk.text, queueMode, parameters, utteranceId)
+            if (status == TextToSpeech.ERROR) {
+                engine.stop()
+                ttsSegments.clear()
+                result.error("tts_start_failed", "无法启动离线 TTS", null)
+                return
+            }
+        }
+        result.success(null)
+    }
+
+    private fun splitTtsText(text: String, maximumLength: Int): List<TtsChunk> {
+        val result = mutableListOf<TtsChunk>()
+        val strongBoundaries = setOf('。', '！', '？', '；', '\n', '!', '?', ';', '.', '…')
+        val softBoundaries = setOf('，', '、', ',', ':', '：')
+        val allBoundaries = (strongBoundaries + softBoundaries + ' ').toCharArray()
+        val closingPunctuation = setOf('”', '’', '」', '』', '）', ')', '】', ']')
+        var cursor = 0
+        while (cursor < text.length) {
+            while (cursor < text.length && text[cursor].isWhitespace()) cursor++
+            if (cursor >= text.length) break
+            var end = (cursor + maximumLength).coerceAtMost(text.length)
+            var foundBoundary = false
+            for (index in cursor until end) {
+                val character = text[index]
+                val strong = character in strongBoundaries && index - cursor >= 2
+                val soft = character in softBoundaries && index - cursor >= 36
+                if (strong || soft) {
+                    end = index + 1
+                    while (end < text.length && text[end] in closingPunctuation) end++
+                    foundBoundary = true
+                    break
+                }
+            }
+            if (!foundBoundary && end < text.length) {
+                val boundary = text.lastIndexOfAny(allBoundaries, end - 1)
+                if (boundary > cursor) end = boundary + 1
+            }
+            if (
+                end < text.length &&
+                end > cursor &&
+                Character.isHighSurrogate(text[end - 1]) &&
+                Character.isLowSurrogate(text[end])
+            ) {
+                end--
+            }
+            val raw = text.substring(cursor, end)
+            val leading = raw.indexOfFirst { !it.isWhitespace() }.coerceAtLeast(0)
+            val value = raw.trim()
+            if (value.isNotEmpty()) {
+                val prosody = ttsProsody(value)
+                result.add(
+                    TtsChunk(
+                        offset = cursor + leading,
+                        text = value,
+                        rate = prosody.rate,
+                        pitch = (baseTtsPitch + prosody.pitchOffset).coerceIn(0.78f, 1.16f),
+                        volume = prosody.volume,
+                    ),
+                )
+            }
+            cursor = end
+        }
+        return result
+    }
+
+    private fun ttsProsody(text: String): TtsProsody {
+        val lower = text.lowercase(Locale.ROOT)
+        return when {
+            listOf("轻声", "小声", "低语", "耳语", "悄悄", "whisper").any(lower::contains) ->
+                TtsProsody(0.84f, -0.01f, 0.78f)
+            listOf("难过", "伤心", "悲伤", "哭", "失落", "孤独", "遗憾", "绝望", "sad").any(lower::contains) ->
+                TtsProsody(0.80f, -0.07f, 0.86f)
+            listOf("温柔", "温暖", "安心", "安慰", "拥抱", "柔和", "tender", "gentle").any(lower::contains) ->
+                TtsProsody(0.87f, 0.015f, 0.92f)
+            listOf("生气", "愤怒", "恼火", "争吵", "怒吼", "厉声", "angry").any(lower::contains) ->
+                TtsProsody(1.04f, -0.06f, 1.0f)
+            listOf("开心", "高兴", "喜悦", "兴奋", "幸福", "哈哈", "欢呼", "happy").any(lower::contains) ->
+                TtsProsody(1.05f, 0.075f, 1.0f)
+            listOf("惊讶", "震惊", "突然", "意外", "竟然", "surprise").any(lower::contains) ->
+                TtsProsody(1.08f, 0.10f, 1.0f)
+            listOf("黑暗", "寂静", "危险", "危机", "紧张", "屏住呼吸", "suspense").any(lower::contains) ->
+                TtsProsody(0.86f, -0.035f, 0.9f)
+            listOf("害羞", "脸红", "不好意思", "小声", "shy").any(lower::contains) ->
+                TtsProsody(0.86f, 0.02f, 0.88f)
+            '？' in text || '?' in text -> TtsProsody(0.94f, 0.055f, 0.96f)
+            '！' in text || '!' in text -> TtsProsody(1.02f, 0.035f, 1.0f)
+            else -> TtsProsody(0.93f, 0.0f, 0.96f)
         }
     }
 
@@ -1016,12 +1400,141 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
         runOnUiThread { eventSink?.success(event) }
     }
 
+    private fun synthesizeMoss(arguments: Map<*, *>?, result: MethodChannel.Result) {
+        val modelRootValue = arguments?.get("modelRoot") as? String
+        val outputValue = arguments?.get("outputPath") as? String
+        val chunksValue = arguments?.get("tokenChunks") as? List<*>
+        if (modelRootValue.isNullOrBlank() || outputValue.isNullOrBlank() || chunksValue.isNullOrEmpty()) {
+            result.error("invalid_moss_request", "MOSS-TTS-Nano 推理参数不完整", null)
+            return
+        }
+        val modelRoot = runCatching { File(modelRootValue).canonicalFile }.getOrNull()
+        val outputFile = runCatching { File(outputValue).canonicalFile }.getOrNull()
+        val dataRoot = applicationInfo.dataDir?.let(::File)?.canonicalFile
+        val cacheRoot = cacheDir.canonicalFile
+        if (modelRoot == null || dataRoot == null || !modelRoot.isInside(dataRoot)) {
+            result.error("invalid_moss_model_path", "MOSS-TTS-Nano 模型路径不安全", null)
+            return
+        }
+        if (outputFile == null || !outputFile.isInside(cacheRoot)) {
+            result.error("invalid_moss_output_path", "MOSS-TTS-Nano 音频输出路径不安全", null)
+            return
+        }
+        val tokenChunks = runCatching {
+            chunksValue.map { rawChunk ->
+                val values = rawChunk as? List<*> ?: error("token chunk is not a list")
+                require(values.isNotEmpty() && values.size <= 512)
+                IntArray(values.size) { index ->
+                    val value = values[index] as? Number ?: error("token is not numeric")
+                    value.toInt().also { require(it in 0 until 16384) }
+                }
+            }.also {
+                require(it.size <= 64)
+                require(it.sumOf(IntArray::size) <= 8192)
+            }
+        }.getOrElse {
+            result.error("invalid_moss_tokens", "MOSS-TTS-Nano 文本 token 无效", null)
+            return
+        }
+        val voices = setOf(
+            "Junhao", "Zhiming", "Weiguo", "Xiaoyu", "Yuewen", "Lingyu",
+            "Trump", "Ava", "Bella", "Adam", "Nathan", "Soyo", "Saki",
+            "Mortis", "Umiri", "Mei", "Anon", "Arisa",
+        )
+        val voice = (arguments["voice"] as? String).orEmpty().let {
+            if (it in voices) it else "Junhao"
+        }
+        val maxFrames = (arguments["maxFrames"] as? Number)?.toInt()?.coerceIn(40, 375) ?: 375
+        val seed = (arguments["seed"] as? Number)?.toLong() ?: System.nanoTime()
+        mossCancellation.set(true)
+        val cancellation = AtomicBoolean(false)
+        mossCancellation = cancellation
+        mossExecutor.execute {
+            try {
+                val synthesis = MossOnnxEngine(
+                    modelRoot,
+                    cpuThreads = mossCpuThreads(),
+                ).use { engine ->
+                    engine.synthesize(
+                        textTokenChunks = tokenChunks,
+                        outputFile = outputFile,
+                        voice = voice,
+                        maxFrames = maxFrames,
+                        seed = seed,
+                        cancelled = cancellation,
+                    )
+                }
+                deliverMossResult(result) {
+                    Log.i(
+                        "Talk2U/MOSS",
+                        "synthesis provider=${synthesis.provider} elapsedMs=${synthesis.elapsedMs} " +
+                            "durationMs=${synthesis.durationMs} frames=${synthesis.generatedFrames}",
+                    )
+                    result.success(
+                        mapOf(
+                            "path" to synthesis.outputFile.path,
+                            "sampleRate" to synthesis.sampleRate,
+                            "durationMs" to synthesis.durationMs,
+                            "elapsedMs" to synthesis.elapsedMs,
+                            "generatedFrames" to synthesis.generatedFrames,
+                            "provider" to synthesis.provider,
+                        ),
+                    )
+                }
+            } catch (_: CancellationException) {
+                outputFile.delete()
+                deliverMossResult(result) {
+                    result.error("moss_cancelled", "MOSS-TTS-Nano 推理已取消", null)
+                }
+            } catch (error: Throwable) {
+                outputFile.delete()
+                val message = error.message ?: error.javaClass.simpleName
+                Log.e("Talk2U/MOSS", "MOSS-TTS-Nano synthesis failed", error)
+                deliverMossResult(result) {
+                    result.error("moss_synthesis_failed", "MOSS-TTS-Nano 推理失败: $message", null)
+                }
+            }
+        }
+    }
+
+    private fun releaseMoss(result: MethodChannel.Result) {
+        mossCancellation.set(true)
+        mossExecutor.execute {
+            deliverMossResult(result) { result.success(null) }
+        }
+    }
+
+    private fun mossCpuThreads(): Int {
+        val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+        return if (cores >= 6) 4 else 2
+    }
+
+    private fun deliverMossResult(result: MethodChannel.Result, action: () -> Unit) {
+        if (activityDestroyed) return
+        runOnUiThread {
+            if (!activityDestroyed) runCatching(action)
+        }
+    }
+
+    private fun File.isInside(root: File): Boolean {
+        return path == root.path || path.startsWith(root.path + File.separator)
+    }
+
     override fun onResume() {
         super.onResume()
         if (ttsInitialized) refreshSpeechCapabilities()
     }
 
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level < ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) return
+        mossCancellation.set(true)
+    }
+
     override fun onDestroy() {
+        activityDestroyed = true
+        mossCancellation.set(true)
+        mossExecutor.shutdown()
         pendingRecognitionResult?.error("activity_destroyed", "语音识别已随页面关闭", null)
         pendingRecognitionResult = null
         speechRecognizer?.destroy()
@@ -1030,6 +1543,7 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
         textToSpeech?.stop()
         textToSpeech?.shutdown()
         textToSpeech = null
+        ttsSegments.clear()
         ttsReady = false
         super.onDestroy()
     }

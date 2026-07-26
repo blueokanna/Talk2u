@@ -151,12 +151,9 @@ void main() {
       state.listenToChatStreamForTest(controller.stream, 'conv-2');
 
       controller.add(const ChatStreamEvent.contentDelta('Partial'));
-      // Close stream without sending Done event
       await controller.close();
-      // Allow grace window retries (300 + 700 + 1000ms)
       await Future.delayed(const Duration(milliseconds: 2500));
 
-      // After all retries, streaming should be ended
       expect(state.isStreaming, false);
     });
 
@@ -168,17 +165,14 @@ void main() {
         state.startStreaming();
         state.listenToChatStreamForTest(controller.stream, 'conv-old');
 
-        // Simulate user switching to a different conversation
         state.setCurrentConversationIdForTest('conv-new');
 
-        // Error events from old stream should be ignored
         controller.add(const ChatStreamEvent.error('old error'));
         await Future.delayed(const Duration(milliseconds: 50));
 
         expect(state.errorMessage, isNull);
 
         await controller.close();
-        // Cleanup: end streaming manually since old stream's onError is ignored
         state.endStreaming();
       },
     );
@@ -189,16 +183,12 @@ void main() {
       state.startStreaming();
       state.listenToChatStreamForTest(controller.stream, 'conv-old');
 
-      // Switch conversation
       state.setCurrentConversationIdForTest('conv-new');
 
-      // Stream error for old conversation
       controller.addError('network failure');
       await Future.delayed(const Duration(milliseconds: 50));
 
-      // Error should NOT be set (stale guard)
       expect(state.errorMessage, isNull);
-      // Streaming should still be active (not ended by stale error)
       expect(state.isStreaming, true);
 
       await controller.close();
@@ -224,11 +214,6 @@ void main() {
     });
 
     test('catch block in event handler sets _errorMessage', () async {
-      // This tests the try/catch around event.when(...)
-      // We simulate an exception by sending a contentDelta after streaming stopped
-      // Actually, let's test that _errorMessage is set when catch fires
-      // The catch block is hard to trigger directly, but we verify its structure
-      // by confirming normal error events work correctly
       final controller = StreamController<ChatStreamEvent>();
 
       state.startStreaming();
@@ -268,5 +253,23 @@ void main() {
         state.endStreaming();
       },
     );
+
+    test('cancel event does not turn partial text into an error', () async {
+      final controller = StreamController<ChatStreamEvent>();
+
+      state.startStreaming();
+      state.listenToChatStreamForTest(controller.stream, 'conv-cancel');
+
+      controller.add(const ChatStreamEvent.contentDelta('Partial'));
+      controller.add(const ChatStreamEvent.error('__GENERATION_CANCELLED__'));
+      controller.add(const ChatStreamEvent.done());
+      await Future.delayed(const Duration(milliseconds: 50));
+
+      expect(state.isStreaming, false);
+      expect(state.currentStreamingContent, 'Partial');
+      expect(state.errorMessage, isNull);
+
+      await controller.close();
+    });
   });
 }

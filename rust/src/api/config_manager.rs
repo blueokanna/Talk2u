@@ -18,7 +18,6 @@ impl ConfigManager {
         }
     }
 
-    /// 加载设置。如果文件不存在或无法解析，返回默认设置。
     pub fn load_settings(&self) -> AppSettings {
         let file_path = Path::new(&self.config_path).join("settings.json");
         match fs::read_to_string(&file_path) {
@@ -57,9 +56,6 @@ impl ConfigManager {
             }
         }
 
-        // Older Talk2U releases stored the Zhipu key only in `api_key`.
-        // Keep both representations synchronized so upgrades do not look
-        // unconfigured and block the request before rustglm is reached.
         if let Some(zhipu) = providers.iter_mut().find(|provider| provider.id == "zhipu") {
             if zhipu
                 .api_key
@@ -97,7 +93,6 @@ impl ConfigManager {
         settings
     }
 
-    /// 保存设置到 JSON 文件。如果目录不存在则自动创建。
     pub fn save_settings(&self, settings: &AppSettings) -> Result<(), ChatError> {
         let dir = Path::new(&self.config_path);
         if !dir.exists() {

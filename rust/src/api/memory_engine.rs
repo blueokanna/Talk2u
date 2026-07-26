@@ -9,76 +9,37 @@ use serde::{Deserialize, Serialize};
 use super::data_models::*;
 use super::error_handler::ChatError;
 
-// ═══════════════════════════════════════════════════════════════════
-//  短期记忆与回复指纹 — 追踪对话实时状态
-// ═══════════════════════════════════════════════════════════════════
-
-/// 短期记忆上下文 — 追踪最近对话的活跃状态和情感弧线
-/// 不同于长期记忆（压缩后的摘要），短期记忆追踪的是「此刻」的对话状态：
-///   - 当前在聊什么话题
-///   - 最近几轮的情绪变化
-///   - 未展开的对话线索
-///   - AI 最近回复的结构指纹（用于反公式化）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShortTermContext {
-    /// 当前活跃话题关键词（从最近消息提取）
     pub active_topics: Vec<String>,
-    /// 情感弧线快照（最近 N 轮的情绪变化轨迹）
     pub emotional_arc: Vec<EmotionalSnapshot>,
-    /// 未展开的对话线索（提到但没深聊的话题）
     pub pending_threads: Vec<String>,
-    /// 最近 AI 回复的结构指纹（用于检测回复模式固化）
     pub response_fingerprints: Vec<ResponseFingerprint>,
 }
 
-/// 情绪快照 — 记录某一轮对话的情绪状态
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmotionalSnapshot {
     pub turn: u32,
-    /// 效价：-1.0（消极）到 1.0（积极）
     pub valence: f64,
-    /// 唤醒度：0.0（平静）到 1.0（激动）
     pub arousal: f64,
-    /// 主导情绪名称
     pub dominant_emotion: String,
 }
 
-/// 回复结构指纹 — 用于检测 AI 回复的模式固化
-/// 记录每次 AI 回复的结构特征，当连续多次结构相似时触发反公式化
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResponseFingerprint {
-    /// 开头前 10 个字符
     pub opening_chars: String,
-    /// 段落数量
     pub paragraph_count: usize,
-    /// 平均句子长度（字符数）
     pub avg_sentence_len: f64,
-    /// 结尾后 10 个字符
     pub ending_chars: String,
-    /// 是否以问句结尾
     pub ends_with_question: bool,
-    /// 总长度
     pub total_length: usize,
-    /// 是否包含动作标记（*动作*）
     pub has_action_marker: bool,
-    /// 是否使用了列表/编号格式
     pub has_list_format: bool,
-    /// 情感基调分类：warm/neutral/cold/playful/concerned
     pub emotional_tone: String,
-}
-
-/// 相关性评分结果
-#[derive(Debug, Clone)]
-pub struct RelevanceScore {
-    pub tfidf_score: f64,
-    pub keyword_overlap: f64,
-    pub topic_match: f64,
-    pub final_score: f64,
 }
 
 const SUMMARIZE_INTERVAL: u32 = 10;
 
-/// 触发分级合并的摘要数量阈值
 const TIERED_MERGE_THRESHOLD: usize = 8;
 
 const BM25_K1: f64 = 1.2;
@@ -110,9 +71,6 @@ impl MemoryEngine {
         turn_count > 0 && turn_count.is_multiple_of(SUMMARIZE_INTERVAL)
     }
 
-    /// 根据压缩代数计算影响等级
-    /// 压缩是渐进式的：每次合并/压缩都会增加代数，
-    /// 代数越高，信息保真度越低（但核心身份始终保留）
     pub fn compression_impact(generation: u32) -> CompressionImpactLevel {
         match generation {
             0..=1 => CompressionImpactLevel::Lossless,
@@ -123,8 +81,6 @@ impl MemoryEngine {
         }
     }
 
-    /// 根据压缩影响等级生成保护指令
-    /// 告诉总结模型哪些维度必须优先保留
     fn compression_protection_instructions(generation: u32) -> String {
         let impact = Self::compression_impact(generation);
         match impact {
@@ -197,7 +153,6 @@ impl MemoryEngine {
     ) -> String {
         let mut prompt = String::new();
 
-        // 计算当前压缩代数（基于已有摘要的最大代数）
         let max_gen = existing_summaries
             .iter()
             .map(|s| s.compression_generation)
@@ -209,7 +164,6 @@ impl MemoryEngine {
             max_gen
         };
 
-        // 注入压缩保护指令
         prompt.push_str(&Self::compression_protection_instructions(current_gen));
         prompt.push('\n');
         prompt.push('\n');
@@ -276,7 +230,6 @@ impl MemoryEngine {
     ) -> String {
         let mut prompt = String::new();
 
-        // 计算合并后的压缩代数（所有被合并摘要的最大代数 + 1）
         let max_gen = all_summaries
             .iter()
             .map(|s| s.compression_generation)
@@ -284,7 +237,6 @@ impl MemoryEngine {
             .unwrap_or(0);
         let merge_gen = max_gen + 1;
 
-        // 注入压缩保护指令
         prompt.push_str(&Self::compression_protection_instructions(merge_gen));
         prompt.push('\n');
         prompt.push_str(&format!(
@@ -458,14 +410,6 @@ impl MemoryEngine {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    //  TF-IDF 加权余弦相似度 — 完整实现
-    //  参考智谱增强型上下文技术，支持中文文本的细粒度语义匹配
-    // ═══════════════════════════════════════════════════════════════
-
-    /// TF-IDF 加权余弦相似度
-    /// 使用字符 n-gram（unigram + bigram + trigram）+ 关键词作为混合特征
-    /// 比简单的关键词集合交集更精确，能捕捉部分语义相似性
     pub fn tfidf_cosine_similarity(text_a: &str, text_b: &str) -> f64 {
         if text_a.is_empty() || text_b.is_empty() {
             return 0.0;
@@ -474,7 +418,6 @@ impl MemoryEngine {
         let norm_a = text_a.to_lowercase();
         let norm_b = text_b.to_lowercase();
 
-        // 生成混合特征（字符 n-gram + 关键词）
         let features_a = Self::text_to_hybrid_features(&norm_a);
         let features_b = Self::text_to_hybrid_features(&norm_b);
 
@@ -482,11 +425,9 @@ impl MemoryEngine {
             return 0.0;
         }
 
-        // 计算 TF 向量
         let tf_a = Self::compute_tf(&features_a);
         let tf_b = Self::compute_tf(&features_b);
 
-        // 收集所有特征作为词汇表
         let mut vocabulary: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for key in tf_a.keys() {
             vocabulary.insert(key.as_str());
@@ -495,8 +436,6 @@ impl MemoryEngine {
             vocabulary.insert(key.as_str());
         }
 
-        // 计算每个特征的 IDF（基于两个文档的小型语料库）
-        // IDF = ln(N / (1 + df)) + 1.0（加1平滑，防止零值）
         let total_docs = 2.0f64;
         let mut dot_product = 0.0f64;
         let mut norm_sq_a = 0.0f64;
@@ -506,7 +445,6 @@ impl MemoryEngine {
             let tf_val_a = tf_a.get(*term).copied().unwrap_or(0.0);
             let tf_val_b = tf_b.get(*term).copied().unwrap_or(0.0);
 
-            // 计算文档频率（出现在几个文档中）
             let df =
                 (if tf_val_a > 0.0 { 1.0 } else { 0.0 }) + (if tf_val_b > 0.0 { 1.0 } else { 0.0 });
             let idf = (total_docs / (1.0 + df)).ln() + 1.0;
@@ -527,8 +465,6 @@ impl MemoryEngine {
         }
     }
 
-    /// 将文本转换为混合特征向量（字符 unigram + bigram + trigram + 关键词）
-    /// 中文字符使用 unigram 和 bigram，关键词提供语义粒度
     fn text_to_hybrid_features(text: &str) -> Vec<String> {
         let chars: Vec<char> = text
             .chars()
@@ -537,36 +473,30 @@ impl MemoryEngine {
 
         let mut features = Vec::new();
 
-        // 中文字符 unigram
         for c in &chars {
             if *c > '\u{4e00}' && *c < '\u{9fff}' {
                 features.push(c.to_string());
             }
         }
 
-        // 字符 bigram（覆盖中英文）
         if chars.len() >= 2 {
             for window in chars.windows(2) {
                 features.push(window.iter().collect::<String>());
             }
         }
 
-        // 字符 trigram（提供更多语境信息）
         if chars.len() >= 3 {
             for window in chars.windows(3) {
                 features.push(window.iter().collect::<String>());
             }
         }
 
-        // 关键词级特征（提供语义粒度）
         let keywords = Self::extract_keywords(text);
         features.extend(keywords);
 
         features
     }
 
-    /// 计算特征的词频（TF）
-    /// TF = 特征出现次数 / 总特征数
     fn compute_tf(features: &[String]) -> HashMap<String, f64> {
         let mut counts: HashMap<String, f64> = HashMap::new();
         let total = features.len() as f64;
@@ -582,27 +512,17 @@ impl MemoryEngine {
         counts
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    //  话题提取与相关性评分 — 上下文增强检索的核心
-    //  参考：智谱增强型上下文文档中的「上下文感知检索」
-    // ═══════════════════════════════════════════════════════════════
-
-    /// 从文本中提取活跃话题关键词
-    /// 不同于 extract_keywords（提取所有特征词），此方法提取的是「话题」级别的语义单位
     pub fn extract_active_topics_from_text(text: &str) -> Vec<String> {
         let mut topics = Vec::new();
 
-        // 提取关键词作为基础话题
         let keywords = Self::extract_keywords(text);
         topics.extend(keywords);
 
-        // 提取中文短语（2-4 字组合）作为话题
         let chars: Vec<char> = text.chars().collect();
         for window_size in 2..=4 {
             if chars.len() >= window_size {
                 for window in chars.windows(window_size) {
                     let phrase: String = window.iter().collect();
-                    // 只保留包含中文字符且不全是停用词的短语
                     if phrase.chars().any(|c| c > '\u{4e00}' && c < '\u{9fff}')
                         && !is_stop_word(&phrase)
                     {
@@ -617,8 +537,6 @@ impl MemoryEngine {
         topics
     }
 
-    /// 从最近的消息序列中提取活跃话题
-    /// 最近的消息权重更高
     pub fn extract_active_topics_from_messages(messages: &[&Message]) -> Vec<String> {
         let mut topic_scores: HashMap<String, f64> = HashMap::new();
         let total = messages.len();
@@ -628,9 +546,7 @@ impl MemoryEngine {
                 continue;
             }
 
-            // 时间衰减权重：最近的消息权重最高
             let recency_weight = ((i + 1) as f64 / total.max(1) as f64).powf(0.5);
-            // 用户消息权重更高
             let role_weight = if msg.role == MessageRole::User {
                 1.5
             } else {
@@ -644,16 +560,12 @@ impl MemoryEngine {
             }
         }
 
-        // 按权重降序排序，取 top 30
         let mut scored: Vec<(String, f64)> = topic_scores.into_iter().collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         scored.into_iter().take(30).map(|(t, _)| t).collect()
     }
 
-    /// 计算一条事实/记忆与当前上下文的相关性分数
-    /// 综合 TF-IDF 余弦相似度、关键词重叠度、直接包含检测
-    /// 返回 0.0-1.0 的综合相关性分数
     pub fn compute_relevance_score(
         fact: &str,
         active_topics: &[String],
@@ -663,10 +575,8 @@ impl MemoryEngine {
             return 0.0;
         }
 
-        // 维度1：TF-IDF 余弦相似度（事实 vs 用户消息）
         let tfidf_score = Self::tfidf_cosine_similarity(fact, user_content);
 
-        // 维度2：关键词重叠（事实的关键词 vs 活跃话题）
         let fact_keywords = Self::extract_keywords(fact);
         let keyword_overlap = if active_topics.is_empty() || fact_keywords.is_empty() {
             0.0
@@ -682,7 +592,6 @@ impl MemoryEngine {
             overlap_count as f64 / fact_keywords.len().max(1) as f64
         };
 
-        // 维度3：直接文本包含检测（事实中的关键词是否出现在用户消息中）
         let containment_score = if fact_keywords
             .iter()
             .any(|fk| user_content.contains(fk.as_str()))
@@ -692,40 +601,29 @@ impl MemoryEngine {
             0.0
         };
 
-        // 综合评分：TF-IDF 40% + 关键词重叠 40% + 包含检测 20%
         let final_score = tfidf_score * 0.4 + keyword_overlap * 0.4 + containment_score * 0.2;
 
         final_score.clamp(0.0, 1.0)
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    //  回复指纹分析 — 反公式化的基础设施
-    // ═══════════════════════════════════════════════════════════════
-
-    /// 分析 AI 回复的结构指纹
-    /// 用于检测回复是否陷入固定模式（每次都用相同结构回复）
     pub fn fingerprint_response(content: &str) -> ResponseFingerprint {
         let chars: Vec<char> = content.chars().collect();
         let total_length = chars.len();
 
-        // 开头 10 个字符
         let opening_chars: String = chars.iter().take(10).collect();
 
-        // 结尾 10 个字符
         let ending_chars: String = if chars.len() > 10 {
             chars[chars.len() - 10..].iter().collect()
         } else {
             opening_chars.clone()
         };
 
-        // 段落数量（按换行分割）
         let paragraphs: Vec<&str> = content
             .split('\n')
             .filter(|p| !p.trim().is_empty())
             .collect();
         let paragraph_count = paragraphs.len();
 
-        // 平均句子长度
         let sentences: Vec<&str> = content
             .split(|c: char| c == '。' || c == '！' || c == '？' || c == '\n')
             .filter(|s| !s.trim().is_empty())
@@ -740,21 +638,17 @@ impl MemoryEngine {
                 / sentences.len() as f64
         };
 
-        // 是否以问句结尾
         let ends_with_question =
             content.trim_end().ends_with('？') || content.trim_end().ends_with('?');
 
-        // 是否有动作标记
         let has_action_marker =
             content.contains('*') || content.contains('（') || content.contains('「');
 
-        // 是否使用了列表/编号格式
         let has_list_format = content.contains("1.")
             || content.contains("1、")
             || content.contains("- ")
             || content.contains("① ");
 
-        // 情感基调分类
         let emotional_tone = Self::classify_response_tone(content);
 
         ResponseFingerprint {
@@ -770,7 +664,6 @@ impl MemoryEngine {
         }
     }
 
-    /// 分类回复的情感基调
     fn classify_response_tone(content: &str) -> String {
         let warm_words = [
             "暖", "心疼", "抱", "乖", "宝", "温柔", "安慰", "懂", "陪", "在的", "没事", "放心",
@@ -812,8 +705,6 @@ impl MemoryEngine {
         }
     }
 
-    /// 分析多个回复指纹，检测模式固化
-    /// 返回具体的反公式化建议
     pub fn analyze_response_patterns(fingerprints: &[ResponseFingerprint]) -> Vec<String> {
         let mut suggestions = Vec::new();
 
@@ -823,7 +714,6 @@ impl MemoryEngine {
 
         let recent = &fingerprints[fingerprints.len().saturating_sub(5)..];
 
-        // 检测1：开头模式固化（前4个字符相同的比例）
         let opening_4chars: Vec<String> = recent
             .iter()
             .map(|f| f.opening_chars.chars().take(4).collect::<String>())
@@ -840,7 +730,6 @@ impl MemoryEngine {
             );
         }
 
-        // 检测2：结尾总是问句
         let question_end_ratio =
             recent.iter().filter(|f| f.ends_with_question).count() as f64 / recent.len() as f64;
         if question_end_ratio > 0.7 {
@@ -852,7 +741,6 @@ impl MemoryEngine {
             );
         }
 
-        // 检测3：长度固化（变异系数 < 12%）
         let lengths: Vec<f64> = recent.iter().map(|f| f.total_length as f64).collect();
         let mean_len = lengths.iter().sum::<f64>() / lengths.len() as f64;
         let variance =
@@ -870,7 +758,6 @@ impl MemoryEngine {
             ));
         }
 
-        // 检测4：段落结构固化
         let para_counts: Vec<usize> = recent.iter().map(|f| f.paragraph_count).collect();
         let para_set: std::collections::HashSet<&usize> = para_counts.iter().collect();
         if para_set.len() <= 1 && recent.len() >= 3 {
@@ -881,7 +768,6 @@ impl MemoryEngine {
             );
         }
 
-        // 检测5：情感基调固化
         let tone_set: std::collections::HashSet<&str> =
             recent.iter().map(|f| f.emotional_tone.as_str()).collect();
         if tone_set.len() <= 1 && recent.len() >= 4 {
@@ -902,7 +788,6 @@ impl MemoryEngine {
             ));
         }
 
-        // 检测6：动作描写使用率异常
         let action_ratio =
             recent.iter().filter(|f| f.has_action_marker).count() as f64 / recent.len() as f64;
         if action_ratio > 0.9 {
@@ -919,7 +804,6 @@ impl MemoryEngine {
             );
         }
 
-        // 检测7：使用列表格式（严禁）
         if recent.iter().any(|f| f.has_list_format) {
             suggestions.push(
                 "绝对不要使用编号列表（1. 2. 3.）来回复！\
@@ -931,18 +815,15 @@ impl MemoryEngine {
         suggestions
     }
 
-    /// 从最近消息构建短期记忆上下文
     pub fn build_short_term_context(messages: &[Message]) -> ShortTermContext {
         let non_system: Vec<&Message> = messages
             .iter()
             .filter(|m| m.role != MessageRole::System)
             .collect();
 
-        // 提取活跃话题（从最近 6 条消息）
         let recent_refs: Vec<&Message> = non_system.iter().rev().take(6).copied().collect();
         let active_topics = Self::extract_active_topics_from_messages(&recent_refs);
 
-        // 构建情感弧线（最近 5 轮用户消息）
         let mut emotional_arc = Vec::new();
         let user_messages: Vec<&Message> = non_system
             .iter()
@@ -963,10 +844,8 @@ impl MemoryEngine {
         }
         emotional_arc.reverse();
 
-        // 检测未展开的话题线索
         let pending_threads = Self::detect_pending_threads(&non_system);
 
-        // 收集 AI 回复的结构指纹
         let response_fingerprints: Vec<ResponseFingerprint> = non_system
             .iter()
             .filter(|m| m.role == MessageRole::Assistant)
@@ -986,7 +865,6 @@ impl MemoryEngine {
         }
     }
 
-    /// 快速情绪扫描（轻量级，用于短期记忆）
     fn quick_emotion_scan(text: &str) -> (f64, f64, String) {
         let positive_words = [
             ("开心", 0.8),
@@ -1056,27 +934,22 @@ impl MemoryEngine {
         (valence, arousal, dominant.to_string())
     }
 
-    /// 检测未展开的对话线索
-    /// 当用户提到某个话题但 AI 没有深入回应时，记录为待展开线索
     fn detect_pending_threads(messages: &[&Message]) -> Vec<String> {
         let mut threads = Vec::new();
         if messages.len() < 4 {
             return threads;
         }
 
-        // 检查最近的用户-AI 消息对
         let recent: Vec<&&Message> = messages.iter().rev().take(6).collect();
         let mut i = 0;
         while i + 1 < recent.len() {
             let current = recent[i];
             let next = recent[i + 1];
 
-            // 找到用户消息 + AI 回复的对
             if current.role == MessageRole::User && next.role == MessageRole::Assistant {
                 let user_kw = Self::extract_keywords(&current.content);
                 let ai_kw = Self::extract_keywords(&next.content);
 
-                // 找出用户提到但 AI 没回应的关键词
                 for kw in &user_kw {
                     if kw.chars().count() >= 2 && !ai_kw.contains(kw) && !is_stop_word(kw) {
                         threads.push(kw.clone());
@@ -1092,8 +965,6 @@ impl MemoryEngine {
         threads
     }
 
-    /// 构建短期记忆的情感弧线描述
-    /// 将情绪快照转化为自然语言描述，注入系统提示
     pub fn describe_emotional_arc(arc: &[EmotionalSnapshot]) -> String {
         if arc.is_empty() {
             return String::new();
@@ -1105,7 +976,6 @@ impl MemoryEngine {
         let mut description = String::from("对方最近的情绪变化：");
         let emotions: Vec<&str> = arc.iter().map(|s| s.dominant_emotion.as_str()).collect();
 
-        // 检测情绪变化趋势
         let first_valence = arc.first().map(|s| s.valence).unwrap_or(0.0);
         let last_valence = arc.last().map(|s| s.valence).unwrap_or(0.0);
         let trend = last_valence - first_valence;
@@ -1120,7 +990,6 @@ impl MemoryEngine {
             description.push_str("（一直很平淡，可能需要注意）");
         }
 
-        // 检测情绪急转
         for window in arc.windows(2) {
             let delta = (window[1].valence - window[0].valence).abs();
             if delta > 0.5 {
@@ -1156,13 +1025,11 @@ impl MemoryEngine {
 
         for summary in summaries {
             let mut doc_kw = summary.keywords.clone();
-            // 使用增强搜索文本（包含上下文卡片信息）提升检索精度
             let enhanced_text = Self::build_enhanced_search_text(summary);
             doc_kw.extend(Self::extract_keywords(&enhanced_text));
             for fact in &summary.core_facts {
                 doc_kw.extend(Self::extract_keywords(fact));
             }
-            // 从上下文卡片中提取额外关键词
             if let Some(card) = &summary.context_card {
                 for entity in &card.key_entities {
                     doc_kw.extend(Self::extract_keywords(entity));
@@ -1221,22 +1088,13 @@ impl MemoryEngine {
             .collect()
     }
 
-    /// ══ 分级压缩合并（排级制度）══
-    /// 当摘要数量超过阈值时，自动触发分级合并：
-    ///   1. 对每条核心事实进行排级分类（Identity > CriticalEvent > RelationshipDynamic > CurrentState > SceneDetail）
-    ///   2. 按排级从低到高合并：先合并 SceneDetail，再合并 CurrentState，直到数量降到目标值
-    ///   3. Identity 和 CriticalEvent 级别的事实永远独立保留，不参与合并
-    ///
-    /// 核心原则：关键信息绝对无损，只压缩低优先级的冗余信息
     pub fn should_tiered_merge(summaries: &[MemorySummary]) -> bool {
         summaries.len() >= TIERED_MERGE_THRESHOLD
     }
 
-    /// 对单条核心事实进行排级分类
     pub fn classify_fact_tier(fact: &str) -> MemoryTier {
         let f = fact.to_lowercase();
 
-        // Identity 级：身份、姓名、年龄、职业、核心设定
         if f.contains("[身份]")
             || f.contains("姓名")
             || f.contains("名字")
@@ -1250,7 +1108,6 @@ impl MemoryEngine {
             return MemoryTier::Identity;
         }
 
-        // CriticalEvent 级：不可逆事件、承诺、约定、金钱
         if f.contains("[事件]")
             || f.contains("承诺")
             || f.contains("约定")
@@ -1267,7 +1124,6 @@ impl MemoryEngine {
             return MemoryTier::CriticalEvent;
         }
 
-        // RelationshipDynamic 级：关系变化
         if f.contains("[关系]")
             || f.contains("关系")
             || f.contains("亲密")
@@ -1280,7 +1136,6 @@ impl MemoryEngine {
             return MemoryTier::RelationshipDynamic;
         }
 
-        // CurrentState 级：当前状态
         if f.contains("[状态]")
             || f.contains("当前")
             || f.contains("现在")
@@ -1291,11 +1146,9 @@ impl MemoryEngine {
             return MemoryTier::CurrentState;
         }
 
-        // 默认：SceneDetail
         MemoryTier::SceneDetail
     }
 
-    /// 为所有核心事实生成排级分类
     pub fn classify_all_facts(core_facts: &[String]) -> Vec<MemoryTier> {
         core_facts
             .iter()
@@ -1303,14 +1156,11 @@ impl MemoryEngine {
             .collect()
     }
 
-    /// 执行分级合并：将多条摘要按排级策略合并为更少的条目
-    /// 返回合并后的摘要列表 + 用于 LLM 合并的 prompt（如果需要 LLM 辅助）
     pub fn tiered_merge(summaries: &[MemorySummary]) -> (Vec<MemorySummary>, Option<String>) {
         if summaries.len() < TIERED_MERGE_THRESHOLD {
             return (summaries.to_vec(), None);
         }
 
-        // 第一步：提取所有核心事实并分级
         let mut identity_facts: Vec<String> = Vec::new();
         let mut critical_facts: Vec<String> = Vec::new();
         let mut relationship_facts: Vec<String> = Vec::new();
@@ -1334,7 +1184,6 @@ impl MemoryEngine {
             }
         }
 
-        // 去重（精确匹配）
         identity_facts.sort();
         identity_facts.dedup();
         critical_facts.sort();
@@ -1344,12 +1193,8 @@ impl MemoryEngine {
         state_facts.sort();
         state_facts.dedup();
 
-        // 第二步：SceneDetail 直接丢弃（最低优先级）
-        // CurrentState 只保留最新的（按时间排序，同类覆盖）
         let state_facts = Self::deduplicate_state_facts(&state_facts);
 
-        // 第三步：将摘要按时间分组合并
-        // 保留最新的 1 条摘要不动，其余合并为 1-2 条
         let max_gen = summaries
             .iter()
             .map(|s| s.compression_generation)
@@ -1357,10 +1202,8 @@ impl MemoryEngine {
             .unwrap_or(0);
         let merge_gen = max_gen + 1;
 
-        // 最新的摘要保持独立
         let latest = summaries.last().cloned();
 
-        // 其余摘要合并为一条"历史总览"
         let older: Vec<&MemorySummary> = summaries
             .iter()
             .take(summaries.len().saturating_sub(1))
@@ -1370,14 +1213,12 @@ impl MemoryEngine {
             return (summaries.to_vec(), None);
         }
 
-        // 合并所有旧摘要的 summary 为时间线
         let merged_summary: String = older
             .iter()
             .map(|s| s.summary.as_str())
             .collect::<Vec<&str>>()
             .join("→");
 
-        // 截断合并后的 summary（保持精炼）
         let merged_summary = if merged_summary.chars().count() > 150 {
             format!(
                 "{}...",
@@ -1387,7 +1228,6 @@ impl MemoryEngine {
             merged_summary
         };
 
-        // 合并核心事实：Identity + CriticalEvent 全保留，其余按排级保留
         let mut merged_facts: Vec<String> = Vec::new();
         let mut merged_tiers: Vec<MemoryTier> = Vec::new();
 
@@ -1407,18 +1247,15 @@ impl MemoryEngine {
             merged_facts.push(f.clone());
             merged_tiers.push(MemoryTier::CurrentState);
         }
-        // SceneDetail 不保留
 
         let turn_start = older.iter().map(|s| s.turn_range_start).min().unwrap_or(0);
         let turn_end = older.iter().map(|s| s.turn_range_end).max().unwrap_or(0);
 
-        // 合并关键词
         let mut merged_keywords: Vec<String> =
             older.iter().flat_map(|s| s.keywords.clone()).collect();
         merged_keywords.sort();
         merged_keywords.dedup();
 
-        // 构建合并后的上下文卡片
         let merged_card = Self::build_context_card_from_facts(&merged_facts, turn_start, turn_end);
 
         let merged_entry = MemorySummary {
@@ -1439,7 +1276,6 @@ impl MemoryEngine {
             result.push(latest);
         }
 
-        // 如果合并后仍然超过目标，生成 LLM 辅助合并 prompt
         let needs_llm = result.iter().map(|s| s.core_facts.len()).sum::<usize>() > 40;
 
         let llm_prompt = if needs_llm {
@@ -1451,13 +1287,10 @@ impl MemoryEngine {
         (result, llm_prompt)
     }
 
-    /// 状态事实去重：同类状态只保留最新的
-    /// 例如 "[状态] 心情低落" 和 "[状态] 心情好转" → 只保留后者
     fn deduplicate_state_facts(facts: &[String]) -> Vec<String> {
         if facts.len() <= 2 {
             return facts.to_vec();
         }
-        // 简单策略：只保留最后 2 条状态事实（最新的状态）
         facts
             .iter()
             .rev()
@@ -1469,7 +1302,6 @@ impl MemoryEngine {
             .collect()
     }
 
-    /// 构建分级合并的 LLM 辅助 prompt
     fn build_tiered_merge_prompt(summaries: &[MemorySummary], merge_gen: u32) -> String {
         let mut prompt = String::new();
 
@@ -1532,8 +1364,6 @@ impl MemoryEngine {
         prompt
     }
 
-    /// 为记忆摘要生成上下文增强卡片
-    /// 参考智谱上下文增强技术：为每个知识切片附加结构化元信息
     pub fn build_context_card(summary: &MemorySummary) -> MemoryContextCard {
         Self::build_context_card_from_facts(
             &summary.core_facts,
@@ -1542,7 +1372,6 @@ impl MemoryEngine {
         )
     }
 
-    /// 从核心事实列表构建上下文卡片
     fn build_context_card_from_facts(
         core_facts: &[String],
         turn_start: u32,
@@ -1550,14 +1379,12 @@ impl MemoryEngine {
     ) -> MemoryContextCard {
         let source_range = format!("对话轮次 {}-{}", turn_start, turn_end);
 
-        // 提取主题标签：从事实中提取分类标签
         let mut topic_tags: Vec<String> = Vec::new();
         let mut key_entities: Vec<String> = Vec::new();
         let mut emotional_indicators: Vec<&str> = Vec::new();
         let mut causal_links: Vec<String> = Vec::new();
 
         for fact in core_facts {
-            // 提取分类标签
             if fact.contains("[身份]") {
                 topic_tags.push("身份".to_string());
             }
@@ -1571,7 +1398,6 @@ impl MemoryEngine {
                 topic_tags.push("状态".to_string());
             }
 
-            // 提取实体：→ 分隔的三元组中的主体和客体
             let parts: Vec<&str> = fact.split('→').collect();
             if parts.len() >= 2 {
                 let entity = parts[0]
@@ -1592,7 +1418,6 @@ impl MemoryEngine {
                 }
             }
 
-            // 情感指标
             let positive = ["开心", "幸福", "甜蜜", "温暖", "信任", "亲密", "喜欢"];
             let negative = ["难过", "生气", "冷战", "疏远", "不信任", "伤心", "愤怒"];
             for kw in &positive {
@@ -1606,7 +1431,6 @@ impl MemoryEngine {
                 }
             }
 
-            // 因果关联：包含"因为"、"导致"、"所以"的事实
             if fact.contains("因为")
                 || fact.contains("导致")
                 || fact.contains("所以")
@@ -1621,7 +1445,6 @@ impl MemoryEngine {
         key_entities.sort();
         key_entities.dedup();
 
-        // 综合情感基调
         let pos_count = emotional_indicators
             .iter()
             .filter(|&&e| e == "正面")
@@ -1649,8 +1472,6 @@ impl MemoryEngine {
         }
     }
 
-    /// 为记忆生成增强检索文本（原始摘要 + 上下文卡片信息）
-    /// 用于提升 BM25 和语义检索的命中率
     pub fn build_enhanced_search_text(summary: &MemorySummary) -> String {
         let mut text = summary.summary.clone();
 
@@ -1709,13 +1530,10 @@ impl MemoryEngine {
                 message: format!("Failed to delete memory index: {}", e),
             })?;
         }
-        // 同时清除蒸馏状态（记忆清除后蒸馏缓存已失效）
         let _ = self.delete_distilled_state(conversation_id);
         Ok(())
     }
 
-    /// 加载蒸馏后的 system prompt 状态
-    /// 返回 Ok(None) 表示尚未蒸馏过（首次对话）
     pub fn load_distilled_state(
         &self,
         conversation_id: &str,
@@ -1735,7 +1553,6 @@ impl MemoryEngine {
         Ok(Some(state))
     }
 
-    /// 保存蒸馏后的 system prompt 状态
     pub fn save_distilled_state(
         &self,
         conversation_id: &str,
@@ -1751,7 +1568,6 @@ impl MemoryEngine {
         })
     }
 
-    /// 删除蒸馏状态文件（重启剧情或清除记忆时调用）
     pub fn delete_distilled_state(&self, conversation_id: &str) -> Result<(), ChatError> {
         let dir = self.memory_dir()?;
         let path = dir.join(format!("{}_distilled.json", conversation_id));

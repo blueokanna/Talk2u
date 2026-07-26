@@ -2,21 +2,6 @@ use super::data_models::{Message, MessageRole};
 
 type EmotionLexiconEntry = (&'static str, usize, &'static [(&'static str, f64)]);
 
-// ═══════════════════════════════════════════════════════════════════
-//  认知思维引擎 (Cognitive Engine)
-//  ─────────────────────────────────────────────────────────────────
-//  模拟人类大脑的情感认知过程：
-//    感知层 → 理解层 → 推理层 → 共情层 → 策略层
-//
-//  不是简单的关键词匹配，而是多层次的认知推理：
-//  1. 感知层：词汇情感、语气标记、标点节奏
-//  2. 理解层：否定翻转、反讽检测、语境消歧
-//  3. 推理层：意图推断、需求分析、关系动态
-//  4. 共情层：情感共鸣策略、回应温度调节
-//  5. 策略层：生成具体的回应指导
-// ═══════════════════════════════════════════════════════════════════
-
-/// 情感维度得分（连续值，-1.0 到 1.0）
 #[derive(Debug, Clone)]
 pub struct EmotionVector {
     pub joy: f64,
@@ -27,127 +12,78 @@ pub struct EmotionVector {
     pub intimacy: f64,
     pub trust: f64,
     pub anticipation: f64,
-    /// 综合效价：正=积极，负=消极
     pub valence: f64,
-    /// 情感强度/唤醒度：0=平静，1=激动
     pub arousal: f64,
 }
 
-/// 对话意图类型
 #[derive(Debug, Clone, PartialEq)]
 pub enum DialogueIntent {
-    /// 寻求情感支持（倾诉、求安慰）
     SeekingComfort,
-    /// 表达亲密（撒娇、示好、调情）
     ExpressingAffection,
-    /// 表达不满（抱怨、指责、冷战）
     ExpressingDispleasure,
-    /// 试探关系（试探态度、确认关系）
     TestingBoundary,
-    /// 分享日常（闲聊、分享见闻）
     SharingDaily,
-    /// 寻求回应（提问、等待反馈）
     SeekingResponse,
-    /// 情绪宣泄（纯粹发泄，不需要建议）
     EmotionalVenting,
-    /// 挑逗/玩闹（开玩笑、逗对方）
     Playful,
-    /// 道歉/和解（认错、修复关系）
     Reconciling,
-    /// 告别/结束（要走了、晚安）
     Farewell,
-    /// 沉默/冷淡（敷衍、不想聊）
     Withdrawn,
-    /// 深度交流（认真讨论、分享内心）
     DeepSharing,
 }
 
-/// 关系动态状态
 #[derive(Debug, Clone)]
 pub struct RelationshipDynamics {
-    /// 亲密度 0.0-1.0
     pub closeness: f64,
-    /// 信任度 0.0-1.0
     pub trust_level: f64,
-    /// 冲突张力 0.0-1.0（越高越紧张）
     pub tension: f64,
-    /// 主导权倾斜 -1.0(对方主导) 到 1.0(AI主导)
     pub power_balance: f64,
-    /// 关系趋势：正=升温，负=降温
     pub trend: f64,
 }
 
-/// 认知分析结果
 #[derive(Debug, Clone)]
 pub struct CognitiveAnalysis {
     pub emotion: EmotionVector,
     pub intent: DialogueIntent,
     pub relationship: RelationshipDynamics,
     pub empathy_strategy: EmpathyStrategy,
-    /// 检测到的特殊语言模式
     pub detected_patterns: Vec<LanguagePattern>,
-    /// 生成的认知上下文提示
     pub cognitive_prompt: String,
 }
 
-/// 共情策略
 #[derive(Debug, Clone, PartialEq)]
 pub enum EmpathyStrategy {
-    /// 镜像共情：反映对方的情绪（"我懂你的感受"）
     Mirror,
-    /// 陪伴式：不说教，只是在（"我在"）
     Accompany,
-    /// 转移注意力：用轻松话题缓解（适用于轻度负面）
     Distract,
-    /// 回应式：直接回应对方的需求
     Responsive,
-    /// 挑逗回击：用玩闹方式回应（适用于调侃场景）
     PlayfulCounter,
-    /// 温柔坚定：温柔但有立场（适用于冲突场景）
     GentleFirm,
-    /// 主动关心：察觉到异常主动询问
     ProactiveCare,
-    /// 自然流动：无需特殊策略，自然对话
     NaturalFlow,
-    /// 给予空间：对方需要独处，不要过度热情
     GiveSpace,
-    /// 升温推进：关系可以更进一步
     Escalate,
 }
 
-/// 检测到的语言模式
 #[derive(Debug, Clone, PartialEq)]
 pub enum LanguagePattern {
-    /// 否定式表达（"没事" "不是" "才没有"）
     Negation,
-    /// 反讽/阴阳怪气（"行啊" "厉害了" "随便"）
     Sarcasm,
-    /// 欲言又止（"我..." "算了" "没什么"）
     Hesitation,
-    /// 重复强调（连续用同一个词或句式）
     Repetition,
-    /// 语气急促（短句密集、标点多）
     Urgent,
-    /// 语气拖沓（长句、省略号多）
     Dragging,
-    /// 口是心非（表面说法和语气矛盾）
     Contradictory,
-    /// 试探性语言（"你觉得呢" "如果...会怎样"）
     Probing,
-    /// 撒娇语气（叠词、拉长音、装可怜）
     Coquettish,
-    /// 防御姿态（"关你什么事" "我自己可以"）
     Defensive,
-    /// 情绪压抑（表面平静但用词暗示不安）
     Suppressed,
-    /// 突然话题转换（可能在回避某个话题）
     TopicAvoidance,
 }
 
 pub struct CognitiveEngine;
 
 impl CognitiveEngine {
-    /// 主入口：对整段对话进行认知分析，生成完整的认知上下文
     pub fn analyze(messages: &[&Message]) -> CognitiveAnalysis {
         let emotion = Self::perceive_emotion(messages);
         let patterns = Self::detect_language_patterns(messages);
@@ -174,10 +110,6 @@ impl CognitiveEngine {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    //  第一层：感知层 — 多维度情感感知
-    // ═══════════════════════════════════════════════════════════════
-
     fn perceive_emotion(messages: &[&Message]) -> EmotionVector {
         let total = messages.len();
         if total == 0 {
@@ -195,9 +127,7 @@ impl CognitiveEngine {
             };
         }
 
-        // 扩展情感词典：每个词带有强度权重
         let emotion_lexicon: &[EmotionLexiconEntry] = &[
-            // (情感名, 维度索引, [(关键词, 强度)])
             (
                 "joy",
                 0,
@@ -481,7 +411,6 @@ impl CognitiveEngine {
 
             let text = &msg.content;
 
-            // 否定检测：如果关键词前面有否定词，翻转情感极性
             let negation_prefixes = [
                 "不", "没", "别", "非", "未", "无", "莫", "勿", "才没", "又不", "并不", "才不",
             ];
@@ -490,16 +419,12 @@ impl CognitiveEngine {
                 let mut dim_score = 0.0f64;
                 for &(kw, intensity) in *keywords {
                     if let Some(pos) = text.find(kw) {
-                        // 检查前面是否有否定词
                         let prefix_start = pos.saturating_sub(6);
                         let prefix = &text[prefix_start..pos];
                         let is_negated = negation_prefixes.iter().any(|neg| prefix.ends_with(neg));
 
                         if is_negated {
-                            // 否定翻转：正面情感变负面，负面情感变正面
-                            // "不开心" → sadness+, joy-
-                            // "不难过" → joy+, sadness-
-                            dim_score -= intensity * 0.5; // 减弱本维度
+                            dim_score -= intensity * 0.5;
                         } else {
                             dim_score += intensity;
                         }
@@ -512,16 +437,14 @@ impl CognitiveEngine {
                 }
             }
 
-            // 标点符号情感信号
             let punct_signals = Self::analyze_punctuation(text);
             scores[0] += punct_signals.joy_signal * weight * role_factor;
             scores[1] += punct_signals.sadness_signal * weight * role_factor;
             scores[2] += punct_signals.anger_signal * weight * role_factor;
         }
 
-        // 归一化到 0.0-1.0 范围（使用 sigmoid 压缩）
         let sigmoid = |x: f64| -> f64 { 1.0 / (1.0 + (-x).exp()) };
-        let norm = |x: f64| -> f64 { (sigmoid(x) - 0.5) * 2.0 }; // 映射到 0.0-1.0
+        let norm = |x: f64| -> f64 { (sigmoid(x) - 0.5) * 2.0 };
 
         let joy = norm(scores[0]).max(0.0);
         let sadness = norm(scores[1]).max(0.0);
@@ -532,13 +455,11 @@ impl CognitiveEngine {
         let trust = norm(scores[6]).max(0.0);
         let anticipation = norm(scores[7]).max(0.0);
 
-        // 效价 = (正面情感 - 负面情感) / 总量
         let positive = joy + intimacy + trust + anticipation;
         let negative = sadness + anger + fear;
         let total_emo = positive + negative + 0.001;
         let valence = (positive - negative) / total_emo;
 
-        // 唤醒度 = 情感总强度
         let arousal = (joy + anger + fear + surprise + intimacy).min(1.0);
 
         EmotionVector {
@@ -555,21 +476,15 @@ impl CognitiveEngine {
         }
     }
 
-    /// 标点符号情感分析
     fn analyze_punctuation(text: &str) -> PunctuationSignals {
         let chars: Vec<char> = text.chars().collect();
         let _len = chars.len().max(1) as f64;
 
-        // 感叹号密度 → 激动/开心/生气
         let exclamation_count = chars.iter().filter(|&&c| c == '！' || c == '!').count() as f64;
-        // 问号密度 → 疑惑/期待
         let _question_count = chars.iter().filter(|&&c| c == '？' || c == '?').count() as f64;
-        // 省略号 → 犹豫/欲言又止/悲伤
         let ellipsis_count = text.matches("...").count() as f64 + text.matches("…").count() as f64;
-        // 波浪号 → 撒娇/亲密
         let tilde_count = chars.iter().filter(|&&c| c == '～' || c == '~').count() as f64;
 
-        // 连续标点（如 ！！！ 或 ？？？）→ 情绪强烈
         let mut consecutive_punct = 0u32;
         let mut max_consecutive = 0u32;
         for &c in &chars {
@@ -601,14 +516,9 @@ impl CognitiveEngine {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    //  第二层：理解层 — 语言模式检测
-    // ═══════════════════════════════════════════════════════════════
-
     fn detect_language_patterns(messages: &[&Message]) -> Vec<LanguagePattern> {
         let mut patterns = Vec::new();
 
-        // 只分析最近的用户消息（最多3条）
         let recent_user: Vec<&&Message> = messages
             .iter()
             .rev()
@@ -622,8 +532,6 @@ impl CognitiveEngine {
 
         let latest = &recent_user[0].content;
 
-        // ── 否定式表达检测 ──
-        // "没事" "不是" "才没有" "没什么" "不要紧" — 可能是口是心非
         let negation_phrases = [
             "没事",
             "不是",
@@ -650,13 +558,11 @@ impl CognitiveEngine {
             .count();
         if negation_count >= 1 {
             patterns.push(LanguagePattern::Negation);
-            // 如果否定词多且消息短，很可能是口是心非
             if negation_count >= 2 || (latest.chars().count() <= 10 && negation_count >= 1) {
                 patterns.push(LanguagePattern::Contradictory);
             }
         }
 
-        // ── 反讽/阴阳怪气检测 ──
         let sarcasm_markers = [
             ("行啊", 0.7),
             ("厉害了", 0.8),
@@ -675,7 +581,7 @@ impl CognitiveEngine {
             ("爱咋咋地", 0.8),
             ("你厉害", 0.7),
             ("了不起", 0.6),
-            ("真棒啊", 0.5), // 需要结合语境判断
+            ("真棒啊", 0.5),
         ];
         let sarcasm_score: f64 = sarcasm_markers
             .iter()
@@ -683,13 +589,11 @@ impl CognitiveEngine {
             .map(|(_, weight)| weight)
             .sum();
 
-        // 短消息 + 反讽标记 = 高概率反讽
         let is_short = latest.chars().count() <= 15;
         if sarcasm_score >= 0.6 || (sarcasm_score >= 0.3 && is_short) {
             patterns.push(LanguagePattern::Sarcasm);
         }
 
-        // ── 欲言又止检测 ──
         let hesitation_markers = [
             "我...",
             "算了",
@@ -709,23 +613,19 @@ impl CognitiveEngine {
         if hesitation_markers.iter().any(|m| latest.contains(m)) {
             patterns.push(LanguagePattern::Hesitation);
         }
-        // 消息以省略号结尾也是欲言又止
         if (latest.ends_with("...") || latest.ends_with("…") || latest.ends_with(".."))
             && !patterns.contains(&LanguagePattern::Hesitation)
         {
             patterns.push(LanguagePattern::Hesitation);
         }
 
-        // ── 重复强调检测 ──
         if recent_user.len() >= 2 {
             let prev = &recent_user[1].content;
-            // 检测连续发送相似内容
             let similarity = Self::text_similarity(latest, prev);
             if similarity > 0.5 {
                 patterns.push(LanguagePattern::Repetition);
             }
         }
-        // 单条消息内的重复（如 "好好好" "嗯嗯嗯" "不要不要不要"）
         let chars: Vec<char> = latest.chars().collect();
         if chars.len() >= 4 {
             let mut repeat_count = 1u32;
@@ -741,8 +641,6 @@ impl CognitiveEngine {
             }
         }
 
-        // ── 语气急促检测 ──
-        // 短句密集、标点多、消息短
         let char_count = latest.chars().count();
         let punct_count = latest
             .chars()
@@ -752,14 +650,12 @@ impl CognitiveEngine {
             patterns.push(LanguagePattern::Urgent);
         }
 
-        // ── 语气拖沓检测 ──
         let ellipsis_count = latest.matches("...").count() + latest.matches("…").count();
         let tilde_count = latest.chars().filter(|&c| c == '～' || c == '~').count();
         if ellipsis_count >= 2 || (tilde_count >= 2 && char_count > 15) {
             patterns.push(LanguagePattern::Dragging);
         }
 
-        // ── 试探性语言检测 ──
         let probing_markers = [
             "你觉得呢",
             "如果",
@@ -781,7 +677,6 @@ impl CognitiveEngine {
             patterns.push(LanguagePattern::Probing);
         }
 
-        // ── 撒娇语气检测 ──
         let coquettish_markers = [
             "嘛",
             "啦",
@@ -806,7 +701,6 @@ impl CognitiveEngine {
             patterns.push(LanguagePattern::Coquettish);
         }
 
-        // ── 防御姿态检测 ──
         let defensive_markers = [
             "关你什么事",
             "我自己可以",
@@ -825,25 +719,19 @@ impl CognitiveEngine {
             patterns.push(LanguagePattern::Defensive);
         }
 
-        // ── 情绪压抑检测 ──
-        // 表面平静但有微妙的负面信号
         let suppression_signals = ["嗯", "哦", "好", "知道了", "行", "好吧", "嗯嗯"];
         let is_flat_response = suppression_signals.iter().any(|s| latest.trim() == *s);
         if is_flat_response && recent_user.len() >= 2 {
-            // 之前的消息更长/更有情绪，现在突然变短 → 可能在压抑
             let prev_len = recent_user[1].content.chars().count();
             if prev_len > 10 {
                 patterns.push(LanguagePattern::Suppressed);
             }
         }
 
-        // ── 话题回避检测 ──
         if recent_user.len() >= 2 {
             let prev = &recent_user[1].content;
-            // 前一条在聊某个话题，这一条突然完全无关
             let similarity = Self::text_similarity(latest, prev);
             if similarity < 0.05 && latest.chars().count() > 5 && prev.chars().count() > 5 {
-                // 检查是否有回避信号词
                 let avoidance_words = ["不说这个了", "换个话题", "别提了", "不想聊", "说点别的"];
                 if avoidance_words.iter().any(|w| latest.contains(w)) || similarity < 0.02 {
                     patterns.push(LanguagePattern::TopicAvoidance);
@@ -854,7 +742,6 @@ impl CognitiveEngine {
         patterns
     }
 
-    /// 简易文本相似度（基于字符 bigram 的 Jaccard 系数）
     fn text_similarity(a: &str, b: &str) -> f64 {
         let bigrams_a: std::collections::HashSet<String> = a
             .chars()
@@ -882,10 +769,6 @@ impl CognitiveEngine {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    //  第三层：推理层 — 意图推断与关系分析
-    // ═══════════════════════════════════════════════════════════════
-
     fn infer_intent(
         messages: &[&Message],
         emotion: &EmotionVector,
@@ -904,41 +787,30 @@ impl CognitiveEngine {
 
         let latest = &recent_user[0].content;
 
-        // ── 基于语言模式的意图推断 ──
-
-        // 撒娇 + 亲密情感 → 表达亲密
         if patterns.contains(&LanguagePattern::Coquettish) && emotion.intimacy > 0.3 {
             return DialogueIntent::ExpressingAffection;
         }
 
-        // 防御 + 愤怒 → 表达不满
         if patterns.contains(&LanguagePattern::Defensive) && emotion.anger > 0.3 {
             return DialogueIntent::ExpressingDispleasure;
         }
 
-        // 试探性语言 → 试探关系
         if patterns.contains(&LanguagePattern::Probing) {
             return DialogueIntent::TestingBoundary;
         }
 
-        // 欲言又止 + 悲伤 → 寻求安慰
         if patterns.contains(&LanguagePattern::Hesitation) && emotion.sadness > 0.3 {
             return DialogueIntent::SeekingComfort;
         }
 
-        // 反讽 + 愤怒 → 表达不满（冷战式）
         if patterns.contains(&LanguagePattern::Sarcasm) {
             return DialogueIntent::ExpressingDispleasure;
         }
 
-        // 压抑 → 可能需要关心
         if patterns.contains(&LanguagePattern::Suppressed) {
             return DialogueIntent::SeekingComfort;
         }
 
-        // ── 基于关键词的意图推断 ──
-
-        // 告别信号
         let farewell_words = [
             "晚安",
             "拜拜",
@@ -954,7 +826,6 @@ impl CognitiveEngine {
             return DialogueIntent::Farewell;
         }
 
-        // 道歉/和解信号
         let reconcile_words = [
             "对不起",
             "抱歉",
@@ -968,7 +839,6 @@ impl CognitiveEngine {
             return DialogueIntent::Reconciling;
         }
 
-        // 玩闹信号
         let playful_words = [
             "哈哈哈",
             "笑死",
@@ -983,45 +853,35 @@ impl CognitiveEngine {
             return DialogueIntent::Playful;
         }
 
-        // ── 基于情感向量的意图推断 ──
-
-        // 高悲伤 + 高唤醒 → 情绪宣泄
         if emotion.sadness > 0.6 && emotion.arousal > 0.5 {
             return DialogueIntent::EmotionalVenting;
         }
 
-        // 高悲伤 + 低唤醒 → 寻求安慰
         if emotion.sadness > 0.4 {
             return DialogueIntent::SeekingComfort;
         }
 
-        // 高亲密 → 表达亲密
         if emotion.intimacy > 0.5 {
             return DialogueIntent::ExpressingAffection;
         }
 
-        // 高愤怒 → 表达不满
         if emotion.anger > 0.5 {
             return DialogueIntent::ExpressingDispleasure;
         }
 
-        // 冷淡信号（消息很短 + 低唤醒 + 低效价）
         let is_very_short = latest.chars().count() <= 5;
         if is_very_short && emotion.arousal < 0.2 && emotion.valence < 0.1 {
             return DialogueIntent::Withdrawn;
         }
 
-        // 消息较长 + 情感丰富 → 深度交流
         if latest.chars().count() > 50 && emotion.arousal > 0.3 {
             return DialogueIntent::DeepSharing;
         }
 
-        // 有问号 → 寻求回应
         if latest.contains('？') || latest.contains('?') {
             return DialogueIntent::SeekingResponse;
         }
 
-        // 默认：日常分享
         DialogueIntent::SharingDaily
     }
 
@@ -1046,8 +906,6 @@ impl CognitiveEngine {
             .copied()
             .collect();
 
-        // ── 亲密度计算 ──
-        // 基于：亲密词汇频率 + 消息长度互动 + 情感正面度
         let intimacy_words = [
             "宝",
             "亲爱的",
@@ -1074,8 +932,6 @@ impl CognitiveEngine {
         }
         let closeness = (0.3 + intimacy_hits as f64 * 0.07 + emotion.intimacy * 0.3).min(1.0);
 
-        // ── 信任度计算 ──
-        // 基于：对话轮次 + 信任词汇 + 自我暴露程度
         let trust_words = [
             "相信",
             "信任",
@@ -1094,13 +950,11 @@ impl CognitiveEngine {
                 }
             }
         }
-        // 对话越长，基础信任越高
         let conversation_length_factor = (non_system.len() as f64 / 20.0).min(0.3);
         let trust_level =
             (0.2 + trust_hits as f64 * 0.08 + conversation_length_factor + emotion.trust * 0.2)
                 .min(1.0);
 
-        // ── 冲突张力计算 ──
         let conflict_words = [
             "生气",
             "烦",
@@ -1124,8 +978,6 @@ impl CognitiveEngine {
         }
         let tension = (conflict_hits as f64 * 0.12 + emotion.anger * 0.3).min(1.0);
 
-        // ── 主导权分析 ──
-        // 谁问得多 → 谁更被动；谁的消息更长 → 谁更投入
         let user_msgs: Vec<&Message> = non_system
             .iter()
             .filter(|m| m.role == MessageRole::User)
@@ -1166,8 +1018,6 @@ impl CognitiveEngine {
             (ai_avg_len - user_avg_len) / (user_avg_len + ai_avg_len) * 0.5
         };
 
-        // ── 关系趋势 ──
-        // 比较前半段和后半段的亲密度信号
         let mid = non_system.len() / 2;
         if mid > 0 {
             let early_positive: f64 = non_system[..mid]
@@ -1210,24 +1060,18 @@ impl CognitiveEngine {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    //  第四层：共情层 — 策略选择
-    // ═══════════════════════════════════════════════════════════════
-
     fn choose_empathy_strategy(
         emotion: &EmotionVector,
         intent: &DialogueIntent,
         relationship: &RelationshipDynamics,
         patterns: &[LanguagePattern],
     ) -> EmpathyStrategy {
-        // 口是心非/否定式表达 → 需要主动关心（看穿表面）
         if patterns.contains(&LanguagePattern::Contradictory)
             || (patterns.contains(&LanguagePattern::Negation) && emotion.sadness > 0.2)
         {
             return EmpathyStrategy::ProactiveCare;
         }
 
-        // 压抑情绪 → 主动关心
         if patterns.contains(&LanguagePattern::Suppressed) {
             return EmpathyStrategy::ProactiveCare;
         }
@@ -1235,50 +1079,33 @@ impl CognitiveEngine {
         match intent {
             DialogueIntent::SeekingComfort => {
                 if emotion.sadness > 0.7 {
-                    // 深度悲伤 → 陪伴，不要说教
                     EmpathyStrategy::Accompany
                 } else {
-                    // 轻度难过 → 镜像共情
                     EmpathyStrategy::Mirror
                 }
             }
-            DialogueIntent::EmotionalVenting => {
-                // 纯粹宣泄 → 陪伴 + 倾听
-                EmpathyStrategy::Accompany
-            }
+            DialogueIntent::EmotionalVenting => EmpathyStrategy::Accompany,
             DialogueIntent::ExpressingAffection => {
                 if relationship.closeness > 0.6 {
-                    // 关系够近 → 可以升温
                     EmpathyStrategy::Escalate
                 } else {
-                    // 关系还不够 → 自然回应
                     EmpathyStrategy::Responsive
                 }
             }
             DialogueIntent::ExpressingDispleasure => {
                 if patterns.contains(&LanguagePattern::Sarcasm) {
-                    // 阴阳怪气 → 温柔但有立场
                     EmpathyStrategy::GentleFirm
                 } else if emotion.anger > 0.7 {
-                    // 很生气 → 给空间
                     EmpathyStrategy::GiveSpace
                 } else {
-                    // 一般不满 → 温柔坚定
                     EmpathyStrategy::GentleFirm
                 }
             }
-            DialogueIntent::TestingBoundary => {
-                // 试探 → 回应但保持自然
-                EmpathyStrategy::Responsive
-            }
+            DialogueIntent::TestingBoundary => EmpathyStrategy::Responsive,
             DialogueIntent::Playful => EmpathyStrategy::PlayfulCounter,
-            DialogueIntent::Reconciling => {
-                // 道歉 → 镜像共情（接受和解）
-                EmpathyStrategy::Mirror
-            }
+            DialogueIntent::Reconciling => EmpathyStrategy::Mirror,
             DialogueIntent::Farewell => EmpathyStrategy::Responsive,
             DialogueIntent::Withdrawn => {
-                // 冷淡 → 给空间但不完全放弃
                 if relationship.closeness > 0.5 {
                     EmpathyStrategy::ProactiveCare
                 } else {
@@ -1287,9 +1114,7 @@ impl CognitiveEngine {
             }
             DialogueIntent::DeepSharing => EmpathyStrategy::Mirror,
             DialogueIntent::SharingDaily | DialogueIntent::SeekingResponse => {
-                // 日常 → 自然流动
                 if emotion.valence < -0.3 {
-                    // 但如果情绪偏负面，轻度转移注意力
                     EmpathyStrategy::Distract
                 } else {
                     EmpathyStrategy::NaturalFlow
@@ -1297,10 +1122,6 @@ impl CognitiveEngine {
             }
         }
     }
-
-    // ═══════════════════════════════════════════════════════════════
-    //  第五层：策略层 — 生成认知上下文提示
-    // ═══════════════════════════════════════════════════════════════
 
     fn generate_cognitive_prompt(
         emotion: &EmotionVector,
@@ -1312,10 +1133,8 @@ impl CognitiveEngine {
     ) -> String {
         let mut prompt = String::new();
 
-        // ── 情感状态描述 ──
         prompt.push_str("【认知分析·情感感知】\n");
 
-        // 找出最显著的情感维度（top 3）
         let mut dims: Vec<(&str, f64)> = vec![
             ("喜悦", emotion.joy),
             ("悲伤", emotion.sadness),
@@ -1351,7 +1170,6 @@ impl CognitiveEngine {
             prompt.push('\n');
         }
 
-        // 效价和唤醒度的自然语言描述
         let valence_desc = if emotion.valence > 0.5 {
             "情绪整体积极"
         } else if emotion.valence > 0.1 {
@@ -1372,7 +1190,6 @@ impl CognitiveEngine {
         };
         prompt.push_str(&format!("{}，{}。\n", valence_desc, arousal_desc));
 
-        // ── 语言模式洞察 ──
         if !patterns.is_empty() {
             prompt.push_str("\n【认知分析·言外之意】\n");
             for pattern in patterns {
@@ -1419,7 +1236,6 @@ impl CognitiveEngine {
             }
         }
 
-        // ── 意图解读 ──
         prompt.push_str("\n【认知分析·对方需要什么】\n");
         match intent {
             DialogueIntent::SeekingComfort => {
@@ -1464,7 +1280,6 @@ impl CognitiveEngine {
             }
         }
 
-        // ── 关系动态 ──
         prompt.push_str("\n【认知分析·关系温度】\n");
         let closeness_desc = if relationship.closeness > 0.7 {
             "很亲近"
@@ -1492,7 +1307,6 @@ impl CognitiveEngine {
             closeness_desc, tension_desc, trend_desc
         ));
 
-        // ── 共情策略指导 ──
         prompt.push_str("\n【认知分析·回应策略】\n");
         match strategy {
             EmpathyStrategy::Mirror => {
@@ -1531,8 +1345,6 @@ impl CognitiveEngine {
             }
         }
 
-        // ── 情感记忆连续性 ──
-        // 检查最近几轮的情感变化，提供连续性提示
         let user_msgs: Vec<&&Message> = messages
             .iter()
             .filter(|m| m.role == MessageRole::User)
@@ -1546,7 +1358,6 @@ impl CognitiveEngine {
                 .map(|m| m.content.as_str())
                 .collect();
 
-            // 检测情绪急转
             let latest_negative = Self::has_negative_signal(recent_3[0]);
             let prev_positive = Self::has_positive_signal(recent_3[1]);
             if latest_negative && prev_positive {
@@ -1560,7 +1371,6 @@ impl CognitiveEngine {
             }
         }
 
-        // ====== 人格真实性与反公式化行为准则 ======
         prompt.push_str("\n\n===== 人格真实性准则 =====\n");
         prompt.push_str("以下是你作为一个有血有肉的人在对话中必须遵循的行为底线：\n\n");
 
@@ -1637,10 +1447,6 @@ struct PunctuationSignals {
     anger_signal: f64,
 }
 
-// ═══════════════════════════════════════════════════════════════
-//  单元测试
-// ═══════════════════════════════════════════════════════════════
-
 #[cfg(test)]
 mod tests {
     use super::super::data_models::MessageType;
@@ -1689,7 +1495,6 @@ mod tests {
         let msgs = [make_msg(MessageRole::User, "我不开心")];
         let refs: Vec<&Message> = msgs.iter().collect();
         let emotion = CognitiveEngine::perceive_emotion(&refs);
-        // "不开心" should reduce joy and potentially increase sadness
         assert!(
             emotion.joy < 0.3,
             "negated joy should be low, got {}",
