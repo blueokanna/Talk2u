@@ -231,6 +231,8 @@ Windows 使用系统 WebView2 Runtime；Linux 的 CEF 运行库会随构建 bund
 | Qwen | OpenAI-compatible | `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` | `qwen-plus` |
 | 自定义 | OpenAI-compatible | 用户填写 | 用户填写 |
 
+> 默认的智谱调用使用 [rustglm 1.0.0](https://crates.io/crates/rustglm/1.0.0) 的 Rust SDK 仓库
+
 第三方平台会更新模型名。遇到“model not found”时，以对应平台控制台当前显示的模型 ID 为准，直接在设置中覆盖默认值，不需要改代码。
 
 ### API Key 获取入口
