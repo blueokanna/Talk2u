@@ -1,6 +1,6 @@
 # Talk2U
 
-Talk2U is a Flutter and Rust character chat application. Conversations, character profiles, memories, and knowledge are stored locally. Replies can come from a configured online LLM or from the on-device Qwen model on Android and iOS. Android, Windows, and Linux provide a Live2D chat surface.
+Talk2U is a Flutter and Rust character chat application. Conversations, character profiles, memories, and knowledge are stored locally. Replies can come from a configured online LLM or from the on-device Qwen model on Android. Android, Windows, and Linux provide a Live2D chat surface.
 
 This document describes the implemented behavior and its verification boundary. It does not claim that proprietary accelerators or third-party services work without their licensed runtime, device driver, model support, credentials, and real-device validation. See [README.md](README.md) for the full Chinese guide.
 
@@ -12,10 +12,10 @@ This document describes the implemented behavior and its verification boundary. 
 | DeepSeek, OpenAI, Kimi, Qwen | Implemented | OpenAI-compatible streaming adapters |
 | Anthropic | Implemented | Messages API headers, request conversion, and Anthropic SSE |
 | Local memory and knowledge | Implemented | Rust local storage, recent context, summaries, and fact retrieval |
-| Android/iOS local LLM | Platform-limited | Qwen2.5 3B through llama.cpp; Android CPU/NEON and iOS Metal |
+| Android local LLM | Conditional | Exact `Qwen/Qwen3-4B-Instruct-2507` Genie deployment; validated SM8850/V81 HTP, then explicit CPU fallback |
 | Offline STT | Implemented | SenseVoice on Android, Windows, and Linux; Android system on-device STT is preferred |
 | Continuous voice call | Conditional on Android | Final STT results are sent automatically; completed replies are spoken and listening resumes |
-| Android offline TTS | Conditional | Verified system offline voice or strict-hardware MOSS-TTS ONNX |
+| Android offline TTS | Conditional | Verified system offline voice or MOSS-TTS ONNX; strict NNAPI, mixed NNAPI/ORT, then explicit CPU fallback |
 | Windows/Linux offline TTS | Not implemented | The current desktop speech path only provides SenseVoice STT |
 | Live2D | Conditional | Android WebView, Windows WebView2, Linux CEF, Pixi, and a legally supplied Cubism Core 5 |
 | Live2D semantic cues | Implemented, model-dependent | Context and silent stage directions select configured motion or expression mappings |
@@ -30,9 +30,9 @@ An implemented online provider still requires a valid API key, account quota, re
 Flutter UI
   |-- chat, characters, memory, and provider selection
   |-- Android WebView / Windows WebView2 / Linux CEF Live2D host
-  |-- Android and iOS llama.cpp local Qwen
+  |-- Android Genie local Qwen3 (HTP -> CPU)
   |-- Android, Windows, and Linux SenseVoice STT
-  |-- Android system speech and strict-hardware MOSS-TTS
+  |-- Android system speech and MOSS-TTS with reported NNAPI/CPU execution
   `-- Flutter platform and event channels
                  |
           flutter_rust_bridge
@@ -91,45 +91,35 @@ Decode failures do not expose the raw response body in user-facing errors.
 
 MOSS-TTS-Nano uses four ONNX sessions: prefill, decode step, local sampled frame, and audio-token decoder. A single provider must create all four sessions. Sessions are retained across utterances and released when the service or activity is released.
 
-CPU fallback is forbidden for the MOSS path:
+The MOSS path attempts strict NNAPI, mixed NNAPI/ORT execution, and then explicitly falls back to CPU:
 
-- QNN uses `session.disable_cpu_ep_fallback=1` and the HTP backend.
 - NNAPI uses `NNAPIFlags.CPU_DISABLED` and `session.disable_cpu_ep_fallback=1`.
-- Failure to compile any subgraph fails the complete session bundle.
-- A provider is reported as active only after a real synthesis succeeds.
+- If any subgraph cannot compile strictly, a second bundle keeps NNAPI's CPU device disabled while allowing ORT CPU fallback for unsupported nodes.
+- Mixed execution is reported as containing CPU and is not presented as pure NPU verification; if it also fails, separate CPU sessions are created.
+- The UI reports the provider that actually synthesized the WAV and labels CPU fallback explicitly.
 
-The default `onnxruntime-android 1.27.0` native library was inspected and exports NNAPI but not QNN. The default build can therefore attempt strict NNAPI only. The Java `addQnn` API alone is not evidence that the native library contains QNN EP.
+The default `onnxruntime-android 1.27.0` native library exports NNAPI but not QNN. The current MOSS build can therefore attempt strict NNAPI, mixed NNAPI/ORT, and then CPU. The Java `addQnn` API alone is not evidence that the native library contains QNN EP.
 
 ### Qualcomm QNN HTP
 
-QNN support requires a legally obtained QNN SDK for the exact target SoC and a QNN-enabled ONNX Runtime Android AAR. These proprietary artifacts are not included, downloaded, or fabricated by this repository.
+QAIRT 2.48 was used to inspect and statically prepare all four graphs. `tools/qnn/moss_v81_status.json` keeps MOSS HTP disabled because V81 finalization fails on `q::QNN_CumulativeSum` and the upstream decode KV grows from 768 to 769, so it is not recurrent-safe for 375 steps. Raw dynamic ONNX is never sent to QNN or described as HTP-ready.
 
 Supply local artifacts through Gradle properties or environment variables:
 
 ```powershell
-$env:TALK2U_QNN_ORT_AAR='D:\vendor\onnxruntime-qnn\onnxruntime-android-qnn.aar'
-$env:TALK2U_QNN_JNI_DIR='D:\vendor\qnn\jniLibs'
+$env:TALK2U_QNN_SDK_ROOT='D:\Qualcomm AI Engine Direct SDK'
+$env:TALK2U_QNN_HTP_ARCH='v81'
 flutter build apk --debug --target-platform android-arm64
 ```
 
-The JNI directory must contain at least:
+MOSS HTP activation additionally requires:
 
-```text
-jniLibs/
-  arm64-v8a/
-    libQnnHtp.so
-    libQnnSystem.so
-    libQnnHtpV<target>Stub.so
-```
+1. All four static graphs finalize for SM8850/V81.
+2. A fixed-capacity decode graph consumes its own outputs for 375 steps.
+3. A physical SM8850 generates and plays a valid WAV.
+4. Deployment hashes and a device-validation marker are present.
 
-Include every additional backend, skeleton, or dependency required by that QNN SDK release and target SoC. Gradle rejects a configured JNI directory missing the backend, system library, or a versioned HTP stub. Runtime activation additionally requires:
-
-1. ONNX Runtime reports the QNN provider.
-2. `libQnnHtp.so` loads successfully.
-3. Every MOSS model creates a strict QNN session.
-4. A synthesis completes and reports `QNN_HTP`.
-
-Library presence or provider enumeration is shown only as an unverified candidate. QNN uses `sustained_high_performance` for extended conversations.
+Library presence or provider enumeration is never treated as execution proof.
 
 ### Huawei and NNAPI
 
@@ -141,7 +131,7 @@ No OnePlus 15 or Huawei Mate 10 Pro real-device pass has been performed in this 
 
 ### Separate Local LLM Path
 
-MOSS hardware acceleration does not accelerate the local Qwen LLM. Android Qwen still runs through llama.cpp CPU/NEON. Windows and Linux currently have no DirectML, CUDA, ROCm, Vulkan, or local desktop LLM backend.
+MOSS acceleration does not accelerate the local Qwen LLM. Android uses the exact Qwen3-4B-Instruct-2507 Genie deployment and tries validated HTP, then CPU. HTP is marked verified only after the first successful query. QAIRT Composer 2.48 supports `Qwen3ForCausalLM` with `Z4`, `Q4`, `Z8`, and `Q5_K`, but its direct `.bin` output uses `QnnGenAiTransformer` on the host CPU; Composer support alone is not HTP support. Genie 2.48 does not expose a QNN GPU dialog backend. Flutter reports the backend that actually loaded and shows CPU fallback. Windows and Linux have no local desktop LLM backend.
 
 ## Continuous Speech
 
@@ -196,7 +186,7 @@ Completed automated checks for this change include:
 Real-device acceptance must include:
 
 - Verify the NNAPI device list does not classify a CPU device as acceleration.
-- Run a real MOSS synthesis and require `QNN_HTP` or `NNAPI_ACCELERATOR`; candidate status is insufficient.
+- Run a real MOSS synthesis, verify the reported NNAPI/CPU provider, validate the WAV, and confirm playback.
 - Verify `女生：（哈哈大笑）你说的太好了！` speaks only the dialogue and triggers a happy cue.
 - Run at least 20 call turns, then end the call and confirm microphone capture and playback stop.
 - Confirm the actual Live2D renderer is not a software renderer.
@@ -209,9 +199,9 @@ Real-device acceptance must include:
 - Do not claim that the default ONNX Runtime AAR contains QNN EP.
 - Do not claim direct Huawei HiAI DDK integration.
 - Do not claim real-device validation on OnePlus 15 or Huawei Mate 10 Pro until it is performed.
-- Do not label Android llama.cpp CPU/NEON as NPU or GPU execution.
+- Do not label Qwen3 Composer CPU execution as NPU or GPU execution.
 - Do not claim Windows/Linux offline TTS, continuous offline calls, or local LLM hardware acceleration.
 - Do not claim the native Vulkan probe is the actual Live2D renderer.
 - Do not claim that Cubism Core is legally bundled with the repository.
 
-Failures are surfaced as unavailable capabilities or explicit errors. They are not replaced with a silent CPU execution provider, cloud speech, placeholder animation, or a static image reported as success.
+Failures are surfaced as unavailable capabilities or explicit errors. CPU fallback is allowed only when it is explicitly reported; it is never labeled as NPU/GPU execution.

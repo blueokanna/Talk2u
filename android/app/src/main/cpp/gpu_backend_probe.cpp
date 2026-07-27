@@ -260,11 +260,6 @@ struct OpenGlProbeResult {
     bool software = false;
 };
 
-struct DynamicRuntimeProbe {
-    bool present = false;
-    std::string library;
-};
-
 struct NnApiDeviceProbe {
     std::string name;
     std::string version;
@@ -348,19 +343,6 @@ NnApiProbeResult ProbeNnApi() {
         });
     }
     dlclose(library);
-    return output;
-}
-
-DynamicRuntimeProbe ProbeDynamicRuntime(const std::vector<const char*>& libraries) {
-    DynamicRuntimeProbe output;
-    for (const char* library : libraries) {
-        void* handle = dlopen(library, RTLD_NOW | RTLD_LOCAL);
-        if (handle == nullptr) continue;
-        output.present = true;
-        output.library = library;
-        dlclose(handle);
-        break;
-    }
     return output;
 }
 
@@ -464,25 +446,6 @@ std::string BuildResultJson() {
     const VulkanProbeResult vulkan = ProbeVulkan();
     const OpenGlProbeResult openGl = ProbeOpenGl();
     const NnApiProbeResult nnapi = ProbeNnApi();
-    const DynamicRuntimeProbe qnnBackend = ProbeDynamicRuntime({"libQnnHtp.so"});
-    const DynamicRuntimeProbe qnnStub = ProbeDynamicRuntime({
-        "libQnnHtpV81Stub.so",
-        "libQnnHtpV79Stub.so",
-        "libQnnHtpV77Stub.so",
-        "libQnnHtpV75Stub.so",
-        "libQnnHtpV73Stub.so",
-        "libQnnHtpV69Stub.so",
-        "libQnnHtpV68Stub.so",
-    });
-    const DynamicRuntimeProbe hiAi = ProbeDynamicRuntime({
-        "libhiai.so",
-        "libhiai_ir.so",
-    });
-    const DynamicRuntimeProbe neuroPilot = ProbeDynamicRuntime({
-        "libneuron_adapter.so",
-        "libapuwareutils.so",
-        "libneuropilot_hal_utils.so",
-    });
     const char* preferred = vulkan.Ready() ? "vulkan" : openGl.ready ? "opengl-es" : "none";
 
     std::ostringstream output;
@@ -524,22 +487,7 @@ std::string BuildResultJson() {
                << ",\"featureLevel\":" << device.featureLevel
                << ",\"hardware\":" << (device.Hardware() ? "true" : "false") << '}';
     }
-    output << "]}"
-           << ",\"llmCompute\":{"
-           << "\"activeBackend\":\"cpu-neon\""
-           << ",\"qnn\":{\"runtimePresent\":" << (qnnBackend.present ? "true" : "false")
-           << ",\"backendLibrary\":\"" << JsonEscape(qnnBackend.library.c_str()) << "\""
-           << ",\"stubPresent\":" << (qnnStub.present ? "true" : "false")
-           << ",\"stubLibrary\":\"" << JsonEscape(qnnStub.library.c_str()) << "\""
-           << ",\"executionAdapterLinked\":false}"
-           << ",\"hiAi\":{\"runtimePresent\":" << (hiAi.present ? "true" : "false")
-           << ",\"library\":\"" << JsonEscape(hiAi.library.c_str()) << "\""
-           << ",\"executionAdapterLinked\":false}"
-           << ",\"neuroPilot\":{\"runtimePresent\":" << (neuroPilot.present ? "true" : "false")
-           << ",\"library\":\"" << JsonEscape(neuroPilot.library.c_str()) << "\""
-           << ",\"executionAdapterLinked\":false}"
-           << ",\"vulkan\":{\"runtimePresent\":" << (vulkan.Ready() ? "true" : "false")
-           << ",\"executionAdapterLinked\":false}}}";
+    output << "]}}";
     return output.str();
 }
 

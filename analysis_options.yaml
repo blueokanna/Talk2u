@@ -4,6 +4,8 @@ analyzer:
   exclude:
     - lib/src/rust/api/**
     - lib/src/rust/frb_generated.dart
+    - rust_builder/**
+    - third_party/**
 
 linter:
   rules:

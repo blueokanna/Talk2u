@@ -36,6 +36,10 @@ migrate_working_dir/
 /coverage/
 /assets/live2d/vendor/live2dcubismcore.min.js
 
+# Local model sources and QAIRT build products are reproducible, large artifacts.
+/model-sources/
+/qairt-build/
+
 # Symbolication related
 app.*.symbols
 

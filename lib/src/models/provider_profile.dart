@@ -40,11 +40,29 @@ class ProviderProfile {
   static const androidOffline = ProviderProfile(
     id: androidOfflineId,
     name: '设备离线 AI',
-    apiUrl: 'device://llama.cpp',
-    chatModel: 'Qwen2.5-3B-Instruct-Q4_K_M',
+    apiUrl: 'device://genie',
+    chatModel: 'Qwen3-4B-Instruct-2507',
     protocol: 'local',
-    maxOutputTokens: 384,
+    maxOutputTokens: 768,
   );
+
+  static List<ProviderProfile> withRuntimeDefaults(
+    Iterable<ProviderProfile> profiles, {
+    required bool includeAndroidOffline,
+  }) {
+    final normalized = <ProviderProfile>[];
+    var offlineAdded = false;
+    for (final profile in profiles) {
+      if (profile.id != androidOfflineId) {
+        normalized.add(profile);
+      } else if (includeAndroidOffline && !offlineAdded) {
+        normalized.add(androidOffline);
+        offlineAdded = true;
+      }
+    }
+    if (includeAndroidOffline && !offlineAdded) normalized.add(androidOffline);
+    return normalized;
+  }
 
   factory ProviderProfile.fromJson(Map<String, dynamic> json) =>
       ProviderProfile(

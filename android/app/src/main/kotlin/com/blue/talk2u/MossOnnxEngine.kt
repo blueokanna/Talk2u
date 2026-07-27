@@ -26,7 +26,7 @@ import org.json.JSONObject
 class MossOnnxEngine(
     private val modelRoot: File,
     private val cpuThreads: Int = 2,
-    private val requireHardware: Boolean = true,
+    private val requireHardware: Boolean = false,
 ) : Closeable {
     private val env = OrtEnvironment.getEnvironment()
     private val manifestPath = resolveManifestPath(modelRoot)
@@ -110,14 +110,15 @@ class MossOnnxEngine(
         val failures = mutableListOf<String>()
         val candidates = buildList {
             val available = OrtEnvironment.getAvailableProviders()
-            if (OrtProvider.QNN in available && qnnRuntimeLoadable()) {
-                add(AccelerationProvider.QNN_HTP)
-            }
+            // The downloaded upstream ONNX files are dynamic graphs. They are
+            // never sent directly to QNN; HTP is enabled only after Talk2U can
+            // consume a fully validated static EP-context deployment.
             if (
                 OrtProvider.NNAPI in available &&
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
             ) {
                 add(AccelerationProvider.NNAPI_ACCELERATOR)
+                add(AccelerationProvider.NNAPI_HYBRID)
             }
             if (!requireHardware) add(AccelerationProvider.CPU)
         }
@@ -129,7 +130,7 @@ class MossOnnxEngine(
             }
         }
         val suffix = if (failures.isEmpty()) {
-            "no deployable QNN HTP or strict NNAPI execution provider was found"
+            "no strict NNAPI execution provider or CPU fallback was found"
         } else {
             failures.joinToString("; ")
         }
@@ -202,6 +203,11 @@ class MossOnnxEngine(
                 }
                 AccelerationProvider.NNAPI_ACCELERATOR -> {
                     options.addConfigEntry("session.disable_cpu_ep_fallback", "1")
+                    options.addNnapi(EnumSet.of(NNAPIFlags.CPU_DISABLED))
+                }
+                AccelerationProvider.NNAPI_HYBRID -> {
+                    // Keep NNAPI's own CPU device disabled while allowing ORT
+                    // CPU to execute graph parts unsupported by the accelerator.
                     options.addNnapi(EnumSet.of(NNAPIFlags.CPU_DISABLED))
                 }
                 AccelerationProvider.CPU -> Unit
@@ -526,9 +532,9 @@ class MossOnnxEngine(
         fun runtimeProviders(): List<String> {
             val available = OrtEnvironment.getAvailableProviders()
             return buildList {
-                if (OrtProvider.QNN in available && qnnRuntimeLoadable()) add("QNN_HTP")
                 if (OrtProvider.NNAPI in available && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     add("NNAPI_ACCELERATOR")
+                    add("NNAPI_HYBRID")
                 }
                 add("CPU")
             }
@@ -538,8 +544,6 @@ class MossOnnxEngine(
             "qnn" to QnnRuntime.status.asMap(),
             "providers" to OrtEnvironment.getAvailableProviders().map { it.name },
         )
-
-        private fun qnnRuntimeLoadable(): Boolean = QnnRuntime.status.ready
 
         private fun resolveManifestPath(modelRoot: File): File {
             val candidates = listOf(
@@ -622,6 +626,7 @@ class MossOnnxEngine(
     private enum class AccelerationProvider(val label: String) {
         QNN_HTP("QNN_HTP"),
         NNAPI_ACCELERATOR("NNAPI_ACCELERATOR"),
+        NNAPI_HYBRID("NNAPI_HYBRID"),
         CPU("CPU"),
     }
 

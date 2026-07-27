@@ -48,7 +48,6 @@ dependencies:
   archive: ^4.0.9
   path: ^1.9.0
   audioplayers: ^6.5.1
-  fcllama: ^0.0.3
   record: ^6.0.0
   sherpa_onnx: ^1.13.4
   webview_cef:

@@ -293,19 +293,27 @@ class MossTtsService extends ChangeNotifier {
       ? 0
       : (downloadedBytes / totalDownloadBytes).clamp(0, 1);
   String get voiceId => _voiceId;
+  bool get providerMeasured => _providerMeasured;
+  bool get hardwareAccelerationVerified =>
+      _providerMeasured &&
+      (activeProvider == 'QNN_HTP' || activeProvider == 'NNAPI_ACCELERATOR');
   String get accelerationLabel {
     if (activeProvider == 'QNN_HTP') return 'Qualcomm QNN HTP · 禁止 CPU 回退';
     if (activeProvider == 'NNAPI_ACCELERATOR') {
-      return 'NNAPI 加速设备 · 禁止 CPU 回退';
+      return 'NNAPI 非 CPU 硬件 · 已执行验证';
     }
-    if (_providerMeasured && activeProvider == 'CPU') {
-      return 'CPU/NEON · 非硬件加速会话';
+    if (activeProvider == 'NNAPI_HYBRID') {
+      return 'NNAPI 混合加速 · 含 CPU 兜底';
     }
+    if (_providerMeasured && activeProvider == 'CPU') return 'CPU/NEON 回退';
     if (runtimeProviders.contains('QNN_HTP')) return 'QNN HTP 候选 · 尚未执行验证';
     if (runtimeProviders.contains('NNAPI_ACCELERATOR')) {
-      return 'NNAPI 加速候选 · 尚未执行验证';
+      return 'NNAPI 非 CPU 硬件候选 · 尚未执行验证';
     }
-    return '未发现严格硬件执行后端';
+    if (runtimeProviders.contains('NNAPI_HYBRID')) {
+      return 'NNAPI 混合加速候选 · 尚未执行验证';
+    }
+    return 'CPU 回退可用 · 首次合成时验证硬件后端';
   }
 
   MossVoice get selectedVoice => voices.firstWhere(

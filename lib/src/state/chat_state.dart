@@ -101,7 +101,10 @@ class ChatState extends ChangeNotifier {
   }
 
   void _applyProviderSettings(AppSettings settings) {
-    _providers = ProviderProfile.decodeList(settings.providersJson);
+    _providers = ProviderProfile.withRuntimeDefaults(
+      ProviderProfile.decodeList(settings.providersJson),
+      includeAndroidOffline: OfflineLlmService.instance.supported,
+    );
     final legacyZhipuKey = settings.apiKey?.trim();
     if (legacyZhipuKey?.isNotEmpty == true) {
       final zhipuIndex = _providers.indexWhere(
@@ -113,12 +116,6 @@ class ChatState extends ChangeNotifier {
           apiKey: legacyZhipuKey,
         );
       }
-    }
-    if (OfflineLlmService.instance.supported &&
-        !_providers.any(
-          (provider) => provider.id == ProviderProfile.androidOfflineId,
-        )) {
-      _providers.add(ProviderProfile.androidOffline);
     }
     _selectedProviderId =
         _providers.any((provider) => provider.id == settings.selectedProvider)
@@ -722,9 +719,9 @@ class ChatState extends ChangeNotifier {
     }
 
     _errorMessage = provider?.isLocal == true
-        ? '请先在“模型与接口”中下载并校验 3B 端侧 AI 模型'
+        ? '请先在“模型与接口”中安装并校验 Qwen3-4B Genie 部署包'
         : '${provider?.name ?? '当前在线平台'}尚未配置 API Key；'
-              '也未检测到已就绪的 3B 端侧 AI 模型';
+              '也未检测到已就绪的 Qwen3-4B Genie 部署包';
     notifyListeners();
     return false;
   }

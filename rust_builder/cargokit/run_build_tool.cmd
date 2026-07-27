@@ -6,9 +6,13 @@ setlocal ENABLEDELAYEDEXPANSION
 SET BASEDIR=%~dp0
 
 if not exist "%CARGOKIT_TOOL_TEMP_DIR%" (
-    mkdir "%CARGOKIT_TOOL_TEMP_DIR%"
+    mkdir "%CARGOKIT_TOOL_TEMP_DIR%" || exit /b 1
 )
-cd /D "%CARGOKIT_TOOL_TEMP_DIR%"
+cd /D "%CARGOKIT_TOOL_TEMP_DIR%" || exit /b 1
+
+if not exist ".dart_tool" (
+    mkdir ".dart_tool" || exit /b 1
+)
 
 SET BUILD_TOOL_PKG_DIR=%BASEDIR%build_tool
 SET DART=%FLUTTER_ROOT%\bin\cache\dart-sdk\bin\dart
@@ -45,7 +49,7 @@ REM To detect changes in package we compare output of DIR /s (recursive)
 set PREV_PACKAGE_INFO=.dart_tool\package_info.prev
 set CUR_PACKAGE_INFO=.dart_tool\package_info.cur
 
-DIR "%BUILD_TOOL_PKG_DIR%" /s > "%CUR_PACKAGE_INFO%_orig"
+DIR "%BUILD_TOOL_PKG_DIR%" /s > "%CUR_PACKAGE_INFO%_orig" || exit /b 1
 
 REM Last line in dir output is free space on harddrive. That is bound to
 REM change between invocation so we need to remove it
@@ -57,7 +61,7 @@ REM change between invocation so we need to remove it
         EndLocal
         Set "Line=%%A")
 ) >"%CUR_PACKAGE_INFO%"
-DEL "%CUR_PACKAGE_INFO%_orig"
+if exist "%CUR_PACKAGE_INFO%_orig" DEL "%CUR_PACKAGE_INFO%_orig"
 
 REM Compare current directory listing with previous
 FC /B "%CUR_PACKAGE_INFO%" "%PREV_PACKAGE_INFO%" > nul 2>&1
@@ -67,7 +71,7 @@ If %ERRORLEVEL% neq 0 (
     if exist "%PREV_PACKAGE_INFO%" (
         DEL "%PREV_PACKAGE_INFO%"
     )
-    MOVE /Y "%CUR_PACKAGE_INFO%" "%PREV_PACKAGE_INFO%"
+    MOVE /Y "%CUR_PACKAGE_INFO%" "%PREV_PACKAGE_INFO%" > nul || exit /b 1
     if exist "%PRECOMPILED%" (
         DEL "%PRECOMPILED%"
     )
@@ -77,15 +81,19 @@ REM There is no CUR_PACKAGE_INFO it was renamed in previous step to %PREV_PACKAG
 REM which means  we need to do pub get and precompile
 if not exist "%PRECOMPILED%" (
     echo Running pub get in "%cd%"
-    "%DART%" pub get --no-precompile
-    "%DART%" compile kernel bin/build_tool_runner.dart
+    "%DART%" pub get --no-precompile || exit /b 1
+    "%DART%" compile kernel bin/build_tool_runner.dart || exit /b 1
 )
 
 "%DART%" "%PRECOMPILED%" %*
+SET BUILD_RESULT=%ERRORLEVEL%
 
 REM 253 means invalid snapshot version.
-If %ERRORLEVEL% equ 253 (
-    "%DART%" pub get --no-precompile
-    "%DART%" compile kernel bin/build_tool_runner.dart
+If %BUILD_RESULT% equ 253 (
+    "%DART%" pub get --no-precompile || exit /b 1
+    "%DART%" compile kernel bin/build_tool_runner.dart || exit /b 1
     "%DART%" "%PRECOMPILED%" %*
+    SET BUILD_RESULT=!ERRORLEVEL!
 )
+
+exit /b %BUILD_RESULT%

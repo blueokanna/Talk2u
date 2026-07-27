@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
+import 'package:talk2u/src/services/moss_tts_service.dart';
 import 'package:talk2u/src/widgets/live2d_avatar.dart';
 
 void main() {
@@ -75,7 +76,7 @@ void main() {
     );
   });
 
-  testWidgets('OnePlus runtime reports only executable LLM backends as ready', (
+  testWidgets('SM8850 runtime reports the Qwen3 Genie backend contract', (
     tester,
   ) async {
     const channel = MethodChannel('talk2u/llm_runtime');
@@ -84,10 +85,12 @@ void main() {
     );
 
     expect(capabilities, isNotNull);
-    expect(capabilities!['schemaVersion'], 1);
-    expect(capabilities['targetProfile'], 'oneplus-15');
-    expect(capabilities['activeBackend'], 'cpu-neon');
-    expect(capabilities['activeBackendVerified'], isTrue);
+    expect(capabilities!['schemaVersion'], 2);
+    expect(capabilities['targetProfile'], 'sm8850-v81');
+    expect(capabilities['modelId'], 'Qwen/Qwen3-4B-Instruct-2507');
+    expect(capabilities['modelFormat'], 'genie-deployment');
+    expect(capabilities['activeBackend'], isNull);
+    expect(capabilities['activeBackendVerified'], isFalse);
     expect(capabilities['contextSize'], 8192);
 
     final device = Map<Object?, Object?>.from(capabilities['device']! as Map);
@@ -97,11 +100,12 @@ void main() {
 
     final backends = (capabilities['backends']! as List)
         .cast<Map<Object?, Object?>>();
-    final cpu = backends.singleWhere((backend) => backend['id'] == 'cpu-neon');
     final qnn = backends.singleWhere((backend) => backend['id'] == 'qnn-htp');
-    expect(cpu['executable'], isTrue);
-    expect(qnn['executionAdapterLinked'], isFalse);
-    expect(qnn['executable'], isFalse);
+    final cpu = backends.singleWhere((backend) => backend['id'] == 'cpu');
+    expect(qnn['priority'], 0);
+    expect(qnn['requiresValidatedContext'], isTrue);
+    expect(cpu['priority'], 1);
+    expect(cpu['composerModelSupported'], isTrue);
   });
 
   testWidgets('Android offline TTS emits a real PCM amplitude envelope', (
@@ -141,6 +145,54 @@ void main() {
     } finally {
       await methods.invokeMethod<void>('stopSpeaking');
       await subscription.cancel();
+    }
+  });
+
+  testWidgets('SM8850 MOSS synthesizes and plays a verified WAV', (
+    tester,
+  ) async {
+    final moss = MossTtsService.instance;
+    await moss.initialize();
+    expect(moss.runtimeReady, isTrue);
+    if (!moss.ready) {
+      debugPrint('Talk2U MOSS diagnostics: skipped because model is absent');
+      return;
+    }
+
+    var sawPlayback = false;
+    var peakAmplitude = 0.0;
+    void observePlayback() {
+      sawPlayback = sawPlayback || moss.speaking;
+      if (moss.playbackAmplitude > peakAmplitude) {
+        peakAmplitude = moss.playbackAmplitude;
+      }
+    }
+
+    moss.addListener(observePlayback);
+    try {
+      await moss.speak('你好，这是高通端侧语音播放验证。');
+      for (var attempt = 0; attempt < 240; attempt++) {
+        await tester.pump(const Duration(milliseconds: 500));
+        observePlayback();
+        if (!moss.generating && !moss.speaking) break;
+      }
+
+      expect(moss.lastError, isNull);
+      expect(moss.generating, isFalse, reason: 'MOSS synthesis timed out');
+      expect(moss.speaking, isFalse, reason: 'MOSS playback timed out');
+      expect(sawPlayback, isTrue);
+      expect(peakAmplitude, greaterThan(0.01));
+      debugPrint(
+        'Talk2U MOSS diagnostics: provider=${moss.activeProvider}, '
+        'acceleration=${moss.accelerationLabel}, peak=$peakAmplitude',
+      );
+      expect(moss.activeProvider, anyOf('NNAPI_ACCELERATOR', 'CPU'));
+      if (moss.activeProvider == 'CPU') {
+        expect(moss.accelerationLabel, contains('CPU/NEON 回退'));
+      }
+    } finally {
+      moss.removeListener(observePlayback);
+      await moss.stopSpeaking();
     }
   });
 }

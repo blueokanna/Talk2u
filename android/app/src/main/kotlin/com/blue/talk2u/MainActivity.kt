@@ -99,6 +99,10 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
     private val mossExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "talk2u-moss-tts").apply { priority = Thread.NORM_PRIORITY - 1 }
     }
+    private val llmExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "talk2u-qwen3-genie").apply { priority = Thread.NORM_PRIORITY - 1 }
+    }
+    private val llmSessionOwner = GenieRuntimeBridge.newOwner()
     @Volatile private var mossCancellation = AtomicBoolean(false)
     @Volatile private var activityDestroyed = false
     private var mossEngine: MossOnnxEngine? = null
@@ -200,6 +204,82 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "capabilities" -> result.success(llmRuntimeCapabilities())
+                    "load" -> {
+                        val root = secureAppModelRoot(call.argument<String>("modelRoot"))
+                        if (root == null) {
+                            result.error("invalid_qwen3_model_path", "Qwen3 模型路径不安全", null)
+                        } else {
+                            llmExecutor.execute {
+                                runCatching {
+                                    GenieRuntimeBridge.load(
+                                        llmSessionOwner,
+                                        root,
+                                        QnnRuntime.status.ready,
+                                    ).asMap()
+                                }.fold(
+                                    onSuccess = { value -> deliverLlmResult(result) { result.success(value) } },
+                                    onFailure = { error ->
+                                        Log.e("Talk2U/Genie", "Unable to load Qwen3 deployment", error)
+                                        deliverLlmResult(result) {
+                                            result.error(
+                                                "qwen3_load_failed",
+                                                error.message ?: error.javaClass.simpleName,
+                                                llmErrorDetails("load", error),
+                                            )
+                                        }
+                                    },
+                                )
+                            }
+                        }
+                    }
+                    "generate" -> {
+                        val prompt = call.argument<String>("prompt").orEmpty()
+                        val root = secureAppModelRoot(call.argument<String>("modelRoot"))
+                        if (root == null) {
+                            result.error("invalid_qwen3_model_path", "Qwen3 模型路径不安全", null)
+                        } else if (prompt.isBlank()) {
+                            result.error("invalid_qwen3_prompt", "Qwen3 提示词为空", null)
+                        } else {
+                            llmExecutor.execute {
+                                runCatching {
+                                    GenieRuntimeBridge.ensureLoaded(
+                                        llmSessionOwner,
+                                        root,
+                                        QnnRuntime.status.ready,
+                                    )
+                                    GenieRuntimeBridge.query(llmSessionOwner, prompt)
+                                }.fold(
+                                    onSuccess = { text ->
+                                        Log.i(
+                                            "Talk2U/Genie",
+                                            "query backend=${GenieRuntimeBridge.activeBackend()} " +
+                                                "verified=${GenieRuntimeBridge.activeBackendVerified()}",
+                                        )
+                                        deliverLlmResult(result) { result.success(text) }
+                                    },
+                                    onFailure = { error ->
+                                        deliverLlmResult(result) {
+                                            result.error(
+                                                "qwen3_generate_failed",
+                                                error.message ?: error.javaClass.simpleName,
+                                                llmErrorDetails("generate", error),
+                                            )
+                                        }
+                                    },
+                                )
+                            }
+                        }
+                    }
+                    "stop" -> {
+                        GenieRuntimeBridge.stop(llmSessionOwner)
+                        result.success(null)
+                    }
+                    "release" -> {
+                        llmExecutor.execute {
+                            GenieRuntimeBridge.release(llmSessionOwner)
+                            deliverLlmResult(result) { result.success(null) }
+                        }
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -454,7 +534,7 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
         )
     }
 
-    private fun llmRuntimeCapabilities(): Map<String, Any> {
+    private fun llmRuntimeCapabilities(): Map<String, Any?> {
         val activityManager = getSystemService(ACTIVITY_SERVICE) as ActivityManager
         val memory = ActivityManager.MemoryInfo().also(activityManager::getMemoryInfo)
         val socModel = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -462,53 +542,8 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
         } else {
             Build.HARDWARE.orEmpty()
         }
-        val identity = listOf(
-            Build.MODEL,
-            Build.DEVICE,
-            Build.PRODUCT,
-            socModel,
-        ).joinToString(" ").uppercase(Locale.ROOT)
-        val onePlusProfile = when {
-            "PJD110" in identity || "ONEPLUS 12" in identity -> "oneplus-12"
-            "PJZ110" in identity || "ONEPLUS 13" in identity && "13T" !in identity -> "oneplus-13"
-            "PKX110" in identity || "ONEPLUS 13T" in identity -> "oneplus-13t"
-            "ONEPLUS 15T" in identity -> "oneplus-15t"
-            "PLK110" in identity || "ONEPLUS 15" in identity -> "oneplus-15"
-            else -> "generic-arm64"
-        }
-        val preferredVendorBackend = when {
-            socModel.startsWith("SM", ignoreCase = true) ||
-                "QCOM" in identity || "QUALCOMM" in identity -> "qnn-htp"
-            socModel.startsWith("MT", ignoreCase = true) ||
-                "MEDIATEK" in identity -> "neuropilot"
-            "KIRIN" in identity || "HUAWEI" in identity -> "hiai"
-            else -> "cpu-neon"
-        }
-        val nativeCompute = GpuBackendProbe.diagnostics().optJSONObject("llmCompute")
-
-        fun candidate(id: String, nativeKey: String, modelFormat: String): Map<String, Any> {
-            val probe = nativeCompute?.optJSONObject(nativeKey)
-            val runtimePresent = probe?.optBoolean("runtimePresent", false) == true
-            val adapterLinked = probe?.optBoolean("executionAdapterLinked", false) == true
-            return mapOf(
-                "id" to id,
-                "runtimePresent" to runtimePresent,
-                "executionAdapterLinked" to adapterLinked,
-                "executable" to (runtimePresent && adapterLinked),
-                "modelFormat" to modelFormat,
-                "library" to probe?.optString("library").orEmpty(),
-                "reason" to if (runtimePresent && adapterLinked) {
-                    "ready"
-                } else if (!runtimePresent) {
-                    "vendor runtime is not loadable in the app process"
-                } else {
-                    "vendor SDK adapter and converted model are not linked"
-                },
-            )
-        }
-
         return mapOf(
-            "schemaVersion" to 1,
+            "schemaVersion" to 2,
             "device" to mapOf(
                 "manufacturer" to Build.MANUFACTURER,
                 "brand" to Build.BRAND,
@@ -518,27 +553,46 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
                 "abis" to Build.SUPPORTED_ABIS.toList(),
                 "totalMemoryBytes" to memory.totalMem,
             ),
-            "targetProfile" to onePlusProfile,
-            "preferredVendorBackend" to preferredVendorBackend,
-            "activeBackend" to "cpu-neon",
-            "activeBackendVerified" to true,
+            "targetProfile" to if (socModel.equals("SM8850", true)) "sm8850-v81" else "generic-arm64",
+            "modelId" to "Qwen/Qwen3-4B-Instruct-2507",
+            "modelFormat" to "genie-deployment",
+            "genieBundled" to BuildConfig.GENIE_BUNDLED,
+            "genieRuntimePresent" to GenieRuntimeBridge.available(),
+            "qnn" to QnnRuntime.status.asMap(),
+            "activeBackend" to GenieRuntimeBridge.activeBackend(),
+            "activeBackendVerified" to GenieRuntimeBridge.activeBackendVerified(),
+            "fallbackFailures" to GenieRuntimeBridge.activeFallbackFailures(),
             "contextSize" to 8192,
             "backends" to listOf(
-                mapOf(
-                    "id" to "cpu-neon",
-                    "runtimePresent" to true,
-                    "executionAdapterLinked" to true,
-                    "executable" to true,
-                    "modelFormat" to "gguf",
-                    "reason" to "llama.cpp ARM64 CPU backend",
-                ),
-                candidate("qnn-htp", "qnn", "QNN context binary"),
-                candidate("hiai", "hiAi", "HiAI offline model"),
-                candidate("neuropilot", "neuroPilot", "MediaTek NeuroPilot model"),
-                candidate("vulkan", "vulkan", "gguf"),
+                mapOf("id" to "qnn-htp", "priority" to 0, "requiresValidatedContext" to true),
+                mapOf("id" to "cpu", "priority" to 1, "composerModelSupported" to true),
             ),
         )
     }
+
+    private fun secureAppModelRoot(value: String?): File? {
+        if (value.isNullOrBlank()) return null
+        val root = runCatching { File(value).canonicalFile }.getOrNull() ?: return null
+        val dataRoot = applicationInfo.dataDir?.let(::File)?.canonicalFile ?: return null
+        return root.takeIf { it.isDirectory && it.isInside(dataRoot) }
+    }
+
+    private fun deliverLlmResult(result: MethodChannel.Result, action: () -> Unit) {
+        if (activityDestroyed) return
+        runOnUiThread {
+            if (!activityDestroyed) runCatching(action)
+        }
+    }
+
+    private fun llmErrorDetails(operation: String, error: Throwable): Map<String, Any?> = mapOf(
+        "operation" to operation,
+        "cause" to error.javaClass.simpleName,
+        "activeBackend" to GenieRuntimeBridge.activeBackend(),
+        "activeBackendVerified" to GenieRuntimeBridge.activeBackendVerified(),
+        "fallbackFailures" to GenieRuntimeBridge.activeFallbackFailures(),
+        "qnn" to QnnRuntime.status.asMap(),
+        "retryable" to true,
+    )
 
     private fun calculatePcmAmplitude(audio: ByteArray, encoding: Int): Double {
         var sumSquares = 0.0
@@ -1528,7 +1582,7 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
         return MossOnnxEngine(
             modelRoot = modelRoot,
             cpuThreads = mossCpuThreads(),
-            requireHardware = true,
+            requireHardware = false,
         ).also {
             mossEngine = it
             mossEngineRoot = path
@@ -1573,6 +1627,8 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
         mossCancellation.set(true)
         mossExecutor.execute(::closeMossEngine)
         mossExecutor.shutdown()
+        llmExecutor.execute { GenieRuntimeBridge.release(llmSessionOwner) }
+        llmExecutor.shutdown()
         pendingRecognitionResult?.error("activity_destroyed", "语音识别已随页面关闭", null)
         pendingRecognitionResult = null
         speechRecognizer?.destroy()

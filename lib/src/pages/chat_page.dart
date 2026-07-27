@@ -12,6 +12,8 @@ import 'package:talk2u/src/pages/character_list_page.dart';
 import 'package:talk2u/src/pages/settings_page.dart';
 import 'package:talk2u/src/services/offline_speech_service.dart';
 import 'package:talk2u/src/services/live2d_model_importer.dart';
+import 'package:talk2u/src/services/moss_tts_service.dart';
+import 'package:talk2u/src/services/offline_llm_service.dart';
 import 'package:talk2u/src/widgets/live2d_avatar.dart';
 
 class ChatPage extends StatefulWidget {
@@ -1045,6 +1047,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                   ],
                 ),
               ),
+              _buildExecutionStatus(chatState),
               if (chatState.errorMessage != null)
                 keyboardVisible
                     ? ConstrainedBox(
@@ -1078,6 +1081,95 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
           );
         },
       ),
+    );
+  }
+
+  Widget _buildExecutionStatus(ChatState chatState) {
+    return AnimatedBuilder(
+      animation: Listenable.merge([
+        OfflineLlmService.instance,
+        MossTtsService.instance,
+      ]),
+      builder: (context, _) {
+        final llm = OfflineLlmService.instance;
+        final moss = MossTtsService.instance;
+        final colors = Theme.of(context).colorScheme;
+        final items = <({IconData icon, String label, Color color})>[];
+
+        if (chatState.usesAndroidOfflineProvider) {
+          items.add((
+            icon: llm.hardwareAccelerationVerified
+                ? Icons.memory
+                : llm.usingCpuFallback
+                ? Icons.developer_board_outlined
+                : Icons.pending_outlined,
+            label: 'LLM · ${llm.accelerationDescription}',
+            color: llm.hardwareAccelerationVerified
+                ? colors.primary
+                : llm.usingCpuFallback
+                ? colors.tertiary
+                : colors.onSurfaceVariant,
+          ));
+        }
+        if (moss.ready) {
+          final cpuFallback =
+              moss.providerMeasured && moss.activeProvider == 'CPU';
+          items.add((
+            icon: moss.hardwareAccelerationVerified
+                ? Icons.graphic_eq
+                : cpuFallback
+                ? Icons.volume_up_outlined
+                : Icons.pending_outlined,
+            label: 'TTS · ${moss.accelerationLabel}',
+            color: moss.hardwareAccelerationVerified
+                ? colors.primary
+                : cpuFallback
+                ? colors.tertiary
+                : colors.onSurfaceVariant,
+          ));
+        }
+        if (items.isEmpty) return const SizedBox.shrink();
+
+        final itemWidth = (MediaQuery.sizeOf(context).width - 24)
+            .clamp(0.0, 420.0)
+            .toDouble();
+        return ColoredBox(
+          color: colors.surfaceContainerLow,
+          child: SafeArea(
+            top: false,
+            bottom: false,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              child: Wrap(
+                spacing: 16,
+                runSpacing: 6,
+                children: items
+                    .map(
+                      (item) => SizedBox(
+                        width: itemWidth,
+                        child: Row(
+                          children: [
+                            Icon(item.icon, size: 16, color: item.color),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                item.label,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: Theme.of(context).textTheme.labelMedium
+                                    ?.copyWith(color: item.color),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    )
+                    .toList(growable: false),
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 

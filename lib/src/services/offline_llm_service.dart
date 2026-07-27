@@ -1,10 +1,14 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
+import 'package:archive/archive_io.dart';
 import 'package:crypto/crypto.dart';
-import 'package:fcllama/fllama.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 @immutable
@@ -22,23 +26,33 @@ class OfflineGenerationCancelled implements Exception {
   String toString() => '端侧生成已停止';
 }
 
+class OfflineLlmFailure implements Exception {
+  final String code;
+  final String message;
+  final Object? details;
+
+  const OfflineLlmFailure(this.code, this.message, [this.details]);
+
+  @override
+  String toString() => message;
+}
+
 class OfflineLlmService extends ChangeNotifier {
   OfflineLlmService._();
 
   static final instance = OfflineLlmService._();
 
-  static const modelName = 'Qwen2.5 3B Instruct Q4_K_M';
-  static const modelLicense = 'Qwen Research';
-  static const modelFileName = 'qwen2.5-3b-instruct-q4_k_m.gguf';
-  static const modelSize = 2104932768;
-  static const modelSha256 =
-      '626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d';
-  static const modelUrl =
-      'https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/'
-      'qwen2.5-3b-instruct-q4_k_m.gguf?download=true';
+  static const modelName = 'Qwen3-4B-Instruct-2507';
+  static const modelId = 'Qwen/Qwen3-4B-Instruct-2507';
+  static const modelLicense = 'Apache-2.0';
+  static const modelSize = 0;
   static const contextSize = 8192;
   static const maxOutputTokens = 768;
   static const _runtimeChannel = MethodChannel('talk2u/llm_runtime');
+  static const _directoryName = 'qwen3-4b-instruct-2507-genie';
+  static const _manifestName = 'talk2u-genie-manifest.json';
+  static const _maximumEntries = 4096;
+  static const _maximumExpandedBytes = 12 * 1024 * 1024 * 1024;
 
   bool initialized = false;
   bool modelReady = false;
@@ -46,27 +60,36 @@ class OfflineLlmService extends ChangeNotifier {
   bool loadingModel = false;
   bool generating = false;
   int downloadedBytes = 0;
-  int totalDownloadBytes = modelSize;
+  int totalDownloadBytes = 0;
   String? lastError;
+  String? fallbackNotice;
   Map<String, dynamic> runtimeCapabilities = const {};
 
   Future<void>? _initializing;
   String? _modelPath;
-  double? _contextId;
+  bool _runtimeLoaded = false;
   bool _stopRequested = false;
-  HttpClientRequest? _downloadRequest;
-  bool _cancelRequested = false;
 
-  bool get supported =>
-      defaultTargetPlatform == TargetPlatform.android ||
-      defaultTargetPlatform == TargetPlatform.iOS;
+  bool get supported => defaultTargetPlatform == TargetPlatform.android;
+  bool get usingCpuFallback =>
+      runtimeCapabilities['activeBackend']?.toString() == 'cpu';
+  String? get activeBackend => runtimeCapabilities['activeBackend']?.toString();
+  bool get hardwareAccelerationVerified =>
+      runtimeCapabilities['activeBackendVerified'] == true &&
+      activeBackend == 'qnn-htp';
+
   String get accelerationDescription {
-    if (defaultTargetPlatform == TargetPlatform.iOS) return 'Apple Metal GPU';
-    if (defaultTargetPlatform != TargetPlatform.android) return '不可用';
-    final backend = runtimeCapabilities['activeBackend']?.toString();
-    final profile = runtimeCapabilities['targetProfile']?.toString();
-    if (backend == null || backend.isEmpty) return 'CPU/NEON';
-    return profile == null || profile.isEmpty ? backend : '$backend · $profile';
+    final backend = activeBackend;
+    final verified = runtimeCapabilities['activeBackendVerified'] == true;
+    final failures = runtimeCapabilities['fallbackFailures'];
+    final htpFailed = failures is List && failures.isNotEmpty;
+    return switch (backend) {
+      'qnn-htp' when verified => 'Qualcomm QNN HTP/NPU',
+      'qnn-htp' => 'QNN HTP 已加载，等待首轮执行验证',
+      'cpu' when htpFailed => 'Snapdragon CPU（QNN HTP 加载失败）',
+      'cpu' => 'Snapdragon CPU（部署包不含 HTP 工件）',
+      _ => '等待验证 HTP/CPU 后端',
+    };
   }
 
   String? get modelPath => _modelPath;
@@ -76,14 +99,7 @@ class OfflineLlmService extends ChangeNotifier {
 
   Future<Directory> _modelDirectory() async {
     final root = await getApplicationSupportDirectory();
-    final directory = Directory('${root.path}${Platform.pathSeparator}models');
-    if (!await directory.exists()) await directory.create(recursive: true);
-    return directory;
-  }
-
-  Future<File> _modelFile() async {
-    final directory = await _modelDirectory();
-    return File('${directory.path}${Platform.pathSeparator}$modelFileName');
+    return Directory(p.join(root.path, 'models', _directoryName));
   }
 
   Future<void> initialize() {
@@ -104,13 +120,13 @@ class OfflineLlmService extends ChangeNotifier {
     }
     try {
       await _loadRuntimeCapabilities();
-      final file = await _modelFile();
-      modelReady = await _isValidModel(file);
-      _modelPath = modelReady ? file.path : null;
+      final directory = await _modelDirectory();
+      modelReady = await _validateDeployment(directory);
+      _modelPath = modelReady ? directory.path : null;
       lastError = null;
     } catch (error) {
       modelReady = false;
-      lastError = '无法检查端侧模型: $error';
+      lastError = '无法检查 Qwen3 Genie 部署包: $error';
     } finally {
       initialized = true;
       notifyListeners();
@@ -118,7 +134,6 @@ class OfflineLlmService extends ChangeNotifier {
   }
 
   Future<void> _loadRuntimeCapabilities() async {
-    if (defaultTargetPlatform != TargetPlatform.android) return;
     try {
       final value = await _runtimeChannel.invokeMapMethod<Object?, Object?>(
         'capabilities',
@@ -130,185 +145,137 @@ class OfflineLlmService extends ChangeNotifier {
       }
     } on MissingPluginException {
       runtimeCapabilities = const {
-        'activeBackend': 'cpu-neon',
-        'activeBackendVerified': true,
-        'targetProfile': 'generic-arm64',
+        'activeBackend': null,
+        'genieRuntimePresent': false,
       };
     } on PlatformException catch (error) {
-      debugPrint('Unable to query Android LLM runtime: $error');
+      debugPrint('Unable to query Android Genie runtime: $error');
     }
-  }
-
-  Future<bool> _hasValidHeaderAndSize(File file) async {
-    if (!await file.exists() || await file.length() != modelSize) return false;
-    final reader = await file.open();
-    try {
-      final header = await reader.read(4);
-      return listEquals(header, const [0x47, 0x47, 0x55, 0x46]);
-    } finally {
-      await reader.close();
-    }
-  }
-
-  Future<bool> _isValidModel(File file) async {
-    if (!await _hasValidHeaderAndSize(file)) return false;
-    return (await sha256.bind(file.openRead()).first).toString() == modelSha256;
   }
 
   Future<void> downloadModel() async {
-    if (!supported) throw UnsupportedError('端侧 LLM 当前仅支持 Android 和 iOS');
-    if (downloading) return;
-    downloading = true;
-    totalDownloadBytes = modelSize;
-    lastError = null;
-    _cancelRequested = false;
-
-    final destination = await _modelFile();
-    final partial = File('${destination.path}.part');
-    var resumeFrom = await partial.exists() ? await partial.length() : 0;
-    if (resumeFrom > modelSize) {
-      await partial.delete();
-      resumeFrom = 0;
+    if (!supported) {
+      throw UnsupportedError('Qwen3 Genie 部署包当前仅支持 Android');
     }
-    downloadedBytes = resumeFrom;
+    final selection = await FilePicker.platform.pickFiles(
+      dialogTitle: '选择 Qwen3-4B-Instruct-2507 Genie 部署 ZIP',
+      type: FileType.custom,
+      allowedExtensions: const ['zip'],
+      allowMultiple: false,
+      withData: false,
+    );
+    final sourcePath = selection?.files.single.path;
+    if (sourcePath == null) return;
+
+    downloading = true;
+    lastError = null;
+    fallbackNotice = null;
+    final source = File(sourcePath);
+    totalDownloadBytes = await source.length();
+    downloadedBytes = 0;
     notifyListeners();
 
-    final client = HttpClient()
-      ..connectionTimeout = const Duration(seconds: 20);
-    IOSink? sink;
-    var discardPartial = false;
+    final destination = await _modelDirectory();
+    final staging = Directory('${destination.path}.installing');
+    final backup = Directory('${destination.path}.previous');
+    final previousReady = modelReady;
+    final previousPath = _modelPath;
     try {
-      final request = await client.getUrl(Uri.parse(modelUrl));
-      _downloadRequest = request;
-      request.headers.set(HttpHeaders.userAgentHeader, 'Talk2U/1.0');
-      if (resumeFrom > 0) {
-        request.headers.set(HttpHeaders.rangeHeader, 'bytes=$resumeFrom-');
-      }
-      final response = await request.close().timeout(
-        const Duration(seconds: 30),
+      await Isolate.run(
+        () => _installDeploymentArchive(source.path, staging.path),
       );
-      if (response.statusCode != HttpStatus.ok &&
-          response.statusCode != HttpStatus.partialContent) {
-        throw HttpException('模型下载返回 HTTP ${response.statusCode}');
+      if (!await _validateDeployment(staging, verifyHashes: true)) {
+        throw const FormatException('部署 ZIP 的清单或 SHA-256 校验失败');
       }
-
-      final contentRange = response.headers.value(
-        HttpHeaders.contentRangeHeader,
-      );
-      final canResume =
-          resumeFrom > 0 &&
-          response.statusCode == HttpStatus.partialContent &&
-          (contentRange?.startsWith('bytes $resumeFrom-') ?? false);
-      if (!canResume) {
-        resumeFrom = 0;
-        downloadedBytes = 0;
-      }
-      sink = partial.openWrite(
-        mode: canResume ? FileMode.append : FileMode.write,
-      );
-      var lastNotification = DateTime.now();
-      await for (final chunk in response) {
-        if (_cancelRequested) throw const HttpException('用户取消模型下载');
-        sink.add(chunk);
-        downloadedBytes += chunk.length;
-        final now = DateTime.now();
-        if (now.difference(lastNotification).inMilliseconds >= 200) {
-          lastNotification = now;
-          notifyListeners();
+      await _runtimeChannel.invokeMethod<void>('release');
+      _runtimeLoaded = false;
+      if (await backup.exists()) {
+        if (await destination.exists()) {
+          await backup.delete(recursive: true);
+        } else {
+          await backup.rename(destination.path);
         }
       }
-      await sink.flush();
-      await sink.close();
-      sink = null;
-
-      if (await partial.length() != modelSize) {
-        if (await partial.length() > modelSize) discardPartial = true;
-        throw const FormatException('模型文件大小校验失败');
-      }
-      final digest = await sha256.bind(partial.openRead()).first;
-      if (digest.toString() != modelSha256) {
-        discardPartial = true;
-        throw const FormatException('模型 SHA-256 校验失败');
-      }
-      if (await destination.exists()) await destination.delete();
-      await partial.rename(destination.path);
-      modelReady = await _hasValidHeaderAndSize(destination);
-      if (!modelReady) throw const FormatException('模型不是有效的 GGUF 文件');
+      if (await destination.exists()) await destination.rename(backup.path);
+      await staging.rename(destination.path);
+      modelReady = true;
       _modelPath = destination.path;
-      downloadedBytes = modelSize;
+      downloadedBytes = totalDownloadBytes;
+      if (await backup.exists()) {
+        try {
+          await backup.delete(recursive: true);
+        } catch (error) {
+          debugPrint('Unable to remove previous Qwen3 deployment: $error');
+        }
+      }
     } catch (error) {
-      lastError = _cancelRequested ? null : error.toString();
-      modelReady = false;
-      _modelPath = null;
-      if (discardPartial && await partial.exists()) await partial.delete();
-      if (!_cancelRequested) rethrow;
+      lastError = error.toString();
+      if (await staging.exists()) await staging.delete(recursive: true);
+      if (!await destination.exists() && await backup.exists()) {
+        await backup.rename(destination.path);
+      }
+      modelReady = previousReady;
+      _modelPath = previousPath;
+      rethrow;
     } finally {
-      await sink?.close();
-      _downloadRequest = null;
-      client.close(force: true);
       downloading = false;
       notifyListeners();
     }
   }
 
-  void cancelDownload() {
-    _cancelRequested = true;
-    _downloadRequest?.abort(const HttpException('用户取消模型下载'));
-  }
-
   Future<void> deleteModel() async {
     if (generating) throw StateError('请先等待当前端侧回复完成');
-    final contextId = _contextId;
-    if (contextId != null) {
-      await FCllama.instance()!.releaseContext(contextId);
-      _contextId = null;
-    }
-    final file = await _modelFile();
-    if (await file.exists()) await file.delete();
-    final partial = File('${file.path}.part');
-    if (await partial.exists()) await partial.delete();
+    await _runtimeChannel.invokeMethod<void>('release');
+    _runtimeLoaded = false;
+    final directory = await _modelDirectory();
+    if (await directory.exists()) await directory.delete(recursive: true);
+    final staging = Directory('${directory.path}.installing');
+    if (await staging.exists()) await staging.delete(recursive: true);
     modelReady = false;
     downloadedBytes = 0;
+    totalDownloadBytes = 0;
     _modelPath = null;
+    fallbackNotice = null;
     lastError = null;
     notifyListeners();
   }
 
-  Future<double> _ensureContext() async {
-    final existing = _contextId;
-    if (existing != null) return existing;
+  Future<void> _ensureRuntime() async {
+    if (_runtimeLoaded) return;
     await initialize();
     final path = _modelPath;
     if (!modelReady || path == null) {
-      throw StateError('请先在设置中下载 $modelName');
+      throw StateError('请先安装 $modelName 的 Genie 部署 ZIP');
     }
-
     loadingModel = true;
     lastError = null;
     notifyListeners();
     try {
-      final context = await FCllama.instance()!.initContext(
-        path,
-        nCtx: contextSize,
-        nBatch: 256,
-        nThreads: 0,
-        nGpuLayers: defaultTargetPlatform == TargetPlatform.iOS ? 99 : 0,
-        useMlock: false,
-        useMmap: true,
-        emitLoadProgress: true,
+      final result = await _runtimeChannel.invokeMapMethod<Object?, Object?>(
+        'load',
+        {'modelRoot': path},
       );
-      final rawId = context?['contextId'];
-      final contextId = rawId is num
-          ? rawId.toDouble()
-          : double.tryParse(rawId?.toString() ?? '');
-      if (contextId == null || contextId <= 0) {
-        throw StateError(context?['reason']?.toString() ?? 'llama.cpp 初始化失败');
+      if (result == null) throw StateError('Genie 没有返回加载结果');
+      runtimeCapabilities = {
+        ...runtimeCapabilities,
+        ...result.map((key, value) => MapEntry(key.toString(), value)),
+      };
+      _runtimeLoaded = true;
+      if (usingCpuFallback) {
+        final failures = runtimeCapabilities['fallbackFailures'];
+        fallbackNotice = failures is List && failures.isNotEmpty
+            ? 'QNN HTP 加载失败，Qwen3 已回退到 Snapdragon CPU：${failures.join('; ')}'
+            : '当前 Genie 部署包仅包含 CPU 模型工件；要使用 NPU，请安装带有已验证 SM8850/V81 qnn-htp 后端的部署包。';
+      } else {
+        fallbackNotice = null;
       }
-      _contextId = contextId;
-      return contextId;
-    } catch (error) {
-      lastError = error.toString();
-      rethrow;
+    } on PlatformException catch (error) {
+      lastError = error.message ?? error.code;
+      throw OfflineLlmFailure(
+        error.code,
+        'Qwen3 端侧模型加载失败：${error.message ?? error.code}',
+        error.details,
+      );
     } finally {
       loadingModel = false;
       notifyListeners();
@@ -320,51 +287,40 @@ class OfflineLlmService extends ChangeNotifier {
     ValueChanged<String>? onText,
   }) async {
     if (generating) throw StateError('端侧模型正在生成上一条回复');
-    final contextId = await _ensureContext();
     generating = true;
     _stopRequested = false;
     lastError = null;
     notifyListeners();
-
-    final buffer = StringBuffer();
-    StreamSubscription<Map<Object?, dynamic>>? subscription;
     try {
-      subscription = FCllama.instance()!.onTokenStream?.listen((event) {
-        if (event['function'] != 'completion') return;
-        final result = event['result'];
-        if (result is! Map) return;
-        final token = result['token']?.toString() ?? '';
-        if (token.isEmpty) return;
-        buffer.write(token);
-        onText?.call(buffer.toString());
-      });
-      final prompt = formatQwenChatPrompt(messages);
-      final result = await FCllama.instance()!.completion(
-        contextId,
-        prompt: prompt,
-        temperature: 0.7,
-        nPredict: maxOutputTokens,
-        penaltyRepeat: 1.1,
-        topK: 40,
-        topP: 0.9,
-        minP: 0.05,
-        stop: const ['<|im_end|>', '<|endoftext|>'],
-        emitRealtimeCompletion: true,
-      );
-      if (_stopRequested) throw const OfflineGenerationCancelled();
-      var text = buffer.toString().trim();
-      if (text.isEmpty) {
-        text = (result?['text'] ?? result?['content'] ?? '').toString().trim();
+      await _ensureRuntime();
+      final arguments = <String, Object>{
+        'prompt': formatQwenChatPrompt(messages),
+        'maxTokens': maxOutputTokens,
+        'modelRoot': _modelPath!,
+      };
+      try {
+        final result = await _runtimeChannel.invokeMethod<String>(
+          'generate',
+          arguments,
+        );
+        if (_stopRequested) throw const OfflineGenerationCancelled();
+        await _loadRuntimeCapabilities();
+        final text = (result ?? '').trim();
+        if (text.isEmpty) throw StateError('Qwen3 Genie 没有返回文本');
+        onText?.call(text);
+        return text;
+      } on PlatformException catch (error) {
+        _runtimeLoaded = false;
+        throw OfflineLlmFailure(
+          error.code,
+          'Qwen3 端侧生成失败：${error.message ?? error.code}',
+          error.details,
+        );
       }
-      if (text.isEmpty) throw StateError('端侧模型没有返回文本');
-      return text;
     } catch (error) {
-      if (error is! OfflineGenerationCancelled) {
-        lastError = error.toString();
-      }
+      if (error is! OfflineGenerationCancelled) lastError = error.toString();
       rethrow;
     } finally {
-      await subscription?.cancel();
       _stopRequested = false;
       generating = false;
       notifyListeners();
@@ -394,19 +350,132 @@ class OfflineLlmService extends ChangeNotifier {
   }
 
   Future<void> stopGeneration() async {
-    final contextId = _contextId;
-    if (contextId != null && generating) {
-      _stopRequested = true;
-      await FCllama.instance()!.stopCompletion(contextId: contextId);
-    }
+    if (!generating) return;
+    _stopRequested = true;
+    await _runtimeChannel.invokeMethod<void>('stop');
   }
 
   @override
   void dispose() {
-    final contextId = _contextId;
-    if (contextId != null) {
-      unawaited(FCllama.instance()!.releaseContext(contextId));
+    if (_runtimeLoaded) {
+      unawaited(_runtimeChannel.invokeMethod<void>('release'));
     }
     super.dispose();
   }
+
+  static Future<bool> _validateDeployment(
+    Directory directory, {
+    bool verifyHashes = false,
+  }) async {
+    final manifest = File(p.join(directory.path, _manifestName));
+    if (!await manifest.isFile()) return false;
+    final decoded = jsonDecode(await manifest.readAsString());
+    if (decoded is! Map<String, dynamic> ||
+        decoded['schemaVersion'] != 1 ||
+        decoded['modelId'] != modelId) {
+      return false;
+    }
+    final backends = decoded['backends'];
+    final files = decoded['files'];
+    if (backends is! List ||
+        files is! List ||
+        backends.isEmpty ||
+        files.isEmpty) {
+      return false;
+    }
+    final backendIds = backends
+        .whereType<Map>()
+        .map((item) => item['id'])
+        .whereType<String>()
+        .toSet();
+    if (!backendIds.contains('cpu')) return false;
+    for (final raw in files) {
+      if (raw is! Map) return false;
+      final relative = raw['path'];
+      final expectedBytes = raw['bytes'];
+      final expectedHash = raw['sha256'];
+      if (relative is! String ||
+          expectedBytes is! int ||
+          expectedHash is! String ||
+          !_isSafeRelativePath(relative)) {
+        return false;
+      }
+      final file = File(
+        p.joinAll([directory.path, ...p.posix.split(relative)]),
+      );
+      if (!await file.isFile() || await file.length() != expectedBytes) {
+        return false;
+      }
+      // Imported archives are fully hashed before the atomic install. The
+      // installed directory is app-private, so startup only needs inexpensive
+      // structural and exact-size checks instead of rehashing multi-GB weights.
+      if (verifyHashes) {
+        final actual = await sha256.bind(file.openRead()).first;
+        if (actual.toString() != expectedHash.toLowerCase()) return false;
+      }
+    }
+    return true;
+  }
+
+  static void _installDeploymentArchive(String sourcePath, String outputPath) {
+    final output = Directory(outputPath);
+    if (output.existsSync()) output.deleteSync(recursive: true);
+    output.createSync(recursive: true);
+    InputFileStream? input;
+    try {
+      input = InputFileStream(sourcePath);
+      final archive = ZipDecoder().decodeStream(input);
+      if (archive.isEmpty || archive.length > _maximumEntries) {
+        throw const FormatException('部署 ZIP 为空或条目过多');
+      }
+      var expandedBytes = 0;
+      for (final entry in archive) {
+        final relative = entry.name.replaceAll('\\', '/');
+        if (!_isSafeRelativePath(relative)) {
+          throw FormatException('部署 ZIP 包含越界路径: ${entry.name}');
+        }
+        expandedBytes += entry.size;
+        if (expandedBytes > _maximumExpandedBytes) {
+          throw const FormatException('部署 ZIP 解压后超过 12 GiB 限制');
+        }
+        final destination = p.joinAll([
+          output.path,
+          ...p.posix.split(relative),
+        ]);
+        if (entry.isDirectory) {
+          Directory(destination).createSync(recursive: true);
+        } else if (entry.isFile) {
+          Directory(p.dirname(destination)).createSync(recursive: true);
+          final stream = OutputFileStream(destination);
+          try {
+            entry.writeContent(stream);
+          } finally {
+            stream.closeSync();
+          }
+        } else {
+          throw FormatException('部署 ZIP 包含不支持的链接: ${entry.name}');
+        }
+      }
+    } catch (_) {
+      if (output.existsSync()) output.deleteSync(recursive: true);
+      rethrow;
+    } finally {
+      input?.closeSync();
+    }
+  }
+
+  static bool _isSafeRelativePath(String value) {
+    final normalized = p.posix.normalize(value.replaceAll('\\', '/'));
+    return normalized.isNotEmpty &&
+        normalized != '.' &&
+        !p.posix.isAbsolute(normalized) &&
+        normalized != '..' &&
+        !normalized.startsWith('../') &&
+        !RegExp(r'^[A-Za-z]:').hasMatch(normalized);
+  }
+}
+
+extension on File {
+  Future<bool> isFile() async =>
+      await exists() && (await stat()).type == FileSystemEntityType.file;
 }

@@ -80,11 +80,13 @@ val qnnSdkSkelFile = qnnSdkRoot?.resolve(
 )
 qnnSdkRoot?.let {
     require(it.isDirectory) { "TALK2U_QNN_SDK_ROOT is not a QAIRT SDK directory: $it" }
-    require(qnnOrtAar != null) {
-        "TALK2U_QNN_SDK_ROOT requires TALK2U_QNN_ORT_AAR built with the QNN Execution Provider"
-    }
     val host = requireNotNull(qnnSdkHostDirectory)
     listOf(
+        "libGenie.so",
+        "libQnnCpu.so",
+        "libQnnGenAiTransformer.so",
+        "libQnnGenAiTransformerModel.so",
+        "libQnnGpu.so",
         "libQnnHtp.so",
         "libQnnSystem.so",
         "libQnnHtpPrepare.so",
@@ -95,9 +97,6 @@ qnnSdkRoot?.let {
     require(requireNotNull(qnnSdkSkelFile).isFile) {
         "QAIRT SDK is missing the $qnnHtpArch HTP skel: $qnnSdkSkelFile"
     }
-}
-require(qnnJniDirectory == null || qnnOrtAar != null) {
-    "TALK2U_QNN_JNI_DIR requires TALK2U_QNN_ORT_AAR built with the QNN Execution Provider"
 }
 
 fun File.sha256(): String {
@@ -172,6 +171,11 @@ val prepareQnnSdkJni by tasks.registering(Sync::class) {
     qnnSdkHostDirectory?.let { host ->
         from(host) {
             include(
+                "libGenie.so",
+                "libQnnCpu.so",
+                "libQnnGenAiTransformer.so",
+                "libQnnGenAiTransformerModel.so",
+                "libQnnGpu.so",
                 "libQnnHtp.so",
                 "libQnnSystem.so",
                 "libQnnHtpPrepare.so",
@@ -217,6 +221,7 @@ android {
             "QNN_BUNDLED",
             (qnnSdkRoot != null || qnnJniDirectory != null).toString(),
         )
+        buildConfigField("boolean", "GENIE_BUNDLED", (qnnSdkRoot != null).toString())
         buildConfigField("String", "QNN_HTP_ARCH", "\"$qnnHtpArch\"")
         buildConfigField(
             "String",

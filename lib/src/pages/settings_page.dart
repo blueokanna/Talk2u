@@ -44,13 +44,10 @@ class _SettingsPageState extends State<SettingsPage> {
     try {
       final settings = await rust_api.getSettings();
       await OfflineLlmService.instance.initialize();
-      final providers = ProviderProfile.decodeList(settings.providersJson);
-      if (OfflineLlmService.instance.supported &&
-          !providers.any(
-            (provider) => provider.id == ProviderProfile.androidOfflineId,
-          )) {
-        providers.add(ProviderProfile.androidOffline);
-      }
+      final providers = ProviderProfile.withRuntimeDefaults(
+        ProviderProfile.decodeList(settings.providersJson),
+        includeAndroidOffline: OfflineLlmService.instance.supported,
+      );
       if (settings.apiKey?.isNotEmpty == true) {
         final index = providers.indexWhere((item) => item.id == 'zhipu');
         if (index >= 0 && providers[index].apiKey?.isNotEmpty != true) {
@@ -194,7 +191,8 @@ class _SettingsPageState extends State<SettingsPage> {
     try {
       await OfflineLlmService.instance.downloadModel();
       if (!mounted) return;
-      _showMessage('端侧 AI 模型已下载并校验完成');
+      if (!OfflineLlmService.instance.modelReady) return;
+      _showMessage('Qwen3 Genie 部署包已安装并校验完成');
       if (!_providers.any(
         (provider) => !provider.isLocal && provider.isConfigured,
       )) {
@@ -205,7 +203,7 @@ class _SettingsPageState extends State<SettingsPage> {
         await _save();
       }
     } catch (error) {
-      if (mounted) _showMessage('端侧 AI 模型下载失败: $error', isError: true);
+      if (mounted) _showMessage('Qwen3 部署包安装失败: $error', isError: true);
     }
   }
 
@@ -436,7 +434,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   subtitle: Text(
                     OfflineLlmService.instance.modelReady
                         ? '已就绪 · ${OfflineLlmService.instance.accelerationDescription}'
-                        : '无需 API；下载并校验模型后完全离线运行',
+                        : '无需 API；安装经校验的 Genie 部署 ZIP 后离线运行',
                   ),
                 ),
               ),
@@ -501,14 +499,15 @@ class _SettingsPageState extends State<SettingsPage> {
                               : llm.modelReady
                               ? '已就绪 · ${OfflineLlmService.modelLicense} · '
                                     '${llm.accelerationDescription}'
-                              : '${_formatBytes(OfflineLlmService.modelSize)} · '
-                                    '${OfflineLlmService.modelLicense} · llama.cpp',
+                              : '${OfflineLlmService.modelLicense} · Genie 部署 ZIP · '
+                                    'HTP → CPU',
                         ),
                         trailing: llm.downloading
-                            ? IconButton(
-                                tooltip: '取消下载',
-                                onPressed: llm.cancelDownload,
-                                icon: const Icon(Icons.stop_circle_outlined),
+                            ? const SizedBox.square(
+                                dimension: 24,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
                               )
                             : llm.modelReady
                             ? PopupMenuButton<String>(
@@ -526,7 +525,7 @@ class _SettingsPageState extends State<SettingsPage> {
                                 ],
                               )
                             : IconButton(
-                                tooltip: '下载端侧 AI 模型',
+                                tooltip: '安装 Qwen3 Genie 部署包',
                                 onPressed: _downloadOfflineModel,
                                 icon: const Icon(Icons.download_outlined),
                               ),
@@ -539,6 +538,15 @@ class _SettingsPageState extends State<SettingsPage> {
                           llm.lastError!,
                           style: TextStyle(
                             color: Theme.of(context).colorScheme.error,
+                          ),
+                        ),
+                      ],
+                      if (llm.fallbackNotice != null) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          llm.fallbackNotice!,
+                          style: TextStyle(
+                            color: Theme.of(context).colorScheme.tertiary,
                           ),
                         ),
                       ],
