@@ -500,8 +500,15 @@ impl StreamingHandler {
             GlmError::Stream(error) => ChatError::StreamError {
                 message: error.to_string(),
             },
-            other => ChatError::StreamError {
-                message: other.to_string(),
+            GlmError::Decode { message, .. } => ChatError::StreamError { message },
+            GlmError::Unsupported(error) => ChatError::ValidationError {
+                message: error.to_string(),
+            },
+            GlmError::Agent(error) => ChatError::ValidationError {
+                message: error.to_string(),
+            },
+            GlmError::Tool(error) => ChatError::ValidationError {
+                message: error.to_string(),
             },
         }
     }
@@ -989,5 +996,32 @@ mod tests {
         assert_eq!(request.model, "glm-4.7");
         assert_eq!(request.messages.len(), 2);
         assert_eq!(request.max_tokens, Some(1024));
+    }
+
+    #[test]
+    fn zhipu_sdk_decode_error_does_not_expose_response_body() {
+        let mapped = StreamingHandler::map_glm_error(GlmError::Decode {
+            message: "invalid JSON".into(),
+            body: "secret response body".into(),
+        });
+        match mapped {
+            ChatError::StreamError { message } => {
+                assert_eq!(message, "invalid JSON");
+                assert!(!message.contains("secret"));
+            }
+            other => panic!("Expected StreamError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zhipu_sdk_unsupported_and_tool_errors_are_not_retryable() {
+        let unsupported =
+            StreamingHandler::map_glm_error(GlmError::Unsupported("realtime audio".into()));
+        let tool = StreamingHandler::map_glm_error(GlmError::Tool("tool execution failed".into()));
+
+        assert!(matches!(unsupported, ChatError::ValidationError { .. }));
+        assert!(matches!(tool, ChatError::ValidationError { .. }));
+        assert!(!unsupported.is_retryable());
+        assert!(!tool.is_retryable());
     }
 }

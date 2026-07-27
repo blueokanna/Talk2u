@@ -31,6 +31,14 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   String? _modelOverrideCharacterId;
   ChatState? _chatState;
   int _handledResponseRevision = 0;
+  StreamSubscription<String>? _callRecognitionSubscription;
+  bool _callMode = false;
+  bool _callAwaitingResponse = false;
+  bool _callWaitingForSpeech = false;
+  bool _callSpeechStarted = false;
+  bool _callTransitioning = false;
+  bool _callRestartScheduled = false;
+  int _callGeneration = 0;
 
   @override
   void initState() {
@@ -40,6 +48,11 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       duration: const Duration(milliseconds: 200),
     );
     _scrollController.addListener(_onScroll);
+    final speech = OfflineSpeechService.instance;
+    speech.addListener(_handleCallSpeechState);
+    _callRecognitionSubscription = speech.recognitionResults.listen(
+      _handleCallRecognition,
+    );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<ChatState>().initialize();
     });
@@ -58,15 +71,34 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
 
   void _handleChatStateChanged() {
     final chatState = _chatState;
-    if (chatState == null ||
-        chatState.completedResponseRevision <= _handledResponseRevision) {
+    if (chatState == null) return;
+    if (_callMode &&
+        _callAwaitingResponse &&
+        !chatState.isStreaming &&
+        chatState.errorMessage != null) {
+      _callAwaitingResponse = false;
+      unawaited(_resumeCallListening(_callGeneration));
+    }
+    if (chatState.completedResponseRevision <= _handledResponseRevision) {
       return;
     }
     _handledResponseRevision = chatState.completedResponseRevision;
     for (final message in chatState.messages.reversed) {
       if (message.role == MessageRole.assistant &&
           message.content.trim().isNotEmpty) {
-        unawaited(_speakReply(message.content));
+        if (_callMode) {
+          _callAwaitingResponse = false;
+          _callWaitingForSpeech = true;
+          _callSpeechStarted = false;
+          final generation = _callGeneration;
+          unawaited(
+            _speakReply(
+              message.content,
+            ).whenComplete(() => _handleCallSpeechInvocation(generation)),
+          );
+        } else {
+          unawaited(_speakReply(message.content));
+        }
         return;
       }
     }
@@ -93,6 +125,15 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
 
   @override
   void dispose() {
+    _callMode = false;
+    _callGeneration++;
+    final speech = OfflineSpeechService.instance;
+    if (speech.listening) unawaited(speech.stopListening());
+    if (speech.speaking || speech.generating) {
+      unawaited(speech.stopSpeaking());
+    }
+    OfflineSpeechService.instance.removeListener(_handleCallSpeechState);
+    unawaited(_callRecognitionSubscription?.cancel());
     _chatState?.removeListener(_handleChatStateChanged);
     _scrollController.dispose();
     _fabController.dispose();
@@ -135,6 +176,15 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       if (speech.listening) {
         await speech.stopListening();
       } else {
+        if (_callMode) {
+          final chatState = _chatState;
+          if (chatState?.isStreaming == true) await chatState!.stopGeneration();
+          if (speech.speaking || speech.generating) {
+            _callWaitingForSpeech = false;
+            _callSpeechStarted = false;
+            await speech.stopSpeaking();
+          }
+        }
         await speech.startListening();
       }
     } catch (error) {
@@ -142,6 +192,133 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('离线语音识别不可用: $error')));
+    }
+  }
+
+  Future<void> _toggleCallMode() async {
+    if (_callTransitioning) return;
+    _callTransitioning = true;
+    try {
+      if (_callMode) {
+        await _stopCallMode();
+        return;
+      }
+      final speech = OfflineSpeechService.instance;
+      await speech.initialize();
+      if (!speech.capabilities.offlineStt || !speech.capabilities.offlineTts) {
+        throw StateError('持续通话需要可用的端侧语音识别和语音合成');
+      }
+      await speech.stopSpeaking();
+      if (speech.listening) await speech.stopListening();
+      _callGeneration++;
+      _callAwaitingResponse = false;
+      _callWaitingForSpeech = false;
+      _callSpeechStarted = false;
+      if (mounted) setState(() => _callMode = true);
+      await _resumeCallListening(_callGeneration);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _callMode = false);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('无法开始持续通话: $error')));
+    } finally {
+      _callTransitioning = false;
+    }
+  }
+
+  Future<void> _stopCallMode() async {
+    _callGeneration++;
+    _callAwaitingResponse = false;
+    _callWaitingForSpeech = false;
+    _callSpeechStarted = false;
+    if (mounted) setState(() => _callMode = false);
+    final speech = OfflineSpeechService.instance;
+    if (speech.listening) await speech.stopListening();
+    if (speech.speaking || speech.generating) await speech.stopSpeaking();
+  }
+
+  void _handleCallRecognition(String text) {
+    if (!_callMode || _callAwaitingResponse || text.trim().isEmpty) return;
+    final generation = _callGeneration;
+    _callAwaitingResponse = true;
+    _callWaitingForSpeech = false;
+    _callSpeechStarted = false;
+    unawaited(_sendCallTurn(text.trim(), generation));
+  }
+
+  Future<void> _sendCallTurn(String text, int generation) async {
+    try {
+      final chatState = _chatState;
+      if (chatState == null || !_callMode || generation != _callGeneration) {
+        _callAwaitingResponse = false;
+        return;
+      }
+      if (chatState.isStreaming) await chatState.stopGeneration();
+      await chatState.sendMessage(text);
+      if (!_callMode || generation != _callGeneration) return;
+      if (!chatState.isStreaming && chatState.errorMessage != null) {
+        _callAwaitingResponse = false;
+        await _resumeCallListening(generation);
+      }
+    } catch (error) {
+      _callAwaitingResponse = false;
+      if (!_callMode || generation != _callGeneration) return;
+      await _resumeCallListening(generation);
+    }
+  }
+
+  void _handleCallSpeechState() {
+    if (!_callMode || !_callWaitingForSpeech) return;
+    final speech = OfflineSpeechService.instance;
+    if (speech.speaking) _callSpeechStarted = true;
+    if (_callSpeechStarted && !speech.speaking && !speech.generating) {
+      _callWaitingForSpeech = false;
+      _callSpeechStarted = false;
+      unawaited(_resumeCallListening(_callGeneration));
+      return;
+    }
+    if (!_callAwaitingResponse &&
+        !_callWaitingForSpeech &&
+        !speech.listening &&
+        !_callRestartScheduled) {
+      _callRestartScheduled = true;
+      final generation = _callGeneration;
+      Future<void>.delayed(const Duration(milliseconds: 900), () async {
+        _callRestartScheduled = false;
+        await _resumeCallListening(generation);
+      });
+    }
+  }
+
+  void _handleCallSpeechInvocation(int generation) {
+    if (!_callMode || generation != _callGeneration || !_callWaitingForSpeech) {
+      return;
+    }
+    final speech = OfflineSpeechService.instance;
+    if (!speech.speaking && !speech.generating && !_callSpeechStarted) {
+      _callWaitingForSpeech = false;
+      unawaited(_resumeCallListening(generation));
+    }
+  }
+
+  Future<void> _resumeCallListening(int generation) async {
+    if (!_callMode ||
+        generation != _callGeneration ||
+        _callAwaitingResponse ||
+        _callWaitingForSpeech) {
+      return;
+    }
+    final speech = OfflineSpeechService.instance;
+    if (speech.listening) return;
+    try {
+      await speech.startListening();
+    } catch (error) {
+      if (!_callMode || generation != _callGeneration || !mounted) return;
+      setState(() => _callMode = false);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('持续通话已停止: $error')));
     }
   }
 
@@ -814,6 +991,18 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                                     )
                                   : const Icon(Icons.folder_open_outlined),
                             ),
+                            const SizedBox(width: 8),
+                            IconButton.filled(
+                              tooltip: _callMode ? '结束持续通话' : '开始持续通话',
+                              onPressed: _callTransitioning
+                                  ? null
+                                  : _toggleCallMode,
+                              icon: Icon(
+                                _callMode
+                                    ? Icons.call_end_outlined
+                                    : Icons.call_outlined,
+                              ),
+                            ),
                           ],
                         ),
                       ),
@@ -879,6 +1068,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                     onVoiceInput: _toggleListening,
                     isListening: speech.listening,
                     voiceEnabled: speech.capabilities.offlineStt,
+                    allowVoiceDuringStreaming: _callMode,
                     dictatedText: speech.recognizedText,
                     maxLines: keyboardVisible ? 3 : 5,
                   );

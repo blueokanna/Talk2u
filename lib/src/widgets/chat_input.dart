@@ -7,6 +7,7 @@ class ChatInput extends StatefulWidget {
   final VoidCallback? onVoiceInput;
   final bool isListening;
   final bool voiceEnabled;
+  final bool allowVoiceDuringStreaming;
   final String dictatedText;
   final int maxLines;
 
@@ -18,6 +19,7 @@ class ChatInput extends StatefulWidget {
     this.onVoiceInput,
     this.isListening = false,
     this.voiceEnabled = false,
+    this.allowVoiceDuringStreaming = false,
     this.dictatedText = '',
     this.maxLines = 5,
   }) : assert(maxLines > 0);
@@ -91,7 +93,9 @@ class _ChatInputState extends State<ChatInput> {
           children: [
             IconButton(
               tooltip: widget.voiceEnabled ? '离线语音输入' : '设备无离线识别引擎',
-              onPressed: widget.voiceEnabled && !widget.isStreaming
+              onPressed:
+                  widget.voiceEnabled &&
+                      (!widget.isStreaming || widget.allowVoiceDuringStreaming)
                   ? widget.onVoiceInput
                   : null,
               icon: Icon(

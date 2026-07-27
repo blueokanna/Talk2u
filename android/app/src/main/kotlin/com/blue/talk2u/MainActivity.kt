@@ -101,6 +101,8 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
     }
     @Volatile private var mossCancellation = AtomicBoolean(false)
     @Volatile private var activityDestroyed = false
+    private var mossEngine: MossOnnxEngine? = null
+    private var mossEngineRoot: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         val tlsReady = runCatching { initializeRustTls(applicationContext) }
@@ -114,6 +116,8 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        val qnnStatus = QnnRuntime.prepare(applicationContext)
+        Log.i("Talk2U/QNN", "runtime=${qnnStatus.asMap()}")
         if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
             Thread({
                 Log.i("Talk2U/GPU", GpuBackendProbe.diagnostics().toString())
@@ -144,7 +148,11 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
                         call.argument<String>("name").orEmpty(),
                         result,
                     )
-                    "speak" -> speak(call.argument<String>("text").orEmpty(), result)
+                    "speak" -> speak(
+                        call.argument<String>("text").orEmpty(),
+                        call.argument<String>("style").orEmpty(),
+                        result,
+                    )
                     "stopSpeaking" -> {
                         textToSpeech?.stop()
                         emit(mapOf("type" to "amplitude", "value" to 0.0))
@@ -225,6 +233,7 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
                                 )
                             },
                         )
+                    "runtimeDetails" -> result.success(MossOnnxEngine.runtimeDetails())
                     "synthesize" -> synthesizeMoss(call.arguments as? Map<*, *>, result)
                     "cancel" -> {
                         mossCancellation.set(true)
@@ -1085,7 +1094,7 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
         configFile.writeText(config.toString(2), Charsets.UTF_8)
     }
 
-    private fun speak(text: String, result: MethodChannel.Result) {
+    private fun speak(text: String, style: String, result: MethodChannel.Result) {
         if (!ttsReady) {
             result.error("offline_tts_unavailable", "设备未安装可用的离线 TTS 语音包", null)
             return
@@ -1099,7 +1108,11 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
             result.error("offline_tts_unavailable", "设备离线 TTS 引擎尚未初始化", null)
             return
         }
-        val chunks = splitTtsText(text, TextToSpeech.getMaxSpeechInputLength().coerceAtMost(280))
+        val chunks = splitTtsText(
+            text,
+            TextToSpeech.getMaxSpeechInputLength().coerceAtMost(280),
+            style,
+        )
         val batchId = System.currentTimeMillis()
         ttsSegments.clear()
         Log.i("Talk2U.Speech", "speak requested chars=${text.length} chunks=${chunks.size}")
@@ -1127,7 +1140,7 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
         result.success(null)
     }
 
-    private fun splitTtsText(text: String, maximumLength: Int): List<TtsChunk> {
+    private fun splitTtsText(text: String, maximumLength: Int, style: String): List<TtsChunk> {
         val result = mutableListOf<TtsChunk>()
         val strongBoundaries = setOf('。', '！', '？', '；', '\n', '!', '?', ';', '.', '…')
         val softBoundaries = setOf('，', '、', ',', ':', '：')
@@ -1166,7 +1179,7 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
             val leading = raw.indexOfFirst { !it.isWhitespace() }.coerceAtLeast(0)
             val value = raw.trim()
             if (value.isNotEmpty()) {
-                val prosody = ttsProsody(value)
+                val prosody = ttsProsody(value, style)
                 result.add(
                     TtsChunk(
                         offset = cursor + leading,
@@ -1182,9 +1195,15 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
         return result
     }
 
-    private fun ttsProsody(text: String): TtsProsody {
+    private fun ttsProsody(text: String, style: String): TtsProsody {
         val lower = text.lowercase(Locale.ROOT)
         return when {
+            style == "sad" -> TtsProsody(0.80f, -0.07f, 0.86f)
+            style == "angry" -> TtsProsody(1.04f, -0.06f, 1.0f)
+            style == "happy" -> TtsProsody(1.05f, 0.075f, 1.0f)
+            style == "surprise" -> TtsProsody(1.08f, 0.10f, 1.0f)
+            style == "dramatic" -> TtsProsody(0.86f, -0.035f, 0.9f)
+            style == "shy" -> TtsProsody(0.86f, 0.02f, 0.88f)
             listOf("轻声", "小声", "低语", "耳语", "悄悄", "whisper").any(lower::contains) ->
                 TtsProsody(0.84f, -0.01f, 0.78f)
             listOf("难过", "伤心", "悲伤", "哭", "失落", "孤独", "遗憾", "绝望", "sad").any(lower::contains) ->
@@ -1451,19 +1470,15 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
         mossCancellation = cancellation
         mossExecutor.execute {
             try {
-                val synthesis = MossOnnxEngine(
-                    modelRoot,
-                    cpuThreads = mossCpuThreads(),
-                ).use { engine ->
-                    engine.synthesize(
-                        textTokenChunks = tokenChunks,
-                        outputFile = outputFile,
-                        voice = voice,
-                        maxFrames = maxFrames,
-                        seed = seed,
-                        cancelled = cancellation,
-                    )
-                }
+                val engine = mossEngine(modelRoot)
+                val synthesis = engine.synthesize(
+                    textTokenChunks = tokenChunks,
+                    outputFile = outputFile,
+                    voice = voice,
+                    maxFrames = maxFrames,
+                    seed = seed,
+                    cancelled = cancellation,
+                )
                 deliverMossResult(result) {
                     Log.i(
                         "Talk2U/MOSS",
@@ -1500,8 +1515,30 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
     private fun releaseMoss(result: MethodChannel.Result) {
         mossCancellation.set(true)
         mossExecutor.execute {
+            closeMossEngine()
             deliverMossResult(result) { result.success(null) }
         }
+    }
+
+    private fun mossEngine(modelRoot: File): MossOnnxEngine {
+        val path = modelRoot.canonicalPath
+        val current = mossEngine
+        if (current != null && mossEngineRoot == path) return current
+        closeMossEngine()
+        return MossOnnxEngine(
+            modelRoot = modelRoot,
+            cpuThreads = mossCpuThreads(),
+            requireHardware = true,
+        ).also {
+            mossEngine = it
+            mossEngineRoot = path
+        }
+    }
+
+    private fun closeMossEngine() {
+        mossEngine?.close()
+        mossEngine = null
+        mossEngineRoot = null
     }
 
     private fun mossCpuThreads(): Int {
@@ -1534,6 +1571,7 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
     override fun onDestroy() {
         activityDestroyed = true
         mossCancellation.set(true)
+        mossExecutor.execute(::closeMossEngine)
         mossExecutor.shutdown()
         pendingRecognitionResult?.error("activity_destroyed", "语音识别已随页面关闭", null)
         pendingRecognitionResult = null

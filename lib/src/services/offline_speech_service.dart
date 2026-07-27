@@ -20,6 +20,22 @@ class SpeechAnimationCue {
   });
 }
 
+@immutable
+class SpeechStageDirection {
+  final String text;
+  final int spokenOffset;
+
+  const SpeechStageDirection({required this.text, required this.spokenOffset});
+}
+
+@immutable
+class SpeechPlan {
+  final String spokenText;
+  final List<SpeechStageDirection> stageDirections;
+
+  const SpeechPlan({required this.spokenText, required this.stageDirections});
+}
+
 class _CuePattern {
   final String cue;
   final int priority;
@@ -195,8 +211,10 @@ class OfflineSpeechService extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> speak(String text) async {
     _stopAnimationTimeline();
-    _spokenTextLength = text.length;
-    _spokenText = text;
+    final plan = prepareSpeech(text);
+    if (plan.spokenText.isEmpty) throw StateError('回复中没有可朗读文本');
+    _spokenTextLength = plan.spokenText.length;
+    _spokenText = plan.spokenText;
     animationCues = inferAnimationCues(text);
     animationCue = 'neutral';
     _activeAnimationCueIndex = -1;
@@ -206,7 +224,7 @@ class OfflineSpeechService extends ChangeNotifier with WidgetsBindingObserver {
     if (MossTtsService.instance.ready) {
       try {
         _usingMossTts = true;
-        await MossTtsService.instance.speak(text);
+        await MossTtsService.instance.speak(plan.spokenText);
         return;
       } catch (error) {
         if (defaultTargetPlatform != TargetPlatform.android ||
@@ -223,7 +241,10 @@ class OfflineSpeechService extends ChangeNotifier with WidgetsBindingObserver {
     }
     try {
       _usingMossTts = false;
-      await _methods.invokeMethod<void>('speak', {'text': text});
+      await _methods.invokeMethod<void>('speak', {
+        'text': plan.spokenText,
+        'style': _speechStyle(animationCues),
+      });
     } on PlatformException catch (error) {
       lastError = error.message ?? error.code;
       notifyListeners();
@@ -334,7 +355,105 @@ class OfflineSpeechService extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   @visibleForTesting
+  static SpeechPlan prepareSpeech(String text) {
+    var source = text.trim();
+    source = source.replaceFirst(
+      RegExp(r'^[^\n：:]{1,16}[：:]\s*(?=[（(【\[*])'),
+      '',
+    );
+    final spoken = StringBuffer();
+    final directions = <SpeechStageDirection>[];
+    const pairs = <String, String>{'（': '）', '(': ')', '【': '】', '[': ']'};
+    var index = 0;
+    while (index < source.length) {
+      final opening = source[index];
+      final closing = pairs[opening];
+      if (closing != null) {
+        final end = source.indexOf(closing, index + 1);
+        if (end > index + 1) {
+          final content = source.substring(index + 1, end).trim();
+          if (_isStageDirection(content)) {
+            directions.add(
+              SpeechStageDirection(text: content, spokenOffset: spoken.length),
+            );
+            index = end + 1;
+            while (index < source.length && source[index].trim().isEmpty) {
+              index++;
+            }
+            continue;
+          }
+        }
+      }
+      if (opening == '*') {
+        final end = source.indexOf('*', index + 1);
+        if (end > index + 1) {
+          final content = source.substring(index + 1, end).trim();
+          if (content.isNotEmpty) {
+            directions.add(
+              SpeechStageDirection(text: content, spokenOffset: spoken.length),
+            );
+            index = end + 1;
+            while (index < source.length && source[index].trim().isEmpty) {
+              index++;
+            }
+            continue;
+          }
+        }
+      }
+      spoken.write(opening);
+      index++;
+    }
+    final raw = spoken.toString();
+    final leading = raw.length - raw.trimLeft().length;
+    final value = raw.trim();
+    return SpeechPlan(
+      spokenText: value,
+      stageDirections: directions
+          .map(
+            (direction) => SpeechStageDirection(
+              text: direction.text,
+              spokenOffset: (direction.spokenOffset - leading)
+                  .clamp(0, value.length)
+                  .toInt(),
+            ),
+          )
+          .toList(growable: false),
+    );
+  }
+
+  @visibleForTesting
   static List<SpeechAnimationCue> inferAnimationCues(String text) {
+    final plan = prepareSpeech(text);
+    final result = _inferAnimationCuesPlain(plan.spokenText).toList();
+    final groupedDirections = <int, List<String>>{};
+    for (final direction in plan.stageDirections) {
+      groupedDirections
+          .putIfAbsent(direction.spokenOffset, () => <String>[])
+          .add(direction.text);
+    }
+    for (final entry in groupedDirections.entries) {
+      final cue = _inferAnimationCuePlain(entry.value.join(' '));
+      if (cue == 'neutral' || cue == 'talking' || cue == 'talkingSoft') {
+        continue;
+      }
+      result.removeWhere((existing) => existing.start == entry.key);
+      result.add(
+        SpeechAnimationCue(
+          cue: cue,
+          start: entry.key,
+          end: (entry.key + 1).clamp(0, plan.spokenText.length).toInt(),
+          priority: -1,
+        ),
+      );
+    }
+    result.sort((left, right) {
+      final position = left.start.compareTo(right.start);
+      return position != 0 ? position : right.priority.compareTo(left.priority);
+    });
+    return List.unmodifiable(result);
+  }
+
+  static List<SpeechAnimationCue> _inferAnimationCuesPlain(String text) {
     final value = text.toLowerCase();
     const patterns = <_CuePattern>[
       _CuePattern('wave', 0, ['挥手', '招手', '挥了挥', 'wave', '再见', '拜拜']),
@@ -497,6 +616,79 @@ class OfflineSpeechService extends ChangeNotifier with WidgetsBindingObserver {
       return position != 0 ? position : left.priority.compareTo(right.priority);
     });
     return List.unmodifiable(result);
+  }
+
+  static String _inferAnimationCuePlain(String text) {
+    final cues = _inferAnimationCuesPlain(text);
+    if (cues.isEmpty) return 'neutral';
+    return cues.reduce((left, right) {
+      if (left.priority != right.priority) {
+        return left.priority < right.priority ? left : right;
+      }
+      return left.start <= right.start ? left : right;
+    }).cue;
+  }
+
+  static bool _isStageDirection(String text) {
+    final value = text.toLowerCase();
+    if (value.isEmpty || value.length > 80) return false;
+    return const [
+      '笑',
+      '哭',
+      '叹气',
+      '叹息',
+      '点头',
+      '摇头',
+      '挥手',
+      '招手',
+      '抱',
+      '转身',
+      '低头',
+      '抬头',
+      '脸红',
+      '害羞',
+      '开心',
+      '高兴',
+      '兴奋',
+      '生气',
+      '愤怒',
+      '难过',
+      '悲伤',
+      '惊讶',
+      '震惊',
+      '小声',
+      '轻声',
+      '低语',
+      '耳语',
+      '大声',
+      '喊',
+      '欢呼',
+      '沉默',
+      '停顿',
+      '微笑',
+      'laugh',
+      'smile',
+      'cry',
+      'sigh',
+      'nod',
+      'wave',
+      'hug',
+      'whisper',
+      'shout',
+      'angry',
+      'happy',
+      'sad',
+      'excited',
+      'surprised',
+    ].any(value.contains);
+  }
+
+  static String _speechStyle(List<SpeechAnimationCue> cues) {
+    const supported = {'happy', 'sad', 'angry', 'shy', 'surprise', 'dramatic'};
+    for (final cue in cues) {
+      if (supported.contains(cue.cue)) return cue.cue;
+    }
+    return 'neutral';
   }
 
   static List<_SpeechTextSegment> _speechTextSegments(String text) {
@@ -677,7 +869,7 @@ class OfflineSpeechService extends ChangeNotifier with WidgetsBindingObserver {
         final text = raw['text'] as String?;
         if (text != null) {
           recognizedText = text;
-          _recognitionController.add(text);
+          if (raw['final'] != false) _recognitionController.add(text);
         }
       case 'error':
         _stopAnimationTimeline();

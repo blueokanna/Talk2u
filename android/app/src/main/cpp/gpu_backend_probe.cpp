@@ -265,6 +265,92 @@ struct DynamicRuntimeProbe {
     std::string library;
 };
 
+struct NnApiDeviceProbe {
+    std::string name;
+    std::string version;
+    int type = -1;
+    int64_t featureLevel = 0;
+
+    bool Hardware() const {
+        return type == 0 || type == 2 || type == 3;
+    }
+};
+
+struct NnApiProbeResult {
+    bool loader = false;
+    bool enumeration = false;
+    int resultCode = -1;
+    std::vector<NnApiDeviceProbe> devices;
+
+    bool HasHardware() const {
+        return std::any_of(devices.begin(), devices.end(), [](const auto& device) {
+            return device.Hardware();
+        });
+    }
+};
+
+NnApiProbeResult ProbeNnApi() {
+    NnApiProbeResult output;
+    void* library = dlopen("libneuralnetworks.so", RTLD_NOW | RTLD_LOCAL);
+    if (library == nullptr) return output;
+    output.loader = true;
+
+    using Device = void;
+    using GetDeviceCount = int (*)(uint32_t*);
+    using GetDevice = int (*)(uint32_t, const Device**);
+    using GetName = int (*)(const Device*, const char**);
+    using GetVersion = int (*)(const Device*, const char**);
+    using GetType = int (*)(const Device*, int32_t*);
+    using GetFeatureLevel = int (*)(const Device*, int64_t*);
+
+    const auto getDeviceCount = reinterpret_cast<GetDeviceCount>(
+        dlsym(library, "ANeuralNetworks_getDeviceCount"));
+    const auto getDevice = reinterpret_cast<GetDevice>(
+        dlsym(library, "ANeuralNetworks_getDevice"));
+    const auto getName = reinterpret_cast<GetName>(
+        dlsym(library, "ANeuralNetworksDevice_getName"));
+    const auto getVersion = reinterpret_cast<GetVersion>(
+        dlsym(library, "ANeuralNetworksDevice_getVersion"));
+    const auto getType = reinterpret_cast<GetType>(
+        dlsym(library, "ANeuralNetworksDevice_getType"));
+    const auto getFeatureLevel = reinterpret_cast<GetFeatureLevel>(
+        dlsym(library, "ANeuralNetworksDevice_getFeatureLevel"));
+    if (getDeviceCount == nullptr || getDevice == nullptr || getName == nullptr ||
+        getVersion == nullptr || getType == nullptr || getFeatureLevel == nullptr) {
+        dlclose(library);
+        return output;
+    }
+
+    uint32_t count = 0;
+    output.resultCode = getDeviceCount(&count);
+    if (output.resultCode != 0) {
+        dlclose(library);
+        return output;
+    }
+    output.enumeration = true;
+    for (uint32_t index = 0; index < count; ++index) {
+        const Device* device = nullptr;
+        if (getDevice(index, &device) != 0 || device == nullptr) continue;
+        const char* name = nullptr;
+        const char* version = nullptr;
+        int32_t type = -1;
+        int64_t featureLevel = 0;
+        if (getName(device, &name) != 0 || getType(device, &type) != 0 ||
+            getFeatureLevel(device, &featureLevel) != 0) {
+            continue;
+        }
+        getVersion(device, &version);
+        output.devices.push_back({
+            name == nullptr ? "" : name,
+            version == nullptr ? "" : version,
+            type,
+            featureLevel,
+        });
+    }
+    dlclose(library);
+    return output;
+}
+
 DynamicRuntimeProbe ProbeDynamicRuntime(const std::vector<const char*>& libraries) {
     DynamicRuntimeProbe output;
     for (const char* library : libraries) {
@@ -377,10 +463,16 @@ OpenGlProbeResult ProbeOpenGl() {
 std::string BuildResultJson() {
     const VulkanProbeResult vulkan = ProbeVulkan();
     const OpenGlProbeResult openGl = ProbeOpenGl();
-    const DynamicRuntimeProbe qnn = ProbeDynamicRuntime({
-        "libQnnHtp.so",
+    const NnApiProbeResult nnapi = ProbeNnApi();
+    const DynamicRuntimeProbe qnnBackend = ProbeDynamicRuntime({"libQnnHtp.so"});
+    const DynamicRuntimeProbe qnnStub = ProbeDynamicRuntime({
+        "libQnnHtpV81Stub.so",
+        "libQnnHtpV79Stub.so",
+        "libQnnHtpV77Stub.so",
         "libQnnHtpV75Stub.so",
         "libQnnHtpV73Stub.so",
+        "libQnnHtpV69Stub.so",
+        "libQnnHtpV68Stub.so",
     });
     const DynamicRuntimeProbe hiAi = ProbeDynamicRuntime({
         "libhiai.so",
@@ -394,7 +486,7 @@ std::string BuildResultJson() {
     const char* preferred = vulkan.Ready() ? "vulkan" : openGl.ready ? "opengl-es" : "none";
 
     std::ostringstream output;
-    output << "{\"schemaVersion\":1"
+    output << "{\"schemaVersion\":2"
            << ",\"preferredNativeBackend\":\"" << preferred << "\""
            << ",\"vulkan\":{"
            << "\"ready\":" << (vulkan.Ready() ? "true" : "false")
@@ -417,10 +509,28 @@ std::string BuildResultJson() {
            << ",\"vendor\":\"" << JsonEscape(openGl.vendor.c_str()) << "\""
            << ",\"renderer\":\"" << JsonEscape(openGl.renderer.c_str()) << "\""
            << ",\"version\":\"" << JsonEscape(openGl.version.c_str()) << "\"}"
+           << ",\"nnapi\":{"
+           << "\"loader\":" << (nnapi.loader ? "true" : "false")
+           << ",\"enumeration\":" << (nnapi.enumeration ? "true" : "false")
+           << ",\"hardwareDevice\":" << (nnapi.HasHardware() ? "true" : "false")
+           << ",\"resultCode\":" << nnapi.resultCode
+           << ",\"devices\":[";
+    for (size_t index = 0; index < nnapi.devices.size(); ++index) {
+        if (index > 0) output << ',';
+        const auto& device = nnapi.devices[index];
+        output << "{\"name\":\"" << JsonEscape(device.name.c_str()) << "\""
+               << ",\"version\":\"" << JsonEscape(device.version.c_str()) << "\""
+               << ",\"type\":" << device.type
+               << ",\"featureLevel\":" << device.featureLevel
+               << ",\"hardware\":" << (device.Hardware() ? "true" : "false") << '}';
+    }
+    output << "]}"
            << ",\"llmCompute\":{"
            << "\"activeBackend\":\"cpu-neon\""
-           << ",\"qnn\":{\"runtimePresent\":" << (qnn.present ? "true" : "false")
-           << ",\"library\":\"" << JsonEscape(qnn.library.c_str()) << "\""
+           << ",\"qnn\":{\"runtimePresent\":" << (qnnBackend.present ? "true" : "false")
+           << ",\"backendLibrary\":\"" << JsonEscape(qnnBackend.library.c_str()) << "\""
+           << ",\"stubPresent\":" << (qnnStub.present ? "true" : "false")
+           << ",\"stubLibrary\":\"" << JsonEscape(qnnStub.library.c_str()) << "\""
            << ",\"executionAdapterLinked\":false}"
            << ",\"hiAi\":{\"runtimePresent\":" << (hiAi.present ? "true" : "false")
            << ",\"library\":\"" << JsonEscape(hiAi.library.c_str()) << "\""

@@ -16,6 +16,9 @@
         android:icon="@mipmap/ic_launcher"
         android:hardwareAccelerated="true"
         android:usesCleartextTraffic="false">
+        <uses-native-library
+            android:name="libcdsprpc.so"
+            android:required="false" />
         <activity
             android:name=".MainActivity"
             android:exported="true"

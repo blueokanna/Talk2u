@@ -4,9 +4,11 @@ import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OnnxTensorLike
 import ai.onnxruntime.OnnxValue
 import ai.onnxruntime.OrtEnvironment
-import ai.onnxruntime.OrtException
+import ai.onnxruntime.OrtLoggingLevel
 import ai.onnxruntime.OrtProvider
 import ai.onnxruntime.OrtSession
+import ai.onnxruntime.providers.NNAPIFlags
+import android.os.Build
 import java.io.Closeable
 import java.io.File
 import java.io.RandomAccessFile
@@ -14,6 +16,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.nio.IntBuffer
+import java.util.EnumSet
 import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.min
@@ -23,6 +26,7 @@ import org.json.JSONObject
 class MossOnnxEngine(
     private val modelRoot: File,
     private val cpuThreads: Int = 2,
+    private val requireHardware: Boolean = true,
 ) : Closeable {
     private val env = OrtEnvironment.getEnvironment()
     private val manifestPath = resolveManifestPath(modelRoot)
@@ -35,8 +39,10 @@ class MossOnnxEngine(
     private val ttsDir = ttsMetaPath.parentFile ?: manifestDir
     private val codecDir = codecMetaPath.parentFile ?: manifestDir
     private val closed = AtomicBoolean(false)
-    private var activeProvider = preferredProvider()
-    private var sessionOptions = createSessionOptions(activeProvider)
+    private val sessions = createSessionBundle()
+    private val activeProvider = sessions.provider.label
+
+    @Synchronized
     fun synthesize(
         textTokenChunks: List<IntArray>,
         outputFile: File,
@@ -53,41 +59,33 @@ class MossOnnxEngine(
         val silenceSamples = sampleRate * 120 / 1000
         var totalSamples = 0L
         var totalFrames = 0
-        val generatedChunks = createSession(File(ttsDir, ttsMeta.files.prefill)).use { prefillSession ->
-            createSession(File(ttsDir, ttsMeta.files.decodeStep)).use { decodeSession ->
-                createSession(File(ttsDir, ttsMeta.files.localFixedSampledFrame)).use { localFrameSession ->
-                    textTokenChunks.mapIndexed { index, tokenIds ->
-                        ensureActive(cancelled)
-                        val inputRows = buildInputRows(tokenIds, voice)
-                        val prefillResult = runPrefill(inputRows, prefillSession)
-                        runDecode(
-                            prefillResult = prefillResult,
-                            maxFrames = maxFrames,
-                            seed = seed + index,
-                            cancelled = cancelled,
-                            decodeSession = decodeSession,
-                            localFrameSession = localFrameSession,
-                        )
-                    }
-                }
-            }
+        val generatedChunks = textTokenChunks.mapIndexed { index, tokenIds ->
+            ensureActive(cancelled)
+            val inputRows = buildInputRows(tokenIds, voice)
+            val prefillResult = runPrefill(inputRows, sessions.prefill)
+            runDecode(
+                prefillResult = prefillResult,
+                maxFrames = maxFrames,
+                seed = seed + index,
+                cancelled = cancelled,
+                decodeSession = sessions.decode,
+                localFrameSession = sessions.localFrame,
+            )
         }
         ensureActive(cancelled)
         outputFile.parentFile?.mkdirs()
         RandomAccessFile(outputFile, "rw").use { output ->
             output.setLength(0)
             output.write(ByteArray(44))
-            createSession(File(codecDir, codecMeta.files.decodeFull)).use { codecDecodeSession ->
-                generatedChunks.forEachIndexed { index, audioTokens ->
-                    ensureActive(cancelled)
-                    val samples = decodeAudioTokens(audioTokens, codecDecodeSession)
-                    writePcm16(output, samples)
-                    totalSamples += samples.size
-                    totalFrames += audioTokens.size
-                    if (index < generatedChunks.lastIndex) {
-                        writeSilence(output, silenceSamples)
-                        totalSamples += silenceSamples
-                    }
+            generatedChunks.forEachIndexed { index, audioTokens ->
+                ensureActive(cancelled)
+                val samples = decodeAudioTokens(audioTokens, sessions.codec)
+                writePcm16(output, samples)
+                totalSamples += samples.size
+                totalFrames += audioTokens.size
+                if (index < generatedChunks.lastIndex) {
+                    writeSilence(output, silenceSamples)
+                    totalSamples += silenceSamples
                 }
             }
             ensureActive(cancelled)
@@ -105,62 +103,113 @@ class MossOnnxEngine(
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
-        sessionOptions.close()
+        sessions.close()
     }
 
-    private fun createSession(modelFile: File): OrtSession {
-        require(modelFile.isFile) { "Missing ONNX file: ${modelFile.absolutePath}" }
-        return try {
-            env.createSession(modelFile.absolutePath, sessionOptions)
-        } catch (error: OrtException) {
-            if (activeProvider == "CPU") throw error
-            disableProvider(activeProvider)
-            sessionOptions.close()
-            activeProvider = preferredProvider()
-            sessionOptions = createSessionOptions(activeProvider)
-            createSession(modelFile)
+    private fun createSessionBundle(): SessionBundle {
+        val failures = mutableListOf<String>()
+        val candidates = buildList {
+            val available = OrtEnvironment.getAvailableProviders()
+            if (OrtProvider.QNN in available && qnnRuntimeLoadable()) {
+                add(AccelerationProvider.QNN_HTP)
+            }
+            if (
+                OrtProvider.NNAPI in available &&
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+            ) {
+                add(AccelerationProvider.NNAPI_ACCELERATOR)
+            }
+            if (!requireHardware) add(AccelerationProvider.CPU)
+        }
+        for (provider in candidates) {
+            try {
+                return createSessionBundle(provider)
+            } catch (error: Throwable) {
+                failures += "${provider.label}: ${error.message ?: error.javaClass.simpleName}"
+            }
+        }
+        val suffix = if (failures.isEmpty()) {
+            "no deployable QNN HTP or strict NNAPI execution provider was found"
+        } else {
+            failures.joinToString("; ")
+        }
+        error("MOSS-TTS-Nano hardware acceleration is unavailable: $suffix")
+    }
+
+    private fun createSessionBundle(provider: AccelerationProvider): SessionBundle {
+        val options = createSessionOptions(provider)
+        val created = ArrayList<OrtSession>(4)
+        try {
+            fun open(role: String, file: File): OrtSession {
+                require(file.isFile) { "Missing ONNX file: ${file.absolutePath}" }
+                return try {
+                    env.createSession(file.absolutePath, options).also(created::add)
+                } catch (error: Throwable) {
+                    throw IllegalStateException(
+                        "${provider.label} rejected $role graph ${file.name}: " +
+                            (error.message ?: error.javaClass.simpleName),
+                        error,
+                    )
+                }
+            }
+            return SessionBundle(
+                provider = provider,
+                options = options,
+                prefill = open("prefill", File(ttsDir, ttsMeta.files.prefill)),
+                decode = open("decode-step", File(ttsDir, ttsMeta.files.decodeStep)),
+                localFrame = open(
+                    "local-frame",
+                    File(ttsDir, ttsMeta.files.localFixedSampledFrame),
+                ),
+                codec = open("codec", File(codecDir, codecMeta.files.decodeFull)),
+            )
+        } catch (error: Throwable) {
+            created.asReversed().forEach { runCatching { it.close() } }
+            options.close()
+            throw error
         }
     }
 
-    private fun createSessionOptions(provider: String): OrtSession.SessionOptions {
+    private fun createSessionOptions(provider: AccelerationProvider): OrtSession.SessionOptions {
         val options = OrtSession.SessionOptions().apply {
             setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-            setIntraOpNumThreads(cpuThreads.coerceIn(1, 4))
+            setIntraOpNumThreads(
+                if (provider == AccelerationProvider.CPU) cpuThreads.coerceIn(1, 4) else 1,
+            )
             setInterOpNumThreads(1)
+            setSessionLogLevel(
+                if (BuildConfig.DEBUG) {
+                    OrtLoggingLevel.ORT_LOGGING_LEVEL_INFO
+                } else {
+                    OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING
+                },
+            )
+            if (BuildConfig.DEBUG) setSessionLogVerbosityLevel(1)
         }
-        return try {
+        try {
             when (provider) {
-                "QNN" -> options.addQnn(
-                    mapOf(
-                        "backend_path" to "libQnnHtp.so",
-                        "htp_performance_mode" to "burst",
-                        "htp_graph_finalization_optimization_mode" to "3",
-                    ),
-                )
-                "NNAPI" -> options.addNnapi()
+                AccelerationProvider.QNN_HTP -> {
+                    options.addConfigEntry("session.disable_cpu_ep_fallback", "1")
+                    options.addQnn(
+                        mapOf(
+                            "backend_path" to "libQnnHtp.so",
+                            "enable_htp_fp16_precision" to "1",
+                            "htp_performance_mode" to "sustained_high_performance",
+                            "htp_graph_finalization_optimization_mode" to "3",
+                            "offload_graph_io_quantization" to "0",
+                        ),
+                    )
+                }
+                AccelerationProvider.NNAPI_ACCELERATOR -> {
+                    options.addConfigEntry("session.disable_cpu_ep_fallback", "1")
+                    options.addNnapi(EnumSet.of(NNAPIFlags.CPU_DISABLED))
+                }
+                AccelerationProvider.CPU -> Unit
             }
-            options
-        } catch (_: OrtException) {
-            disableProvider(provider)
+            return options
+        } catch (error: Throwable) {
             options.close()
-            activeProvider = preferredProvider()
-            createSessionOptions(activeProvider)
-        }
-    }
-
-    private fun preferredProvider(): String {
-        val available = OrtEnvironment.getAvailableProviders()
-        return when {
-            OrtProvider.QNN in available && !qnnDisabled.get() -> "QNN"
-            OrtProvider.NNAPI in available && !nnapiDisabled.get() -> "NNAPI"
-            else -> "CPU"
-        }
-    }
-
-    private fun disableProvider(provider: String) {
-        when (provider) {
-            "QNN" -> qnnDisabled.set(true)
-            "NNAPI" -> nnapiDisabled.set(true)
+            throw error
         }
     }
 
@@ -469,9 +518,6 @@ class MossOnnxEngine(
     }
 
     companion object {
-        private val qnnDisabled = AtomicBoolean(false)
-        private val nnapiDisabled = AtomicBoolean(false)
-
         fun probeRuntime(): Boolean {
             OrtEnvironment.getEnvironment()
             return true
@@ -480,11 +526,20 @@ class MossOnnxEngine(
         fun runtimeProviders(): List<String> {
             val available = OrtEnvironment.getAvailableProviders()
             return buildList {
-                if (OrtProvider.QNN in available) add("QNN")
-                if (OrtProvider.NNAPI in available) add("NNAPI")
+                if (OrtProvider.QNN in available && qnnRuntimeLoadable()) add("QNN_HTP")
+                if (OrtProvider.NNAPI in available && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    add("NNAPI_ACCELERATOR")
+                }
                 add("CPU")
             }
         }
+
+        fun runtimeDetails(): Map<String, Any?> = mapOf(
+            "qnn" to QnnRuntime.status.asMap(),
+            "providers" to OrtEnvironment.getAvailableProviders().map { it.name },
+        )
+
+        private fun qnnRuntimeLoadable(): Boolean = QnnRuntime.status.ready
 
         private fun resolveManifestPath(modelRoot: File): File {
             val candidates = listOf(
@@ -563,6 +618,28 @@ class MossOnnxEngine(
         val pastResult: OrtSession.Result,
     )
     private data class LocalFrameResult(val shouldContinue: Boolean, val frame: IntArray)
+
+    private enum class AccelerationProvider(val label: String) {
+        QNN_HTP("QNN_HTP"),
+        NNAPI_ACCELERATOR("NNAPI_ACCELERATOR"),
+        CPU("CPU"),
+    }
+
+    private data class SessionBundle(
+        val provider: AccelerationProvider,
+        val options: OrtSession.SessionOptions,
+        val prefill: OrtSession,
+        val decode: OrtSession,
+        val localFrame: OrtSession,
+        val codec: OrtSession,
+    ) : Closeable {
+        override fun close() {
+            listOf(codec, localFrame, decode, prefill).forEach {
+                runCatching { it.close() }
+            }
+            runCatching { options.close() }
+        }
+    }
 }
 
 data class SynthesisResult(

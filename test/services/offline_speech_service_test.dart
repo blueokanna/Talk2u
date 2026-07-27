@@ -84,6 +84,31 @@ void main() {
       final cues = OfflineSpeechService.inferAnimationCues('挥手挥手，然后继续说明。');
       expect(cues.where((cue) => cue.cue == 'wave'), hasLength(1));
     });
+
+    test('keeps stage directions silent and maps them to spoken offsets', () {
+      final plan = OfflineSpeechService.prepareSpeech('女生：（哈哈大笑）你说的太好了！');
+      final cues = OfflineSpeechService.inferAnimationCues('女生：（哈哈大笑）你说的太好了！');
+
+      expect(plan.spokenText, '你说的太好了！');
+      expect(plan.stageDirections.single.text, '哈哈大笑');
+      expect(cues.first.cue, 'happy');
+      expect(cues.first.start, 0);
+    });
+
+    test('keeps explanatory parentheses in spoken text', () {
+      final plan = OfflineSpeechService.prepareSpeech('NNAPI（神经网络 API）仍然兼容。');
+
+      expect(plan.spokenText, 'NNAPI（神经网络 API）仍然兼容。');
+      expect(plan.stageDirections, isEmpty);
+    });
+
+    test('removes explicit asterisk actions from spoken text', () {
+      final plan = OfflineSpeechService.prepareSpeech('*挥手* 再见，下次见。');
+      final cues = OfflineSpeechService.inferAnimationCues('*挥手* 再见，下次见。');
+
+      expect(plan.spokenText, '再见，下次见。');
+      expect(cues.first.cue, 'wave');
+    });
   });
 
   group('MOSS playback amplitude envelope', () {

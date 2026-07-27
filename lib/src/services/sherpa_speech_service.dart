@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:archive/archive_io.dart';
@@ -56,7 +57,13 @@ class SherpaSpeechService extends ChangeNotifier {
   Timer? _recordingTimeout;
   BytesBuilder? _recordedAudio;
   HttpClientRequest? _downloadRequest;
+  Future<_SenseVoiceWorker>? _asrWorkerFuture;
   bool _cancelRequested = false;
+  bool _speechDetected = false;
+  bool _vadStopping = false;
+  int _voicedMilliseconds = 0;
+  int _silenceMilliseconds = 0;
+  double _noiseFloor = 0.004;
 
   bool initialized = false;
   bool asrReady = false;
@@ -343,6 +350,7 @@ class SherpaSpeechService extends ChangeNotifier {
 
   Future<void> deleteAsr() async {
     if (listening || recognizing) throw StateError('请先停止语音识别');
+    await _closeAsrWorker();
     final directory = await _asrDirectory();
     if (await directory.exists()) await directory.delete(recursive: true);
     asrReady = false;
@@ -355,6 +363,11 @@ class SherpaSpeechService extends ChangeNotifier {
     if (listening || recognizing) return;
     if (!await _recorder.hasPermission()) throw StateError('麦克风权限未授予');
     _recordedAudio = BytesBuilder(copy: false);
+    _speechDetected = false;
+    _vadStopping = false;
+    _voicedMilliseconds = 0;
+    _silenceMilliseconds = 0;
+    _noiseFloor = 0.004;
     final stream = await _recorder.startStream(
       const RecordConfig(
         encoder: AudioEncoder.pcm16bits,
@@ -363,7 +376,10 @@ class SherpaSpeechService extends ChangeNotifier {
       ),
     );
     _recordingSubscription = stream.listen(
-      (chunk) => _recordedAudio?.add(chunk),
+      (chunk) {
+        _recordedAudio?.add(chunk);
+        _updateVoiceActivity(chunk);
+      },
       onError: (Object error) {
         lastError = error.toString();
         listening = false;
@@ -379,6 +395,43 @@ class SherpaSpeechService extends ChangeNotifier {
     notifyListeners();
   }
 
+  void _updateVoiceActivity(Uint8List chunk) {
+    final sampleCount = chunk.length ~/ 2;
+    if (sampleCount == 0 || _vadStopping) return;
+    final data = ByteData.sublistView(chunk, 0, sampleCount * 2);
+    var energy = 0.0;
+    for (var index = 0; index < sampleCount; index++) {
+      final sample = data.getInt16(index * 2, Endian.little) / 32768.0;
+      energy += sample * sample;
+    }
+    final rms = math.sqrt(energy / sampleCount);
+    final duration = (sampleCount * 1000 / 16000)
+        .round()
+        .clamp(1, 1000)
+        .toInt();
+    final threshold = math.max(0.012, _noiseFloor * 3.2);
+    if (!_speechDetected && rms < threshold) {
+      _noiseFloor = (_noiseFloor * 0.96 + rms * 0.04)
+          .clamp(0.001, 0.02)
+          .toDouble();
+    }
+    if (rms >= threshold) {
+      _voicedMilliseconds += duration;
+      _silenceMilliseconds = 0;
+      if (_voicedMilliseconds >= 120) _speechDetected = true;
+      return;
+    }
+    if (!_speechDetected) {
+      _voicedMilliseconds = 0;
+      return;
+    }
+    _silenceMilliseconds += duration;
+    if (_silenceMilliseconds >= 850) {
+      _vadStopping = true;
+      unawaited(stopListening());
+    }
+  }
+
   Future<String?> stopListening() async {
     if (!listening) return null;
     _recordingTimeout?.cancel();
@@ -387,6 +440,7 @@ class SherpaSpeechService extends ChangeNotifier {
     await _recordingSubscription?.cancel();
     _recordingSubscription = null;
     listening = false;
+    _vadStopping = false;
     final bytes = _recordedAudio?.takeBytes() ?? Uint8List(0);
     _recordedAudio = null;
     if (bytes.isEmpty) {
@@ -396,14 +450,13 @@ class SherpaSpeechService extends ChangeNotifier {
     recognizing = true;
     notifyListeners();
     try {
-      final directory = await _asrDirectory();
-      final text = await Isolate.run(
-        () => _recognizeSenseVoice(
-          bytes,
-          '${directory.path}${Platform.pathSeparator}model.int8.onnx',
-          '${directory.path}${Platform.pathSeparator}tokens.txt',
-        ),
-      );
+      late final String text;
+      try {
+        text = await (await _asrWorker()).recognize(bytes);
+      } catch (_) {
+        await _closeAsrWorker();
+        rethrow;
+      }
       if (text.isNotEmpty) _recognitionController.add(text);
       return text;
     } catch (error) {
@@ -415,10 +468,37 @@ class SherpaSpeechService extends ChangeNotifier {
     }
   }
 
+  Future<_SenseVoiceWorker> _asrWorker() async {
+    final existing = _asrWorkerFuture;
+    if (existing != null) return existing;
+    final directory = await _asrDirectory();
+    final future = _SenseVoiceWorker.start(
+      '${directory.path}${Platform.pathSeparator}model.int8.onnx',
+      '${directory.path}${Platform.pathSeparator}tokens.txt',
+    );
+    _asrWorkerFuture = future;
+    try {
+      return await future;
+    } catch (_) {
+      if (identical(_asrWorkerFuture, future)) _asrWorkerFuture = null;
+      rethrow;
+    }
+  }
+
+  Future<void> _closeAsrWorker() async {
+    final future = _asrWorkerFuture;
+    _asrWorkerFuture = null;
+    if (future == null) return;
+    try {
+      await (await future).close();
+    } catch (_) {}
+  }
+
   @override
   void dispose() {
     _recordingTimeout?.cancel();
     _recordingSubscription?.cancel();
+    unawaited(_closeAsrWorker());
     _recognitionController.close();
     _recorder.dispose();
     super.dispose();
@@ -429,13 +509,75 @@ class _SpeechDownloadCancelled implements Exception {
   const _SpeechDownloadCancelled();
 }
 
-String _recognizeSenseVoice(Uint8List pcm, String model, String tokens) {
-  sherpa.initBindings();
-  final samples = Float32List(pcm.length ~/ 2);
-  final data = ByteData.sublistView(pcm);
-  for (var index = 0; index < samples.length; index++) {
-    samples[index] = data.getInt16(index * 2, Endian.little) / 32768.0;
+class _SenseVoiceWorker {
+  final Isolate _isolate;
+  final SendPort _commands;
+  bool _closed = false;
+
+  _SenseVoiceWorker(this._isolate, this._commands);
+
+  static Future<_SenseVoiceWorker> start(String model, String tokens) async {
+    final ready = ReceivePort();
+    final errors = ReceivePort();
+    final isolate = await Isolate.spawn<List<Object>>(
+      _senseVoiceWorkerMain,
+      <Object>[ready.sendPort, model, tokens],
+      errorsAreFatal: true,
+      onError: errors.sendPort,
+      debugName: 'talk2u-sensevoice',
+    );
+    try {
+      final value = await Future.any<dynamic>([ready.first, errors.first]);
+      if (value is SendPort) return _SenseVoiceWorker(isolate, value);
+      throw StateError('SenseVoice 识别器初始化失败: $value');
+    } catch (_) {
+      isolate.kill(priority: Isolate.immediate);
+      rethrow;
+    } finally {
+      ready.close();
+      errors.close();
+    }
   }
+
+  Future<String> recognize(Uint8List pcm) async {
+    if (_closed) throw StateError('SenseVoice 识别器已关闭');
+    final response = ReceivePort();
+    _commands.send(<Object>[
+      'recognize',
+      TransferableTypedData.fromList(<Uint8List>[pcm]),
+      response.sendPort,
+    ]);
+    try {
+      final value = await response.first.timeout(const Duration(seconds: 90));
+      if (value is List && value.length == 2 && value.first == 'ok') {
+        return value[1] as String;
+      }
+      final message = value is List && value.length > 1 ? value[1] : value;
+      throw StateError('SenseVoice 识别失败: $message');
+    } finally {
+      response.close();
+    }
+  }
+
+  Future<void> close() async {
+    if (_closed) return;
+    _closed = true;
+    final response = ReceivePort();
+    _commands.send(<Object>['close', response.sendPort]);
+    try {
+      await response.first.timeout(const Duration(seconds: 3));
+    } finally {
+      response.close();
+      _isolate.kill(priority: Isolate.immediate);
+    }
+  }
+}
+
+void _senseVoiceWorkerMain(List<Object> arguments) {
+  final ready = arguments[0] as SendPort;
+  final model = arguments[1] as String;
+  final tokens = arguments[2] as String;
+  sherpa.initBindings();
   final recognizer = sherpa.OfflineRecognizer(
     sherpa.OfflineRecognizerConfig(
       model: sherpa.OfflineModelConfig(
@@ -450,6 +592,38 @@ String _recognizeSenseVoice(Uint8List pcm, String model, String tokens) {
       ),
     ),
   );
+  final commands = ReceivePort();
+  ready.send(commands.sendPort);
+  commands.listen((dynamic message) {
+    if (message is! List || message.isEmpty) return;
+    if (message.first == 'close') {
+      recognizer.free();
+      (message[1] as SendPort).send(true);
+      commands.close();
+      return;
+    }
+    if (message.first != 'recognize' || message.length != 3) return;
+    final response = message[2] as SendPort;
+    try {
+      final pcm = (message[1] as TransferableTypedData)
+          .materialize()
+          .asUint8List();
+      response.send(<Object>['ok', _recognizeSenseVoice(pcm, recognizer)]);
+    } catch (error) {
+      response.send(<Object>['error', error.toString()]);
+    }
+  });
+}
+
+String _recognizeSenseVoice(
+  Uint8List pcm,
+  sherpa.OfflineRecognizer recognizer,
+) {
+  final samples = Float32List(pcm.length ~/ 2);
+  final data = ByteData.sublistView(pcm);
+  for (var index = 0; index < samples.length; index++) {
+    samples[index] = data.getInt16(index * 2, Endian.little) / 32768.0;
+  }
   final stream = recognizer.createStream();
   try {
     stream.acceptWaveform(samples: samples, sampleRate: 16000);
@@ -461,6 +635,5 @@ String _recognizeSenseVoice(Uint8List pcm, String model, String tokens) {
         .trim();
   } finally {
     stream.free();
-    recognizer.free();
   }
 }

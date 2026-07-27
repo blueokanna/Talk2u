@@ -387,6 +387,19 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
     return value?.toString() ?? '无';
   }
 
+  String _nnapiDeviceNames(dynamic value) {
+    if (value is! List) return '未知';
+    final names = value
+        .whereType<Map>()
+        .where((device) => device['hardware'] == true)
+        .map(
+          (device) =>
+              '${device['name'] ?? 'unknown'} · FL ${device['featureLevel'] ?? '?'}',
+        )
+        .toList(growable: false);
+    return names.isEmpty ? '未枚举到非 CPU 加速设备' : names.join(', ');
+  }
+
   Future<void> _showDiagnostics() async {
     if (_diagnosticsLoading ||
         (_channel == null &&
@@ -417,6 +430,7 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
       final nativeProbe = platform?['nativeProbe'] as Map?;
       final vulkanProbe = nativeProbe?['vulkan'] as Map?;
       final openGlProbe = nativeProbe?['openGlEs'] as Map?;
+      final nnapiProbe = nativeProbe?['nnapi'] as Map?;
       await showDialog<void>(
         context: context,
         builder: (context) => AlertDialog(
@@ -464,6 +478,12 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
                   value: openGlProbe?['ready'] == true
                       ? '通过 ES ${openGlProbe?['major'] ?? '?'} ${openGlProbe?['renderer'] ?? ''}'
                       : '未通过 (EGL ${openGlProbe?['eglError'] ?? 'unknown'})',
+                ),
+                _DiagnosticRow(
+                  label: 'NNAPI 设备',
+                  value: nnapiProbe?['hardwareDevice'] == true
+                      ? _nnapiDeviceNames(nnapiProbe?['devices'])
+                      : '未枚举到非 CPU 加速设备',
                 ),
                 _DiagnosticRow(
                   label: 'GPU',

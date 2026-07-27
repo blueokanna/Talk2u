@@ -42,13 +42,13 @@ internal object GpuBackendProbe {
     private val cachedResult: JSONObject by lazy {
         if (!loaded) {
             JSONObject()
-                .put("schemaVersion", 1)
+                .put("schemaVersion", 2)
                 .put("preferredNativeBackend", "none")
                 .put("error", loadError ?: "GPU probe library is unavailable")
         } else {
             runCatching { JSONObject(nativeProbe()) }.getOrElse { error ->
                 JSONObject()
-                    .put("schemaVersion", 1)
+                    .put("schemaVersion", 2)
                     .put("preferredNativeBackend", "none")
                     .put("error", error.message ?: "GPU probe failed")
             }

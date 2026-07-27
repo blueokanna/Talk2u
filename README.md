@@ -1,6 +1,6 @@
 # Talk2U
 
-Talk2U 是一个 Flutter + Rust 的本地角色聊天应用。聊天记录、角色设定、记忆和知识数据保存在本机；模型回复可以来自用户选择的联网 LLM，也可以在 Android/iOS 上由端侧 Qwen 模型生成。Android、Windows 和 Linux 默认显示 Live2D 对话界面，对话文字按需展开，文字输入始终可用；端侧语音在 Android 系统能力不可用时回退到 sherpa-onnx。
+Talk2U 是一个 Flutter + Rust 的本地角色聊天应用。聊天记录、角色设定、记忆和知识数据保存在本机；模型回复可以来自用户选择的联网 LLM，也可以在 Android/iOS 上由端侧 Qwen 模型生成。Android、Windows 和 Linux 默认显示 Live2D 对话界面，对话文字按需展开，文字输入始终可用。Android 支持系统端侧语音、SenseVoice STT 与严格硬件执行的 MOSS-TTS；Windows/Linux 当前支持 SenseVoice STT，但尚未完成端侧 TTS。
 
 本文档既是安装说明，也是当前实现边界。请先阅读“能力状态”，再按“Windows 到 Android 真机的最短路径”操作。
 
@@ -18,14 +18,17 @@ Talk2U 是一个 Flutter + Rust 的本地角色聊天应用。聊天记录、角
 | 跨平台继续同一对话 | 已实现 | conversation 与供应商解耦，切换供应商不创建新会话 |
 | 本地记忆/知识检索 | 已实现 | Rust 本地文件存储、短期上下文、长期摘要、知识事实检索 |
 | Android/iOS 端侧 LLM | 已实现，有平台边界 | `fcllama`/llama.cpp 运行 Qwen2.5 3B Q4_K_M；Android 使用 ARM64 CPU/NEON，iOS 使用 Metal GPU；模型按需下载并校验 SHA-256 |
-| 跨平台离线语音 | 已实现 | Android/Windows/Linux 使用 sherpa-onnx SenseVoice STT 与 Matcha TTS；模型按需下载 |
+| 跨平台离线 STT | 已实现 | Android/Windows/Linux 使用 sherpa-onnx SenseVoice；长期 isolate 复用识别器，模型按需下载 |
+| 持续语音通话 | Android 有条件实现 | 最终识别结果自动发送、回复自动朗读并恢复监听；需要同一设备上同时存在可用的端侧 STT 与 TTS |
 | Android/Windows/Linux Live2D | 有条件实现 | Android WebView、Windows WebView2、Linux CEF + Pixi；运行时必须取得 Cubism Core 5 |
 | Cubism 5 moc3 | 已实现 | 导入时读取 `MOC3` 头并接受 moc3 版本 1-5；运行时拒绝 Core 4 |
 | `.cdi3.json` | 已实现 | 校验 Version 3，并用于发现 LipSync 参数 |
-| LipSync | 已实现 | Android TTS `onAudioAvailable` 的 PCM RMS 驱动模型嘴部参数 |
-| 肢体动作/表情 | 已实现，取决于模型 | 只播放 `talk2u.avatar.json` 明确映射或名称可验证的动作组 |
-| Android 离线 TTS | 已实现 | 优先选择系统离线 voice，不可用时回退到已下载的 sherpa Matcha |
+| LipSync | 已实现 | Android 系统 TTS PCM 或 MOSS WAV 振幅包络驱动模型嘴部参数 |
+| 肢体动作/表情 | 已实现，取决于模型 | 语境与舞台指示生成 cue，只播放 `talk2u.avatar.json` 明确映射或名称可验证的动作组 |
+| 舞台指示静音 | 已实现 | `（哈哈大笑）`、`*挥手*` 等动作不送入 TTS，但会影响 Live2D cue 与系统 TTS 语气；解释性括号保留朗读 |
+| Android 离线 TTS | 有条件实现 | 系统离线 voice，或严格 QNN HTP/NNAPI 加速的 MOSS-TTS；MOSS 禁止 CPU execution provider 回退 |
 | Android 离线 STT | 已实现 | 优先使用 Android on-device recognizer，不可用时回退到已下载的 sherpa SenseVoice |
+| Android NNAPI 设备诊断 | 已实现 | 枚举设备名、版本、类型和 feature level；CPU 类型不会计为加速设备 |
 | 原生 Vulkan/OpenGL ES 预检 | 已实现 | NDK C++ 真实创建 Vulkan instance/device；失败时真实创建 EGL OpenGL ES 3/2 context |
 | Live2D Web 图形兼容 | 已实现 | 硬件 WebGL2 创建失败时降级 WebGL1；context lost 后恢复、重载或重建 PlatformView |
 | Live2D 实际 Vulkan/OpenGL 后端 | 可验证、不可由 WebView 强制 | 实际 Vulkan 或 OpenGL ES 后端由系统 WebView/ANGLE 决定，应用只接受真实 GPU renderer 结果 |
@@ -44,8 +47,9 @@ Flutter UI
   ├─ 默认全屏 Live2D；对话记录按需展开；文字输入常驻
   ├─ AndroidView -> Live2D WebView；Windows -> WebView2；Linux -> CEF
   ├─ Android/iOS fcllama -> Qwen2.5 3B 端侧回复
-  ├─ sherpa-onnx -> 跨平台离线 STT/TTS
-  └─ MethodChannel/EventChannel -> Android 系统 TTS/STT 与 PCM 振幅
+  ├─ sherpa-onnx -> Android/Windows/Linux 离线 STT
+  ├─ MOSS-TTS ONNX -> Android 严格 QNN HTP/NNAPI TTS
+  └─ MethodChannel/EventChannel -> Android 系统 TTS/STT、硬件诊断与 PCM 振幅
              |
 flutter_rust_bridge
              |
@@ -233,6 +237,8 @@ Windows 使用系统 WebView2 Runtime；Linux 的 CEF 运行库会随构建 bund
 
 > 默认的智谱调用使用 [rustglm 1.0.0](https://crates.io/crates/rustglm/1.0.0) 的 Rust SDK 仓库
 
+智谱请求会转换为 RustGLM 的 `GlmChatCompletionRequest`，并使用 SDK 的流接口、HTTP 配置与重试策略。`SdkError` 会按 HTTP、Transport、Timeout、Configuration、Validation、Stream、Decode、Unsupported、Agent 和 Tool 分类映射；Decode 不向界面暴露原始响应体，Unsupported/Agent/Tool 作为不可重试的校验错误处理，不会误触发流重试。
+
 第三方平台会更新模型名。遇到“model not found”时，以对应平台控制台当前显示的模型 ID 为准，直接在设置中覆盖默认值，不需要改代码。
 
 ### API Key 获取入口
@@ -299,8 +305,7 @@ http://192.168.1.20:11434/v1/chat/completions
 | --- | --- | --- | ---: | --- |
 | 离线对话 | Android ARM64 / iOS | Qwen2.5 3B Instruct Q4_K_M | 2,104,932,768 B | `626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d` |
 | 离线 STT | Android/Windows/Linux | SenseVoice 2025 INT8 | 165,783,878 B | `7305f7905bfcf77fa0b39388a313f3da35c68d971661a65475b56fb2162c8e63` |
-| 离线 TTS | Android/Windows/Linux | Matcha 中英双语 | 79,033,838 B | `271b804af570400d3bcdcb53bf6e53cc9f75180ee763b9f13eb5eaf2b0d086ef` |
-| TTS 声码器 | Android/Windows/Linux | Vocos 16 kHz universal | 53,882,848 B | `b599142a1fb8ff03de3e84ac35ff537c619e56f4267a6fe894851a42844acf9e` |
+| 离线 TTS | Android | MOSS-TTS-Nano 100M ONNX + Audio Tokenizer | 717,414,286 B | 每个文件使用代码内固定 SHA-256 校验 |
 
 `fcllama` 和 llama.cpp 使用 MIT 许可，当前 Qwen2.5 3B 权重使用 Qwen Research License；`sherpa-onnx` 使用 Apache-2.0。引擎许可证不自动覆盖模型权重，准备公开再分发安装包或模型镜像前，仍须逐项复核相应模型发布页的权重许可与署名要求。当前实现让设备直接从 Qwen 或 k2-fsa 的官方发布地址下载，不在仓库中重新分发权重。
 
@@ -316,7 +321,38 @@ http://192.168.1.20:11434/v1/chat/completions
 
 Android/iOS 下载并校验 3B 模型后，不填写任何联网 API Key 也可以对话。应用会在发送第一条消息时自动切换到端侧平台并懒加载模型，避免在启动阶段同步加载约 2.1 GB 权重而卡住。当前 `fcllama 0.0.3` 没有 QNN、HiAI、NeuroPilot、DirectML 或通用桌面后端，因此应用不会把 CPU/NEON 伪装成 NPU/GPU 加速。
 
-Android 会优先使用系统自身可验证的 on-device STT 和离线 TTS voice，保留厂商端侧优化与更低延迟；系统能力缺失或 ROM 不支持时，下载 SenseVoice/Matcha 后自动使用 sherpa-onnx。Windows/Linux 直接使用 sherpa-onnx。所有平台即使未安装语音模型也始终可以文字输入。
+Android 会优先使用系统自身可验证的 on-device STT 和离线 TTS voice；系统 STT 缺失时可使用 SenseVoice。MOSS-TTS 只在四个 ONNX 子图全部创建严格硬件 session 后运行，失败时可回到真实的 Android 系统离线 TTS，但不会以 ONNX CPU execution provider 冒充 NPU。Windows/Linux 当前只有 SenseVoice STT，没有端侧 TTS，因此持续通话按钮在这两个平台不能满足启动条件。所有平台即使未安装语音模型也始终可以文字输入。
+
+### Android MOSS-TTS 硬件执行
+
+默认 `onnxruntime-android 1.27.0` 原生库已经通过符号检查：它包含 NNAPI execution provider，不包含 QNN execution provider。因此默认 APK 的 MOSS-TTS 只能尝试严格 NNAPI；仅仅在 Java API 中看到 `addQnn` 不能证明 QNN 可用。
+
+MOSS-TTS 会长期复用 prefill、decode-step、local-frame 和 codec 四个 session。NNAPI 路径要求 Android 10 或更高版本，同时启用 `NNAPIFlags.CPU_DISABLED` 和 `session.disable_cpu_ep_fallback=1`。任一子图不能完整分配给非 CPU NNAPI 设备时，整组 session 创建失败，不会部分落回 CPU。设备诊断中 NNAPI 类型 `1` 是 CPU，只有 `0`（OTHER）、`2`（GPU）和 `3`（ACCELERATOR）计为非 CPU 设备。
+
+Qualcomm HTP 需要用户从 Qualcomm 合法取得兼容目标 SoC 的 QNN SDK，以及编入 QNN EP 的 ONNX Runtime Android AAR。仓库不包含、下载或伪造这些许可二进制。准备好工件后可通过环境变量或同名 Gradle 属性接入：
+
+```powershell
+$env:TALK2U_QNN_ORT_AAR='D:\vendor\onnxruntime-qnn\onnxruntime-android-qnn.aar'
+$env:TALK2U_QNN_JNI_DIR='D:\vendor\qnn\jniLibs'
+flutter build apk --debug --target-platform android-arm64
+```
+
+`TALK2U_QNN_JNI_DIR` 的预期结构是：
+
+```text
+jniLibs/
+  arm64-v8a/
+    libQnnHtp.so
+    libQnnSystem.so
+    libQnnHtpV<目标版本>Stub.so
+    该 QNN SDK 和目标 SoC 要求的其他运行库
+```
+
+Gradle 会在配置阶段拒绝缺少 HTP backend、system 或版本化 stub 的目录。运行时还必须同时满足：ORT 报告 `QNN` provider、`libQnnHtp.so` 能真实加载、四个模型全部成功创建禁止 CPU 回退的 session。成功合成后界面才显示 `QNN_HTP`，仅发现库或 provider 时只显示“候选，尚未执行验证”。QNN HTP 使用 `sustained_high_performance`，适合长时间对话而不是短时 burst。
+
+华为 Mate 10 Pro 当前不接入许可受限的 HiAI DDK 二进制，使用严格 NNAPI 路径。只有设备运行 Android 10+、ROM 提供非 CPU NNAPI 驱动并且四个 MOSS 子图全部被该驱动接受时才能运行；否则明确失败。仓库没有在一加 15 或 Mate 10 Pro 上完成实机验收，不能把可构建路径写成真机已通过。
+
+端侧 Qwen LLM 是另一条推理链路，当前 Android 仍使用 llama.cpp CPU/NEON，不会因为 MOSS-TTS 使用 NPU 就被标成 NPU LLM。Windows/Linux 尚未接入 DirectML、CUDA、ROCm、Vulkan 或桌面 ONNX TTS execution provider。
 
 ## Live2D Cubism 5 模型与 Core
 
@@ -689,6 +725,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 - [ ] “实际后端”是 `vulkan-via-angle` 或 `opengl-es-via-webgl`；`unspecified` 不能作为后端验收通过。
 - [ ] “GPU”不是 SwiftShader、llvmpipe 或 software renderer。
 - [ ] 朗读时有声音，嘴部随实际声音变化，停止后闭合。
+- [ ] `女生：（哈哈大笑）你说的太好了！` 只朗读“你说的太好了！”，同时触发 happy cue。
+- [ ] 持续通话能完成“监听 -> 最终识别 -> 生成 -> 朗读 -> 恢复监听”至少 20 轮，结束后麦克风和播报均停止。
+- [ ] MOSS 实际合成后显示 `QNN_HTP` 或 `NNAPI_ACCELERATOR`；“候选”不能作为硬件验收通过。
+- [ ] NNAPI 诊断不把类型为 CPU 的设备列为非 CPU 加速设备。
 - [ ] 明确配置的 motion/expression 能被触发。
 - [ ] 开启飞行模式后，已安装的 TTS 仍能朗读。
 - [ ] 开启飞行模式后，系统声明可用的 on-device STT 仍能识别。
@@ -788,7 +828,9 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 - 不能宣称没有 API Key 时已经验证第三方真实联网回复。
 - 不能宣称大型 `Custom_Suiika` 一定能在任意 Android 设备加载。
 - 不能宣称 Windows WebView2 或 Linux CEF Web 宿主等同于 Live2D 原生宿主；iOS/macOS 当前没有 Live2D 宿主。
-- 不能宣称 Android 已使用高通 QNN、华为 HiAI、联发科 NeuroPilot NPU，或 Windows/Linux 已支持端侧 LLM 硬件加速。
+- 不能仅凭库存在、provider 枚举或 NNAPI 设备枚举宣称 MOSS 已使用 NPU；必须有严格 session 的实际合成结果 `QNN_HTP` 或 `NNAPI_ACCELERATOR`。
+- 不能宣称仓库默认 ONNX Runtime AAR 已包含 QNN EP，不能宣称已直接接入华为 HiAI DDK，也不能宣称一加 15 或 Mate 10 Pro 已实机通过。
+- 不能宣称 Windows/Linux 已完成端侧 TTS、持续离线通话或端侧 LLM 硬件加速。
 - 不能宣称当前文件存储支持多进程或多设备并发写入。
 
 这些限制会以错误、禁用状态或导入拒绝明确呈现，而不是通过占位动画、云端回退或静态图伪造成功。

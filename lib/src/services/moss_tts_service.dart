@@ -285,7 +285,7 @@ class MossTtsService extends ChangeNotifier {
   String operationLabel = '';
   String? lastError;
   List<String> runtimeProviders = const ['CPU'];
-  String activeProvider = 'CPU';
+  String activeProvider = 'UNVERIFIED';
   bool _providerMeasured = false;
 
   bool get supported => !kIsWeb && Platform.isAndroid;
@@ -294,15 +294,18 @@ class MossTtsService extends ChangeNotifier {
       : (downloadedBytes / totalDownloadBytes).clamp(0, 1);
   String get voiceId => _voiceId;
   String get accelerationLabel {
-    if (activeProvider == 'QNN') return 'Qualcomm QNN HTP NPU';
-    if (activeProvider == 'NNAPI') return 'NNAPI GPU/NPU';
-    if (_providerMeasured && runtimeProviders.contains('NNAPI')) {
-      return 'NNAPI 可用 · 本次 CPU/NEON 回退';
+    if (activeProvider == 'QNN_HTP') return 'Qualcomm QNN HTP · 禁止 CPU 回退';
+    if (activeProvider == 'NNAPI_ACCELERATOR') {
+      return 'NNAPI 加速设备 · 禁止 CPU 回退';
     }
-    if (runtimeProviders.contains('NNAPI')) {
-      return 'NNAPI GPU/NPU 优先 · CPU/NEON 回退';
+    if (_providerMeasured && activeProvider == 'CPU') {
+      return 'CPU/NEON · 非硬件加速会话';
     }
-    return 'ARM64 CPU/NEON';
+    if (runtimeProviders.contains('QNN_HTP')) return 'QNN HTP 候选 · 尚未执行验证';
+    if (runtimeProviders.contains('NNAPI_ACCELERATOR')) {
+      return 'NNAPI 加速候选 · 尚未执行验证';
+    }
+    return '未发现严格硬件执行后端';
   }
 
   MossVoice get selectedVoice => voices.firstWhere(

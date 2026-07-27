@@ -3,6 +3,14 @@ allprojects {
         google()
         mavenCentral()
     }
+    configurations.configureEach {
+        resolutionStrategy.eachDependency {
+            if (requested.group == "androidx.test" && requested.name == "runner") {
+                useVersion("1.3.0")
+                because("Flutter integration_test declares a dynamic runner version")
+            }
+        }
+    }
 }
 
 val newBuildDir: Directory =
