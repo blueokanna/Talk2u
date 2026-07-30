@@ -15,7 +15,22 @@ if not exist ".dart_tool" (
 )
 
 SET BUILD_TOOL_PKG_DIR=%BASEDIR%build_tool
-SET DART=%FLUTTER_ROOT%\bin\cache\dart-sdk\bin\dart
+if defined FLUTTER_ROOT (
+    SET "DART=%FLUTTER_ROOT%\bin\cache\dart-sdk\bin\dart.exe"
+) else (
+    for /F "delims=" %%P in ('where.exe flutter.bat 2^>nul') do (
+        if not defined FLUTTER_ROOT for %%R in ("%%~dpP..") do SET "FLUTTER_ROOT=%%~fR"
+    )
+    if defined FLUTTER_ROOT SET "DART=!FLUTTER_ROOT!\bin\cache\dart-sdk\bin\dart.exe"
+)
+if not defined DART (
+    echo CargoKit could not locate Dart. Set FLUTTER_ROOT or add Dart to PATH. 1>&2
+    exit /b 1
+)
+if not exist "%DART%" (
+    echo CargoKit Dart executable does not exist: "%DART%" 1>&2
+    exit /b 1
+)
 
 set BUILD_TOOL_PKG_DIR_POSIX=%BUILD_TOOL_PKG_DIR:\=/%
 

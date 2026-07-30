@@ -132,7 +132,13 @@ class CargoKitPlugin implements Plugin<Project> {
             def jniLibs = project.android.sourceSets.maybeCreate(buildType).jniLibs;
             jniLibs.srcDir(new File(cargoOutputDir))
 
-            def platforms = com.flutter.gradle.FlutterPluginUtils.getTargetPlatforms(project).collect()
+            def platforms = com.flutter.gradle.FlutterPluginUtils
+                .getTargetPlatforms(project)
+                .findAll { it == "android-arm64" }
+                .collect()
+            if (platforms.isEmpty()) {
+                throw new GradleException("Talk2U requires the android-arm64 Flutter target")
+            }
 
             // Respect Flutter's requested target list. Unconditionally adding
             // emulator ABIs here can create an APK with a Rust library but no

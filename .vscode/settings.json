@@ -1,3 +1,4 @@
 {
-    "cmake.sourceDirectory": "D:/RustProject/talk2u/linux"
+    "cmake.sourceDirectory": "D:/RustProject/talk2u/linux",
+    "java.configuration.updateBuildConfiguration": "automatic"
 }

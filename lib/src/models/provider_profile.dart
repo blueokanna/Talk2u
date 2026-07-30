@@ -40,10 +40,10 @@ class ProviderProfile {
   static const androidOffline = ProviderProfile(
     id: androidOfflineId,
     name: '设备离线 AI',
-    apiUrl: 'device://genie',
+    apiUrl: 'device://geniex-qairt-npu',
     chatModel: 'Qwen3-4B-Instruct-2507',
     protocol: 'local',
-    maxOutputTokens: 768,
+    maxOutputTokens: 256,
   );
 
   static List<ProviderProfile> withRuntimeDefaults(

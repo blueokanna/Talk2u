@@ -1,5 +1,6 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'package:talk2u/l10n/generated/app_localizations.dart';
 import 'package:talk2u/src/models/provider_profile.dart';
 import 'package:talk2u/src/rust/api/chat_api.dart' as rust_api;
 import 'package:talk2u/src/rust/api/data_models.dart';
@@ -7,6 +8,7 @@ import 'package:talk2u/src/services/offline_llm_service.dart';
 import 'package:talk2u/src/services/offline_speech_service.dart';
 import 'package:talk2u/src/services/moss_tts_service.dart';
 import 'package:talk2u/src/services/sherpa_speech_service.dart';
+import 'package:talk2u/src/settings/ui_preferences.dart';
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
@@ -75,7 +77,10 @@ class _SettingsPageState extends State<SettingsPage> {
     } catch (error) {
       if (!mounted) return;
       setState(() => _loading = false);
-      _showMessage('加载设置失败: $error', isError: true);
+      _showMessage(
+        AppLocalizations.of(context).loadSettingsFailed('$error'),
+        isError: true,
+      );
     }
   }
 
@@ -115,6 +120,7 @@ class _SettingsPageState extends State<SettingsPage> {
     if (!_formKey.currentState!.validate()) return;
     _commitEditors();
     final provider = _selected;
+    final strings = AppLocalizations.of(context);
     setState(() => _saving = true);
     try {
       final zhipuProviders = _providers.where((item) => item.id == 'zhipu');
@@ -128,10 +134,16 @@ class _SettingsPageState extends State<SettingsPage> {
         providersJson: ProviderProfile.encodeList(_providers),
       );
       final saved = await rust_api.saveSettings(settings: settings);
-      if (!saved) throw StateError('设置文件写入失败');
-      if (mounted) _showMessage('${provider.name} 配置已保存');
+      if (!saved) {
+        throw StateError(strings.settingsWriteFailed);
+      }
+      if (mounted) {
+        _showMessage(strings.providerSaved(provider.name));
+      }
     } catch (error) {
-      if (mounted) _showMessage('保存失败: $error', isError: true);
+      if (mounted) {
+        _showMessage(strings.saveFailed('$error'), isError: true);
+      }
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -155,7 +167,12 @@ class _SettingsPageState extends State<SettingsPage> {
       );
       if (mounted) _showMessage(result);
     } catch (error) {
-      if (mounted) _showMessage('连接测试失败: $error', isError: true);
+      if (mounted) {
+        _showMessage(
+          AppLocalizations.of(context).connectionTestFailed('$error'),
+          isError: true,
+        );
+      }
     } finally {
       if (mounted) setState(() => _testingConnection = false);
     }
@@ -170,29 +187,12 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  Future<void> _openSpeechSetup(Future<void> Function() action) async {
-    try {
-      await action();
-    } catch (error) {
-      if (mounted) _showMessage('无法打开系统语音设置: $error', isError: true);
-    }
-  }
-
-  Future<void> _downloadSpeechModel() async {
-    try {
-      await OfflineSpeechService.instance.downloadOfflineSttModel();
-      if (mounted) _showMessage('已提交中文端侧识别模型下载');
-    } catch (error) {
-      if (mounted) _showMessage('无法下载端侧识别模型: $error', isError: true);
-    }
-  }
-
   Future<void> _downloadOfflineModel() async {
     try {
       await OfflineLlmService.instance.downloadModel();
       if (!mounted) return;
       if (!OfflineLlmService.instance.modelReady) return;
-      _showMessage('Qwen3 Genie 部署包已安装并校验完成');
+      _showMessage(AppLocalizations.of(context).qwenInstalled);
       if (!_providers.any(
         (provider) => !provider.isLocal && provider.isConfigured,
       )) {
@@ -203,16 +203,28 @@ class _SettingsPageState extends State<SettingsPage> {
         await _save();
       }
     } catch (error) {
-      if (mounted) _showMessage('Qwen3 部署包安装失败: $error', isError: true);
+      if (mounted) {
+        _showMessage(
+          AppLocalizations.of(context).qwenInstallFailed('$error'),
+          isError: true,
+        );
+      }
     }
   }
 
   Future<void> _deleteOfflineModel() async {
     try {
       await OfflineLlmService.instance.deleteModel();
-      if (mounted) _showMessage('已删除端侧 AI 模型');
+      if (mounted) {
+        _showMessage(AppLocalizations.of(context).offlineModelDeleted);
+      }
     } catch (error) {
-      if (mounted) _showMessage('无法删除端侧 AI 模型: $error', isError: true);
+      if (mounted) {
+        _showMessage(
+          AppLocalizations.of(context).offlineModelDeleteFailed('$error'),
+          isError: true,
+        );
+      }
     }
   }
 
@@ -220,19 +232,31 @@ class _SettingsPageState extends State<SettingsPage> {
     try {
       await SherpaSpeechService.instance.downloadAsr();
       await OfflineSpeechService.instance.initialize();
-      if (mounted) _showMessage('SenseVoice 离线识别模型已安装');
+      if (mounted) {
+        _showMessage(AppLocalizations.of(context).senseVoiceInstalled);
+      }
     } catch (error) {
-      if (mounted) _showMessage('SenseVoice 下载失败: $error', isError: true);
+      if (mounted) {
+        _showMessage(
+          AppLocalizations.of(context).senseVoiceInstallFailed('$error'),
+          isError: true,
+        );
+      }
     }
   }
 
   Future<void> _downloadMossTts() async {
     try {
-      await MossTtsService.instance.downloadModel();
+      await MossTtsService.instance.importModel();
       await OfflineSpeechService.instance.initialize();
-      if (mounted) _showMessage('MOSS-TTS-Nano 端侧模型已安装');
+      if (mounted) _showMessage(AppLocalizations.of(context).mossImported);
     } catch (error) {
-      if (mounted) _showMessage('MOSS-TTS-Nano 下载失败: $error', isError: true);
+      if (mounted) {
+        _showMessage(
+          AppLocalizations.of(context).mossImportFailed('$error'),
+          isError: true,
+        );
+      }
     }
   }
 
@@ -240,9 +264,14 @@ class _SettingsPageState extends State<SettingsPage> {
     try {
       await MossTtsService.instance.deleteModel();
       await OfflineSpeechService.instance.initialize();
-      if (mounted) _showMessage('已删除 MOSS-TTS-Nano 端侧模型');
+      if (mounted) _showMessage(AppLocalizations.of(context).mossDeleted);
     } catch (error) {
-      if (mounted) _showMessage('无法删除 MOSS-TTS-Nano: $error', isError: true);
+      if (mounted) {
+        _showMessage(
+          AppLocalizations.of(context).mossDeleteFailed('$error'),
+          isError: true,
+        );
+      }
     }
   }
 
@@ -250,27 +279,29 @@ class _SettingsPageState extends State<SettingsPage> {
     if (voiceId == null) return;
     try {
       await MossTtsService.instance.selectVoice(voiceId);
-      if (mounted) _showMessage('已切换 MOSS 内置克隆音色');
+      if (mounted) _showMessage(AppLocalizations.of(context).mossVoiceChanged);
     } catch (error) {
-      if (mounted) _showMessage('无法切换 MOSS 音色: $error', isError: true);
+      if (mounted) {
+        _showMessage(
+          AppLocalizations.of(context).mossVoiceChangeFailed('$error'),
+          isError: true,
+        );
+      }
     }
   }
 
   Future<void> _previewMossVoice() async {
     try {
-      await MossTtsService.instance.speak('你好，很高兴认识你。今天想聊些什么？我会认真听，也会自然地回应你。');
+      await MossTtsService.instance.speak(
+        AppLocalizations.of(context).mossPreviewText,
+      );
     } catch (error) {
-      if (mounted) _showMessage('MOSS-TTS-Nano 试听失败: $error', isError: true);
-    }
-  }
-
-  Future<void> _selectSystemTtsVoice(String? name) async {
-    if (name == null || name.isEmpty) return;
-    try {
-      await OfflineSpeechService.instance.selectTtsVoice(name);
-      if (mounted) _showMessage('已切换离线音色');
-    } catch (error) {
-      if (mounted) _showMessage('无法切换离线音色: $error', isError: true);
+      if (mounted) {
+        _showMessage(
+          AppLocalizations.of(context).mossPreviewFailed('$error'),
+          isError: true,
+        );
+      }
     }
   }
 
@@ -299,19 +330,117 @@ class _SettingsPageState extends State<SettingsPage> {
     if (_loading) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
+    final strings = AppLocalizations.of(context);
+    final preferences = context.watch<UiPreferences>();
     return Scaffold(
-      appBar: AppBar(title: const Text('模型与接口')),
+      appBar: AppBar(title: Text(strings.settings)),
       body: Form(
         key: _formKey,
         child: ListView(
           padding: const EdgeInsets.all(20),
           children: [
+            Text(
+              strings.appearance,
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              strings.themeMode,
+              style: Theme.of(context).textTheme.labelLarge,
+            ),
+            const SizedBox(height: 8),
+            SegmentedButton<ThemeMode>(
+              segments: [
+                ButtonSegment(
+                  value: ThemeMode.system,
+                  icon: const Icon(Icons.brightness_auto_outlined),
+                  label: Text(strings.themeSystem),
+                ),
+                ButtonSegment(
+                  value: ThemeMode.light,
+                  icon: const Icon(Icons.light_mode_outlined),
+                  label: Text(strings.themeLight),
+                ),
+                ButtonSegment(
+                  value: ThemeMode.dark,
+                  icon: const Icon(Icons.dark_mode_outlined),
+                  label: Text(strings.themeDark),
+                ),
+              ],
+              selected: {preferences.themeMode},
+              onSelectionChanged: (value) {
+                preferences.setThemeMode(value.single);
+              },
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<AppColorTheme>(
+              initialValue: preferences.colorTheme,
+              decoration: InputDecoration(
+                labelText: strings.colorScheme,
+                prefixIcon: const Icon(Icons.palette_outlined),
+              ),
+              items: AppColorTheme.values
+                  .map(
+                    (item) => DropdownMenuItem(
+                      value: item,
+                      child: Row(
+                        children: [
+                          Container(
+                            width: 18,
+                            height: 18,
+                            decoration: BoxDecoration(
+                              color: item.seed,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Text(switch (item) {
+                            AppColorTheme.teal => strings.colorTeal,
+                            AppColorTheme.blue => strings.colorBlue,
+                            AppColorTheme.green => strings.colorGreen,
+                            AppColorTheme.rose => strings.colorRose,
+                          }),
+                        ],
+                      ),
+                    ),
+                  )
+                  .toList(growable: false),
+              onChanged: (value) {
+                if (value != null) preferences.setColorTheme(value);
+              },
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<AppLanguage>(
+              initialValue: preferences.language,
+              decoration: InputDecoration(
+                labelText: strings.language,
+                prefixIcon: const Icon(Icons.language_outlined),
+              ),
+              items: [
+                DropdownMenuItem(
+                  value: AppLanguage.system,
+                  child: Text(strings.languageSystem),
+                ),
+                DropdownMenuItem(
+                  value: AppLanguage.zh,
+                  child: Text(strings.languageChinese),
+                ),
+                DropdownMenuItem(
+                  value: AppLanguage.en,
+                  child: Text(strings.languageEnglish),
+                ),
+              ],
+              onChanged: (value) {
+                if (value != null) preferences.setLanguage(value);
+              },
+            ),
+            const SizedBox(height: 32),
             DropdownButtonFormField<String>(
               initialValue: _selectedId,
-              decoration: const InputDecoration(
-                labelText: '平台',
-                prefixIcon: Icon(Icons.hub_outlined),
-                border: OutlineInputBorder(),
+              decoration: InputDecoration(
+                labelText: strings.platform,
+                prefixIcon: const Icon(Icons.hub_outlined),
+                border: const OutlineInputBorder(),
               ),
               items: _providers
                   .map(
@@ -347,7 +476,9 @@ class _SettingsPageState extends State<SettingsPage> {
                   prefixIcon: const Icon(Icons.key_outlined),
                   border: const OutlineInputBorder(),
                   suffixIcon: IconButton(
-                    tooltip: _obscureKey ? '显示密钥' : '隐藏密钥',
+                    tooltip: _obscureKey
+                        ? strings.showSecret
+                        : strings.hideSecret,
                     icon: Icon(
                       _obscureKey
                           ? Icons.visibility_outlined
@@ -358,17 +489,17 @@ class _SettingsPageState extends State<SettingsPage> {
                 ),
                 validator: (value) =>
                     _selected.requiresApiKey && value?.trim().isEmpty == true
-                    ? '请输入 API Key'
+                    ? strings.apiKeyRequired
                     : null,
               ),
               const SizedBox(height: 16),
               TextFormField(
                 controller: _urlController,
                 keyboardType: TextInputType.url,
-                decoration: const InputDecoration(
-                  labelText: '调用 URL',
-                  prefixIcon: Icon(Icons.link_outlined),
-                  border: OutlineInputBorder(),
+                decoration: InputDecoration(
+                  labelText: strings.apiUrl,
+                  prefixIcon: const Icon(Icons.link_outlined),
+                  border: const OutlineInputBorder(),
                 ),
                 validator: (value) {
                   if (_selected.isLocal) return null;
@@ -376,7 +507,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   if (uri == null ||
                       !uri.hasAuthority ||
                       (uri.scheme != 'http' && uri.scheme != 'https')) {
-                    return '请输入完整的 HTTP(S) URL';
+                    return strings.validHttpUrlRequired;
                   }
                   return null;
                 },
@@ -384,36 +515,37 @@ class _SettingsPageState extends State<SettingsPage> {
               const SizedBox(height: 16),
               TextFormField(
                 controller: _chatModelController,
-                decoration: const InputDecoration(
-                  labelText: '对话模型 ID',
-                  prefixIcon: Icon(Icons.smart_toy_outlined),
-                  border: OutlineInputBorder(),
+                decoration: InputDecoration(
+                  labelText: strings.chatModelId,
+                  prefixIcon: const Icon(Icons.smart_toy_outlined),
+                  border: const OutlineInputBorder(),
                 ),
-                validator: (value) =>
-                    value?.trim().isEmpty == true ? '请输入模型 ID' : null,
+                validator: (value) => value?.trim().isEmpty == true
+                    ? strings.modelIdRequired
+                    : null,
               ),
               const SizedBox(height: 16),
               TextFormField(
                 controller: _thinkingModelController,
-                decoration: const InputDecoration(
-                  labelText: '推理模型 ID（可选）',
-                  prefixIcon: Icon(Icons.psychology_outlined),
-                  border: OutlineInputBorder(),
+                decoration: InputDecoration(
+                  labelText: strings.reasoningModelId,
+                  prefixIcon: const Icon(Icons.psychology_outlined),
+                  border: const OutlineInputBorder(),
                 ),
               ),
               const SizedBox(height: 16),
               TextFormField(
                 controller: _maxOutputTokensController,
                 keyboardType: TextInputType.number,
-                decoration: const InputDecoration(
-                  labelText: '最大输出 Token',
-                  prefixIcon: Icon(Icons.data_array_outlined),
-                  border: OutlineInputBorder(),
+                decoration: InputDecoration(
+                  labelText: strings.maxOutputTokens,
+                  prefixIcon: const Icon(Icons.data_array_outlined),
+                  border: const OutlineInputBorder(),
                 ),
                 validator: (value) {
                   final parsed = int.tryParse(value?.trim() ?? '');
                   if (parsed == null || parsed < 1 || parsed > 131072) {
-                    return '请输入 1 到 131072 之间的整数';
+                    return strings.tokenRangeError;
                   }
                   return null;
                 },
@@ -421,8 +553,8 @@ class _SettingsPageState extends State<SettingsPage> {
               const SizedBox(height: 8),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
-                title: const Text('默认启用推理管线'),
-                subtitle: const Text('仅在当前平台配置了推理模型时生效'),
+                title: Text(strings.enableReasoningByDefault),
+                subtitle: Text(strings.reasoningRequiresModel),
                 value: _enableThinking,
                 onChanged: (value) => setState(() => _enableThinking = value),
               ),
@@ -433,8 +565,10 @@ class _SettingsPageState extends State<SettingsPage> {
                   title: const Text(OfflineLlmService.modelName),
                   subtitle: Text(
                     OfflineLlmService.instance.modelReady
-                        ? '已就绪 · ${OfflineLlmService.instance.accelerationDescription}'
-                        : '无需 API；安装经校验的 Genie 部署 ZIP 后离线运行',
+                        ? strings.qwenReady(
+                            OfflineLlmService.instance.accelerationDescription,
+                          )
+                        : strings.qwenInstallHint,
                   ),
                 ),
               ),
@@ -447,7 +581,7 @@ class _SettingsPageState extends State<SettingsPage> {
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   : const Icon(Icons.save_outlined),
-              label: const Text('保存配置'),
+              label: Text(strings.saveConfiguration),
               style: FilledButton.styleFrom(
                 minimumSize: const Size.fromHeight(48),
               ),
@@ -464,7 +598,7 @@ class _SettingsPageState extends State<SettingsPage> {
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
                     : const Icon(Icons.network_check_outlined),
-                label: const Text('测试连接'),
+                label: Text(strings.testConnection),
                 style: OutlinedButton.styleFrom(
                   minimumSize: const Size.fromHeight(48),
                 ),
@@ -472,7 +606,10 @@ class _SettingsPageState extends State<SettingsPage> {
             ],
             const SizedBox(height: 32),
             if (OfflineLlmService.instance.supported) ...[
-              Text('设备端侧 AI', style: Theme.of(context).textTheme.titleMedium),
+              Text(
+                strings.deviceAi,
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
               const SizedBox(height: 8),
               AnimatedBuilder(
                 animation: OfflineLlmService.instance,
@@ -495,12 +632,15 @@ class _SettingsPageState extends State<SettingsPage> {
                               ? '${_formatBytes(llm.downloadedBytes)} / '
                                     '${_formatBytes(llm.totalDownloadBytes)} ($progress%)'
                               : llm.loadingModel
-                              ? '正在载入模型...'
+                              ? strings.loadingModel
                               : llm.modelReady
-                              ? '已就绪 · ${OfflineLlmService.modelLicense} · '
-                                    '${llm.accelerationDescription}'
-                              : '${OfflineLlmService.modelLicense} · Genie 部署 ZIP · '
-                                    'HTP → CPU',
+                              ? strings.qwenModelReady(
+                                  OfflineLlmService.modelLicense,
+                                  llm.accelerationDescription,
+                                )
+                              : strings.qwenModelPackage(
+                                  OfflineLlmService.modelLicense,
+                                ),
                         ),
                         trailing: llm.downloading
                             ? const SizedBox.square(
@@ -511,21 +651,21 @@ class _SettingsPageState extends State<SettingsPage> {
                               )
                             : llm.modelReady
                             ? PopupMenuButton<String>(
-                                tooltip: '管理端侧模型',
+                                tooltip: strings.manageModel,
                                 onSelected: (value) {
                                   if (value == 'delete') {
                                     _deleteOfflineModel();
                                   }
                                 },
-                                itemBuilder: (context) => const [
+                                itemBuilder: (context) => [
                                   PopupMenuItem(
                                     value: 'delete',
-                                    child: Text('删除模型'),
+                                    child: Text(strings.deleteModel),
                                   ),
                                 ],
                               )
                             : IconButton(
-                                tooltip: '安装 Qwen3 Genie 部署包',
+                                tooltip: strings.installQwen,
                                 onPressed: _downloadOfflineModel,
                                 icon: const Icon(Icons.download_outlined),
                               ),
@@ -541,15 +681,6 @@ class _SettingsPageState extends State<SettingsPage> {
                           ),
                         ),
                       ],
-                      if (llm.fallbackNotice != null) ...[
-                        const SizedBox(height: 8),
-                        Text(
-                          llm.fallbackNotice!,
-                          style: TextStyle(
-                            color: Theme.of(context).colorScheme.tertiary,
-                          ),
-                        ),
-                      ],
                     ],
                   );
                 },
@@ -557,7 +688,10 @@ class _SettingsPageState extends State<SettingsPage> {
               const SizedBox(height: 24),
             ],
             if (SherpaSpeechService.instance.supported) ...[
-              Text('跨平台端侧语音', style: Theme.of(context).textTheme.titleMedium),
+              Text(
+                strings.offlineRecognition,
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
               const SizedBox(height: 8),
               AnimatedBuilder(
                 animation: SherpaSpeechService.instance,
@@ -579,23 +713,24 @@ class _SettingsPageState extends State<SettingsPage> {
                               ? '${_formatBytes(sherpa.downloadedBytes)} / '
                                     '${_formatBytes(sherpa.totalDownloadBytes)}'
                               : sherpa.asrReady
-                              ? '已就绪 · 多语言识别 · 完全离线'
-                              : '约 158.1 MB · 中英日韩粤语',
+                              ? '${strings.senseVoiceReady}\n'
+                                    '${strings.senseVoiceQnnUnsupported}'
+                              : strings.senseVoiceSize,
                         ),
                         trailing: sherpa.downloading
                             ? IconButton(
-                                tooltip: '取消下载',
+                                tooltip: strings.cancelDownload,
                                 onPressed: sherpa.cancelDownload,
                                 icon: const Icon(Icons.stop_circle_outlined),
                               )
                             : sherpa.asrReady
                             ? IconButton(
-                                tooltip: '删除 SenseVoice',
+                                tooltip: strings.deleteSenseVoice,
                                 onPressed: sherpa.deleteAsr,
                                 icon: const Icon(Icons.delete_outline),
                               )
                             : IconButton(
-                                tooltip: '下载 SenseVoice',
+                                tooltip: strings.downloadSenseVoice,
                                 onPressed: _downloadSherpaAsr,
                                 icon: const Icon(Icons.download_outlined),
                               ),
@@ -619,50 +754,77 @@ class _SettingsPageState extends State<SettingsPage> {
               const SizedBox(height: 24),
             ],
             if (MossTtsService.instance.supported) ...[
-              Text('MOSS 端侧语音', style: Theme.of(context).textTheme.titleMedium),
+              Text(
+                strings.mossSpeech,
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
               const SizedBox(height: 8),
               AnimatedBuilder(
                 animation: MossTtsService.instance,
                 builder: (context, _) {
                   final moss = MossTtsService.instance;
+                  final busy = moss.downloading || moss.initializing;
+                  final status = moss.downloading
+                      ? '${moss.operationLabel}\n'
+                            '${_formatBytes(moss.downloadedBytes)} / '
+                            '${_formatBytes(moss.totalDownloadBytes)}'
+                      : moss.initializing
+                      ? strings.mossInitializing
+                      : moss.generating
+                      ? strings.mossGenerating
+                      : moss.ready
+                      ? strings.mossReady(moss.accelerationLabel)
+                      : '${_formatBytes(MossTtsService.modelBytes)} · '
+                            '${moss.accelerationLabel}';
                   return Column(
                     children: [
                       ListTile(
                         contentPadding: EdgeInsets.zero,
-                        leading: Icon(
-                          moss.ready
-                              ? Icons.record_voice_over_outlined
-                              : Icons.download_for_offline_outlined,
+                        leading: AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 300),
+                          switchInCurve: Curves.easeOutCubic,
+                          switchOutCurve: Curves.easeInCubic,
+                          child: Icon(
+                            busy
+                                ? Icons.memory_outlined
+                                : moss.ready
+                                ? Icons.record_voice_over_outlined
+                                : Icons.folder_open_outlined,
+                            key: ValueKey((busy, moss.ready)),
+                          ),
                         ),
                         title: const Text(MossTtsService.modelName),
-                        subtitle: Text(
-                          moss.downloading
-                              ? '${moss.operationLabel}\n'
-                                    '${_formatBytes(moss.downloadedBytes)} / '
-                                    '${_formatBytes(moss.totalDownloadBytes)}'
-                              : moss.generating
-                              ? '正在进行端侧语音推理'
-                              : moss.ready
-                              ? '已就绪 · ${moss.accelerationLabel} · 48 kHz · 中文/英文/日文'
-                              : '${_formatBytes(MossTtsService.modelBytes)} · ${moss.accelerationLabel}',
+                        subtitle: AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 250),
+                          child: Text(status, key: ValueKey(status)),
                         ),
-                        trailing: moss.downloading
-                            ? IconButton(
-                                tooltip: '暂停下载',
-                                onPressed: moss.pauseDownload,
-                                icon: const Icon(Icons.pause_circle_outline),
-                              )
-                            : moss.ready
-                            ? IconButton(
-                                tooltip: '删除 MOSS-TTS-Nano',
-                                onPressed: _deleteMossTts,
-                                icon: const Icon(Icons.delete_outline),
-                              )
-                            : IconButton(
-                                tooltip: '下载 MOSS-TTS-Nano',
-                                onPressed: _downloadMossTts,
-                                icon: const Icon(Icons.download_outlined),
-                              ),
+                        trailing: AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 250),
+                          child: busy
+                              ? const SizedBox.square(
+                                  key: ValueKey('moss-busy'),
+                                  dimension: 48,
+                                  child: Padding(
+                                    padding: EdgeInsets.all(12),
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  ),
+                                )
+                              : moss.ready
+                              ? IconButton(
+                                  key: const ValueKey('moss-delete'),
+                                  tooltip: strings.deleteMoss,
+                                  onPressed: _deleteMossTts,
+                                  icon: const Icon(Icons.delete_outline),
+                                )
+                              : IconButton(
+                                  key: const ValueKey('moss-import'),
+                                  tooltip: strings.importMoss,
+                                  onPressed: _downloadMossTts,
+                                  icon: const Icon(Icons.folder_open_outlined),
+                                ),
+                        ),
                       ),
                       if (moss.ready)
                         Padding(
@@ -675,10 +837,12 @@ class _SettingsPageState extends State<SettingsPage> {
                                   key: ValueKey(moss.voiceId),
                                   initialValue: moss.voiceId,
                                   isExpanded: true,
-                                  decoration: const InputDecoration(
-                                    labelText: 'MOSS 内置克隆音色',
-                                    prefixIcon: Icon(Icons.record_voice_over),
-                                    border: OutlineInputBorder(),
+                                  decoration: InputDecoration(
+                                    labelText: strings.mossVoice,
+                                    prefixIcon: const Icon(
+                                      Icons.record_voice_over,
+                                    ),
+                                    border: const OutlineInputBorder(),
                                   ),
                                   items: MossTtsService.voices
                                       .map(
@@ -700,8 +864,8 @@ class _SettingsPageState extends State<SettingsPage> {
                               const SizedBox(width: 8),
                               IconButton.filledTonal(
                                 tooltip: moss.generating || moss.speaking
-                                    ? '停止试听'
-                                    : '试听当前音色',
+                                    ? strings.stopPreview
+                                    : strings.previewVoice,
                                 onPressed: moss.generating || moss.speaking
                                     ? moss.stopSpeaking
                                     : _previewMossVoice,
@@ -714,131 +878,42 @@ class _SettingsPageState extends State<SettingsPage> {
                             ],
                           ),
                         ),
-                      if (moss.downloading)
-                        LinearProgressIndicator(value: moss.downloadProgress),
-                      if (moss.generating) const LinearProgressIndicator(),
-                      if (moss.lastError != null) ...[
-                        const SizedBox(height: 8),
-                        Text(
-                          moss.lastError!,
-                          style: TextStyle(
-                            color: Theme.of(context).colorScheme.error,
-                          ),
-                        ),
-                      ],
+                      AnimatedSize(
+                        duration: const Duration(milliseconds: 300),
+                        curve: Curves.easeInOutCubic,
+                        child: busy || moss.generating
+                            ? LinearProgressIndicator(
+                                key: ValueKey(
+                                  moss.downloading
+                                      ? 'moss-import'
+                                      : 'moss-work',
+                                ),
+                                value: moss.downloading
+                                    ? moss.downloadProgress
+                                    : null,
+                              )
+                            : const SizedBox.shrink(),
+                      ),
+                      AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 250),
+                        child: moss.lastError == null
+                            ? const SizedBox.shrink()
+                            : Padding(
+                                key: ValueKey(moss.lastError),
+                                padding: const EdgeInsets.only(top: 8),
+                                child: Text(
+                                  moss.lastError!,
+                                  style: TextStyle(
+                                    color: Theme.of(context).colorScheme.error,
+                                  ),
+                                ),
+                              ),
+                      ),
                     ],
                   );
                 },
               ),
               const SizedBox(height: 24),
-            ],
-            if (defaultTargetPlatform == TargetPlatform.android) ...[
-              Text(
-                'Android 系统端侧语音',
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-              const SizedBox(height: 8),
-              AnimatedBuilder(
-                animation: OfflineSpeechService.instance,
-                builder: (context, _) {
-                  final speech = OfflineSpeechService.instance;
-                  final capabilities = speech.systemCapabilities;
-                  return Column(
-                    children: [
-                      ListTile(
-                        contentPadding: EdgeInsets.zero,
-                        leading: Icon(
-                          capabilities.offlineTts
-                              ? Icons.record_voice_over
-                              : Icons.download_for_offline_outlined,
-                        ),
-                        title: const Text('离线 TTS'),
-                        subtitle: Text(
-                          capabilities.offlineTts
-                              ? '${capabilities.ttsLocale} · ${capabilities.ttsVoice}'
-                              : '未检测到离线语音包',
-                        ),
-                        trailing: IconButton(
-                          tooltip: '安装或管理离线 TTS 数据',
-                          icon: const Icon(Icons.settings_voice_outlined),
-                          onPressed: () =>
-                              _openSpeechSetup(speech.installOfflineTtsData),
-                        ),
-                      ),
-                      if (capabilities.offlineTts &&
-                          capabilities.ttsVoices.isNotEmpty)
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 12),
-                          child: DropdownButtonFormField<String>(
-                            key: ValueKey(capabilities.ttsVoice),
-                            initialValue:
-                                capabilities.ttsVoices.any(
-                                  (voice) =>
-                                      voice.name == capabilities.ttsVoice,
-                                )
-                                ? capabilities.ttsVoice
-                                : capabilities.ttsVoices.first.name,
-                            isExpanded: true,
-                            decoration: const InputDecoration(
-                              labelText: '离线朗读音色',
-                              prefixIcon: Icon(
-                                Icons.spatial_audio_off_outlined,
-                              ),
-                              border: OutlineInputBorder(),
-                            ),
-                            items: capabilities.ttsVoices
-                                .map(
-                                  (voice) => DropdownMenuItem(
-                                    value: voice.name,
-                                    child: Text(
-                                      voice.displayLabel,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                                )
-                                .toList(growable: false),
-                            onChanged: _selectSystemTtsVoice,
-                          ),
-                        ),
-                      ListTile(
-                        contentPadding: EdgeInsets.zero,
-                        leading: Icon(
-                          capabilities.offlineStt
-                              ? Icons.mic
-                              : Icons.mic_off_outlined,
-                        ),
-                        title: const Text('离线语音识别'),
-                        subtitle: Text(
-                          speech.sttModelDownloadProgress != null &&
-                                  speech.sttModelDownloadProgress! < 100
-                              ? '中文模型下载 ${speech.sttModelDownloadProgress}%'
-                              : speech.sttModelDownloadScheduled
-                              ? '中文模型已加入系统下载队列'
-                              : capabilities.offlineStt
-                              ? '${capabilities.sttLocale} · 端侧识别器可用'
-                              : '未检测到系统端侧识别器',
-                        ),
-                        trailing: IconButton(
-                          tooltip: capabilities.sttModelDownload
-                              ? '下载中文端侧识别模型'
-                              : '打开系统语音输入设置',
-                          icon: Icon(
-                            capabilities.sttModelDownload
-                                ? Icons.download_for_offline_outlined
-                                : Icons.tune_outlined,
-                          ),
-                          onPressed: capabilities.sttModelDownload
-                              ? _downloadSpeechModel
-                              : () => _openSpeechSetup(
-                                  speech.openVoiceInputSettings,
-                                ),
-                        ),
-                      ),
-                    ],
-                  );
-                },
-              ),
             ],
           ],
         ),

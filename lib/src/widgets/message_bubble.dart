@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:talk2u/l10n/generated/app_localizations.dart';
 
 class MessageBubble extends StatefulWidget {
   final String content;
@@ -85,6 +86,7 @@ class _MessageBubbleState extends State<MessageBubble> {
 
   void _showContextMenu(BuildContext context, TapDownDetails details) {
     final theme = Theme.of(context);
+    final strings = AppLocalizations.of(context);
     final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
     final position = RelativeRect.fromRect(
       details.globalPosition & const Size(1, 1),
@@ -102,7 +104,7 @@ class _MessageBubbleState extends State<MessageBubble> {
               color: theme.colorScheme.onSurface,
             ),
             const SizedBox(width: 12),
-            const Text('复制'),
+            Text(strings.copy),
           ],
         ),
       ),
@@ -120,7 +122,7 @@ class _MessageBubbleState extends State<MessageBubble> {
                 color: theme.colorScheme.onSurface,
               ),
               const SizedBox(width: 12),
-              const Text('编辑并重发'),
+              Text(strings.editAndResend),
             ],
           ),
         ),
@@ -139,7 +141,7 @@ class _MessageBubbleState extends State<MessageBubble> {
                 color: theme.colorScheme.tertiary,
               ),
               const SizedBox(width: 12),
-              Text('回溯', style: TextStyle(color: theme.colorScheme.tertiary)),
+              Text(strings.rollback, style: TextStyle(color: theme.colorScheme.tertiary)),
             ],
           ),
         ),
@@ -158,7 +160,7 @@ class _MessageBubbleState extends State<MessageBubble> {
                 color: theme.colorScheme.primary,
               ),
               const SizedBox(width: 12),
-              Text('重新生成', style: TextStyle(color: theme.colorScheme.primary)),
+              Text(strings.regenerate, style: TextStyle(color: theme.colorScheme.primary)),
             ],
           ),
         ),
@@ -177,7 +179,7 @@ class _MessageBubbleState extends State<MessageBubble> {
                 color: theme.colorScheme.error,
               ),
               const SizedBox(width: 12),
-              Text('删除', style: TextStyle(color: theme.colorScheme.error)),
+              Text(strings.delete, style: TextStyle(color: theme.colorScheme.error)),
             ],
           ),
         ),
@@ -187,7 +189,7 @@ class _MessageBubbleState extends State<MessageBubble> {
     showMenu<String>(
       context: context,
       position: position,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       elevation: 3,
       items: items,
     ).then((value) {
@@ -197,10 +199,10 @@ class _MessageBubbleState extends State<MessageBubble> {
           Clipboard.setData(ClipboardData(text: widget.content));
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: const Text('已复制到剪贴板'),
+              content: Text(strings.copied),
               behavior: SnackBarBehavior.floating,
               shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(8),
               ),
               duration: const Duration(seconds: 1),
             ),
@@ -223,6 +225,7 @@ class _MessageBubbleState extends State<MessageBubble> {
   }
 
   void _confirmDelete(BuildContext context) {
+    final strings = AppLocalizations.of(context);
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -230,12 +233,12 @@ class _MessageBubbleState extends State<MessageBubble> {
           Icons.delete_outline_rounded,
           color: Theme.of(ctx).colorScheme.error,
         ),
-        title: const Text('删除消息'),
-        content: const Text('确定要删除这条消息吗？'),
+        title: Text(strings.deleteMessage),
+        content: Text(strings.deleteMessageConfirm),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: const Text('取消'),
+            child: Text(strings.cancel),
           ),
           FilledButton(
             onPressed: () {
@@ -245,7 +248,7 @@ class _MessageBubbleState extends State<MessageBubble> {
             style: FilledButton.styleFrom(
               backgroundColor: Theme.of(ctx).colorScheme.error,
             ),
-            child: const Text('删除'),
+            child: Text(strings.delete),
           ),
         ],
       ),
@@ -253,6 +256,7 @@ class _MessageBubbleState extends State<MessageBubble> {
   }
 
   void _confirmRollback(BuildContext context) {
+    final strings = AppLocalizations.of(context);
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -260,12 +264,12 @@ class _MessageBubbleState extends State<MessageBubble> {
           Icons.undo_rounded,
           color: Theme.of(ctx).colorScheme.tertiary,
         ),
-        title: const Text('回溯对话'),
-        content: const Text('将删除这条消息及之后的所有对话记录，相关记忆也会被清除。确定要回溯吗？'),
+        title: Text(strings.rollbackConversation),
+        content: Text(strings.rollbackConversationConfirm),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: const Text('取消'),
+            child: Text(strings.cancel),
           ),
           FilledButton(
             onPressed: () {
@@ -275,7 +279,7 @@ class _MessageBubbleState extends State<MessageBubble> {
             style: FilledButton.styleFrom(
               backgroundColor: Theme.of(ctx).colorScheme.tertiary,
             ),
-            child: const Text('回溯'),
+            child: Text(strings.rollback),
           ),
         ],
       ),
@@ -289,21 +293,22 @@ class _MessageBubbleState extends State<MessageBubble> {
       return const SizedBox.shrink();
     }
 
+    final strings = AppLocalizations.of(context);
     final actions = <Widget>[];
 
     actions.add(
       _ActionChip(
         icon: Icons.copy_rounded,
-        label: '复制',
+        label: strings.copy,
         onPressed: () {
           Clipboard.setData(ClipboardData(text: widget.content));
           if (context.mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
-                content: const Text('已复制到剪贴板'),
+                content: Text(strings.copied),
                 behavior: SnackBarBehavior.floating,
                 shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(8),
                 ),
                 duration: const Duration(seconds: 1),
               ),
@@ -318,7 +323,7 @@ class _MessageBubbleState extends State<MessageBubble> {
       actions.add(
         _ActionChip(
           icon: Icons.refresh_rounded,
-          label: '重写',
+          label: strings.rewrite,
           onPressed: widget.onRegenerate!,
           color: theme.colorScheme.primary,
         ),
@@ -329,7 +334,7 @@ class _MessageBubbleState extends State<MessageBubble> {
       actions.add(
         _ActionChip(
           icon: Icons.edit_rounded,
-          label: '编辑',
+          label: strings.edit,
           onPressed: _startEditing,
           color: theme.colorScheme.secondary,
         ),
@@ -340,7 +345,7 @@ class _MessageBubbleState extends State<MessageBubble> {
       actions.add(
         _ActionChip(
           icon: Icons.undo_rounded,
-          label: '回溯',
+          label: strings.rollback,
           onPressed: () => _confirmRollback(context),
           color: theme.colorScheme.tertiary,
         ),
@@ -351,7 +356,7 @@ class _MessageBubbleState extends State<MessageBubble> {
       actions.add(
         _ActionChip(
           icon: Icons.delete_outline_rounded,
-          label: '删除',
+          label: strings.delete,
           onPressed: () => _confirmDelete(context),
           color: theme.colorScheme.error,
         ),
@@ -371,6 +376,7 @@ class _MessageBubbleState extends State<MessageBubble> {
       return const SizedBox.shrink();
     }
 
+    final strings = AppLocalizations.of(context);
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
       child: GestureDetector(
@@ -380,7 +386,7 @@ class _MessageBubbleState extends State<MessageBubble> {
           curve: Curves.easeOutCubic,
           decoration: BoxDecoration(
             color: theme.colorScheme.tertiaryContainer.withValues(alpha: 0.4),
-            borderRadius: BorderRadius.circular(14),
+            borderRadius: BorderRadius.circular(8),
             border: Border.all(
               color: theme.colorScheme.tertiaryContainer,
               width: 1,
@@ -400,7 +406,7 @@ class _MessageBubbleState extends State<MessageBubble> {
                   ),
                   const SizedBox(width: 6),
                   Text(
-                    '思考过程',
+                    strings.thinkingProcess,
                     style: theme.textTheme.labelMedium?.copyWith(
                       color: theme.colorScheme.onTertiaryContainer,
                       fontWeight: FontWeight.w600,
@@ -446,10 +452,11 @@ class _MessageBubbleState extends State<MessageBubble> {
   }
 
   Widget _buildEditingView(ThemeData theme) {
+    final strings = AppLocalizations.of(context);
     return Container(
       decoration: BoxDecoration(
         color: theme.colorScheme.primaryContainer.withValues(alpha: 0.3),
-        borderRadius: BorderRadius.circular(22),
+        borderRadius: BorderRadius.circular(8),
         border: Border.all(
           color: theme.colorScheme.primary.withValues(alpha: 0.5),
           width: 1.5,
@@ -468,7 +475,7 @@ class _MessageBubbleState extends State<MessageBubble> {
               color: theme.colorScheme.onSurface,
             ),
             decoration: InputDecoration(
-              hintText: '编辑消息...',
+              hintText: strings.editMessageHint,
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(16),
                 borderSide: BorderSide.none,
@@ -495,13 +502,13 @@ class _MessageBubbleState extends State<MessageBubble> {
                     borderRadius: BorderRadius.circular(20),
                   ),
                 ),
-                child: const Text('取消'),
+                child: Text(strings.cancel),
               ),
               const SizedBox(width: 8),
               FilledButton.icon(
                 onPressed: _submitEdit,
                 icon: const Icon(Icons.send_rounded, size: 16),
-                label: const Text('发送'),
+                label: Text(strings.send),
                 style: FilledButton.styleFrom(
                   padding: const EdgeInsets.symmetric(horizontal: 16),
                   shape: RoundedRectangleBorder(
@@ -526,6 +533,7 @@ class _MessageBubbleState extends State<MessageBubble> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final strings = AppLocalizations.of(context);
     final isUser = widget.isUser;
 
     final bubbleColor = isUser
@@ -584,7 +592,7 @@ class _MessageBubbleState extends State<MessageBubble> {
                       )
                     : widget.content.isEmpty
                     ? Text(
-                        widget.isStreaming ? '正在输入...' : '（空回复）',
+                        widget.isStreaming ? strings.typing : strings.emptyReply,
                         style: theme.textTheme.bodyMedium?.copyWith(
                           color: textColor.withValues(alpha: 0.5),
                           fontStyle: FontStyle.italic,

@@ -719,9 +719,9 @@ class ChatState extends ChangeNotifier {
     }
 
     _errorMessage = provider?.isLocal == true
-        ? '请先在“模型与接口”中安装并校验 Qwen3-4B Genie 部署包'
+        ? '请先在“模型与接口”中安装 Qwen3-4B-Instruct-2507 QAIRT/NPU 模型'
         : '${provider?.name ?? '当前在线平台'}尚未配置 API Key；'
-              '也未检测到已就绪的 Qwen3-4B Genie 部署包';
+              '也未检测到已就绪的 Qwen3-4B-Instruct-2507 QAIRT/NPU 模型';
     notifyListeners();
     return false;
   }

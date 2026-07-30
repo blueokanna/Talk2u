@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:math' as math;
@@ -7,9 +8,32 @@ import 'dart:typed_data';
 import 'package:archive/archive_io.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
-import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa;
+
+@immutable
+class SenseVoiceRecognition {
+  final String text;
+  final String language;
+  final String emotion;
+  final String event;
+
+  const SenseVoiceRecognition({
+    required this.text,
+    required this.language,
+    required this.emotion,
+    required this.event,
+  });
+
+  factory SenseVoiceRecognition.fromMap(Map<dynamic, dynamic> value) =>
+      SenseVoiceRecognition(
+        text: value['text']?.toString().trim() ?? '',
+        language: value['language']?.toString() ?? '',
+        emotion: value['emotion']?.toString() ?? '',
+        event: value['event']?.toString() ?? '',
+      );
+}
 
 class _SpeechAsset {
   final String fileName;
@@ -31,36 +55,81 @@ class _SpeechAsset {
   ];
 }
 
+class _SenseVoicePackage {
+  final String soc;
+  final String directoryName;
+  final _SpeechAsset asset;
+
+  const _SenseVoicePackage({
+    required this.soc,
+    required this.directoryName,
+    required this.asset,
+  });
+}
+
 class SherpaSpeechService extends ChangeNotifier {
   SherpaSpeechService._();
 
   static final instance = SherpaSpeechService._();
+  static const activeProvider = 'QNN_HTP (SM8750/SM8850 v81)';
   static const engineName = 'sherpa-onnx 端侧识别';
   static const engineLicense = 'Apache-2.0';
-  static const asrModelName = 'SenseVoice 2025 INT8';
-  static const asrArchiveBytes = 165783878;
-  static const _asrDirectoryName =
-      'sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09';
-  static const _asrAsset = _SpeechAsset(
-    fileName: '$_asrDirectoryName.tar.bz2',
-    url:
-        'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/'
-        '$_asrDirectoryName.tar.bz2',
-    size: asrArchiveBytes,
-    sha256: '7305f7905bfcf77fa0b39388a313f3da35c68d971661a65475b56fb2162c8e63',
-  );
+  static const asrModelName = 'SenseVoice 2024-07-17 INT8 (SM8750/SM8850 QNN)';
+  static const _sampleRate = 16000;
+  static const _maxAudioSeconds = 10;
+  static const _maxPcmBytes = _sampleRate * _maxAudioSeconds * 2;
+  static const _manifestName = 'talk2u-sensevoice-manifest.json';
+  static const _runtimeChannel = MethodChannel('talk2u/sensevoice_qnn');
+  static const _senseVoicePackages = <String, _SenseVoicePackage>{
+    'SM8750': _SenseVoicePackage(
+      soc: 'SM8750',
+      directoryName:
+          'sherpa-onnx-qnn-SM8750-binary-10-seconds-sense-voice-zh-en-ja-ko-yue-2024-07-17-int8',
+      asset: _SpeechAsset(
+        fileName:
+            'sherpa-onnx-qnn-SM8750-binary-10-seconds-sense-voice-zh-en-ja-ko-yue-2024-07-17-int8.tar.bz2',
+        url:
+            'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models-qnn-binary/'
+            'sherpa-onnx-qnn-SM8750-binary-10-seconds-sense-voice-zh-en-ja-ko-yue-2024-07-17-int8.tar.bz2',
+        size: 161983327,
+        sha256:
+            '1e9cbe0498c335b00c9c0f63dc683be7ed2b6cf0c5673df1f5c7715d6909936e',
+      ),
+    ),
+    'SM8850': _SenseVoicePackage(
+      soc: 'SM8850',
+      directoryName:
+          'sherpa-onnx-qnn-SM8850-binary-10-seconds-sense-voice-zh-en-ja-ko-yue-2024-07-17-int8',
+      asset: _SpeechAsset(
+        fileName:
+            'sherpa-onnx-qnn-SM8850-binary-10-seconds-sense-voice-zh-en-ja-ko-yue-2024-07-17-int8.tar.bz2',
+        url:
+            'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models-qnn-binary/'
+            'sherpa-onnx-qnn-SM8850-binary-10-seconds-sense-voice-zh-en-ja-ko-yue-2024-07-17-int8.tar.bz2',
+        size: 162023574,
+        sha256:
+            'ecbc1ffba39f8e23582b79a199d12e8455425a22ef7b6b18c535ce25fcff2d64',
+      ),
+    ),
+  };
 
   final AudioRecorder _recorder = AudioRecorder();
   final StreamController<String> _recognitionController =
       StreamController<String>.broadcast();
+  final StreamController<SenseVoiceRecognition> _recognitionDetailsController =
+      StreamController<SenseVoiceRecognition>.broadcast();
   StreamSubscription<Uint8List>? _recordingSubscription;
   Timer? _recordingTimeout;
+  Future<void>? _startOperation;
+  Future<String?>? _stopOperation;
   BytesBuilder? _recordedAudio;
   HttpClientRequest? _downloadRequest;
-  Future<_SenseVoiceWorker>? _asrWorkerFuture;
+  bool _runtimeLoaded = false;
+  String? _deviceSoc;
   bool _cancelRequested = false;
   bool _speechDetected = false;
   bool _vadStopping = false;
+  bool _recordingStarted = false;
   int _voicedMilliseconds = 0;
   int _silenceMilliseconds = 0;
   double _noiseFloor = 0.004;
@@ -71,17 +140,20 @@ class SherpaSpeechService extends ChangeNotifier {
   bool extracting = false;
   bool listening = false;
   bool recognizing = false;
+  bool hardwareAccelerationVerified = false;
   int downloadedBytes = 0;
   int totalDownloadBytes = 0;
   String operationLabel = '';
   String? lastError;
+  SenseVoiceRecognition? lastRecognition;
 
-  bool get supported =>
-      !kIsWeb && (Platform.isAndroid || Platform.isWindows || Platform.isLinux);
+  bool get supported => !kIsWeb && Platform.isAndroid;
   double get downloadProgress => totalDownloadBytes <= 0
       ? 0
       : (downloadedBytes / totalDownloadBytes).clamp(0, 1);
   Stream<String> get recognitionResults => _recognitionController.stream;
+  Stream<SenseVoiceRecognition> get recognitionDetails =>
+      _recognitionDetailsController.stream;
 
   Future<Directory> _rootDirectory() async {
     final support = await getApplicationSupportDirectory();
@@ -92,8 +164,20 @@ class SherpaSpeechService extends ChangeNotifier {
     return root;
   }
 
+  _SenseVoicePackage get _asrPackage {
+    final value = _senseVoicePackages[_deviceSoc];
+    if (value == null) {
+      throw UnsupportedError(
+        'SenseVoice QNN requires SM8750 or SM8850 HTP v81; '
+        'detected ${_deviceSoc ?? 'unknown SoC'}',
+      );
+    }
+    return value;
+  }
+
   Future<Directory> _asrDirectory() async => Directory(
-    '${(await _rootDirectory()).path}${Platform.pathSeparator}$_asrDirectoryName',
+    '${(await _rootDirectory()).path}${Platform.pathSeparator}'
+    '${_asrPackage.directoryName}',
   );
 
   Future<void> initialize() async {
@@ -102,6 +186,10 @@ class SherpaSpeechService extends ChangeNotifier {
       return;
     }
     try {
+      final capabilities = await _runtimeChannel
+          .invokeMapMethod<Object?, Object?>('capabilities');
+      _deviceSoc = capabilities?['soc']?.toString().trim().toUpperCase();
+      _asrPackage;
       asrReady = await _validateAsr();
       await _deleteRemovedTtsAssets();
       lastError = null;
@@ -114,13 +202,27 @@ class SherpaSpeechService extends ChangeNotifier {
   }
 
   Future<bool> _validateAsr() async {
+    final package = _asrPackage;
     final directory = await _asrDirectory();
-    return await File(
-          '${directory.path}${Platform.pathSeparator}model.int8.onnx',
-        ).exists() &&
-        await File(
-          '${directory.path}${Platform.pathSeparator}tokens.txt',
-        ).exists();
+    final model = File('${directory.path}${Platform.pathSeparator}model.bin');
+    final tokens = File('${directory.path}${Platform.pathSeparator}tokens.txt');
+    final manifest = File(
+      '${directory.path}${Platform.pathSeparator}$_manifestName',
+    );
+    if (!await model.exists() ||
+        !await tokens.exists() ||
+        !await manifest.exists()) {
+      return false;
+    }
+    final value = jsonDecode(await manifest.readAsString());
+    return value is Map<String, dynamic> &&
+        value['schemaVersion'] == 1 &&
+        value['packageId'] == package.directoryName &&
+        value['archiveSha256'] == package.asset.sha256 &&
+        value['targetSoc'] == package.soc &&
+        value['htpArchitecture'] == 'v81' &&
+        value['modelBytes'] == await model.length() &&
+        value['tokensBytes'] == await tokens.length();
   }
 
   Future<void> _deleteRemovedTtsAssets() async {
@@ -147,9 +249,10 @@ class SherpaSpeechService extends ChangeNotifier {
   Future<void> downloadAsr() async {
     if (!supported) throw UnsupportedError('当前平台不支持 sherpa-onnx 语音识别');
     if (downloading || extracting) return;
+    final package = _asrPackage;
     await _downloadAndInstallArchive(
-      _asrAsset,
-      expectedDirectoryName: _asrDirectoryName,
+      package.asset,
+      expectedDirectoryName: package.directoryName,
       label: '正在下载 SenseVoice',
     );
     if (_cancelRequested) return;
@@ -325,6 +428,31 @@ class SherpaSpeechService extends ChangeNotifier {
         if (!await extracted.exists()) {
           throw const FormatException('语音识别模型归档目录无效');
         }
+        final model = File(
+          '${extracted.path}${Platform.pathSeparator}model.bin',
+        );
+        final tokens = File(
+          '${extracted.path}${Platform.pathSeparator}tokens.txt',
+        );
+        if (!await model.exists() || !await tokens.exists()) {
+          throw const FormatException('SenseVoice QNN context 文件不完整');
+        }
+        final package = _asrPackage;
+        await File(
+          '${extracted.path}${Platform.pathSeparator}$_manifestName',
+        ).writeAsString(
+          const JsonEncoder.withIndent('  ').convert({
+            'schemaVersion': 1,
+            'packageId': package.directoryName,
+            'archiveSha256': package.asset.sha256,
+            'targetSoc': package.soc,
+            'htpArchitecture': 'v81',
+            'maxAudioSeconds': 10,
+            'modelBytes': await model.length(),
+            'tokensBytes': await tokens.length(),
+          }),
+          flush: true,
+        );
         final destination = Directory(
           '${root.path}${Platform.pathSeparator}$expectedDirectoryName',
         );
@@ -350,49 +478,95 @@ class SherpaSpeechService extends ChangeNotifier {
 
   Future<void> deleteAsr() async {
     if (listening || recognizing) throw StateError('请先停止语音识别');
-    await _closeAsrWorker();
+    await _releaseRuntime();
     final directory = await _asrDirectory();
     if (await directory.exists()) await directory.delete(recursive: true);
     asrReady = false;
     notifyListeners();
   }
 
-  Future<void> startListening() async {
-    await initialize();
-    if (!asrReady) throw StateError('请先下载 SenseVoice 离线识别模型');
-    if (listening || recognizing) return;
-    if (!await _recorder.hasPermission()) throw StateError('麦克风权限未授予');
-    _recordedAudio = BytesBuilder(copy: false);
-    _speechDetected = false;
-    _vadStopping = false;
-    _voicedMilliseconds = 0;
-    _silenceMilliseconds = 0;
-    _noiseFloor = 0.004;
-    final stream = await _recorder.startStream(
-      const RecordConfig(
-        encoder: AudioEncoder.pcm16bits,
-        sampleRate: 16000,
-        numChannels: 1,
-      ),
-    );
-    _recordingSubscription = stream.listen(
-      (chunk) {
-        _recordedAudio?.add(chunk);
-        _updateVoiceActivity(chunk);
-      },
-      onError: (Object error) {
-        lastError = error.toString();
-        listening = false;
-        notifyListeners();
-      },
-    );
+  Future<void> startListening() {
+    final activeStart = _startOperation;
+    if (activeStart != null) return activeStart;
+    if (listening || recognizing || _stopOperation != null) {
+      return Future.value();
+    }
     listening = true;
     lastError = null;
-    _recordingTimeout = Timer(
-      const Duration(seconds: 60),
-      () => unawaited(stopListening()),
-    );
     notifyListeners();
+    final operation = _startListeningOnce();
+    _startOperation = operation;
+    return operation.whenComplete(() {
+      if (identical(_startOperation, operation)) _startOperation = null;
+    });
+  }
+
+  Future<void> _startListeningOnce() async {
+    try {
+      await initialize();
+      if (!asrReady) throw StateError('请先下载 SenseVoice 离线识别模型');
+      if (!await _recorder.hasPermission()) throw StateError('麦克风权限未授予');
+      _recordedAudio = BytesBuilder(copy: false);
+      _speechDetected = false;
+      _vadStopping = false;
+      _voicedMilliseconds = 0;
+      _silenceMilliseconds = 0;
+      _noiseFloor = 0.004;
+      final stream = await _recorder.startStream(
+        const RecordConfig(
+          encoder: AudioEncoder.pcm16bits,
+          sampleRate: _sampleRate,
+          numChannels: 1,
+        ),
+      );
+      _recordingStarted = true;
+      _recordingSubscription = stream.listen(
+        (chunk) {
+          final recorded = _recordedAudio;
+          if (recorded == null || _vadStopping) return;
+          final remaining = _maxPcmBytes - recorded.length;
+          if (remaining <= 0) {
+            _vadStopping = true;
+            _stopListeningInBackground();
+            return;
+          }
+          final acceptedLength = math.min(chunk.length, remaining) & ~1;
+          if (acceptedLength > 0) {
+            final accepted = acceptedLength == chunk.length
+                ? chunk
+                : Uint8List.sublistView(chunk, 0, acceptedLength);
+            recorded.add(accepted);
+            _updateVoiceActivity(accepted);
+          }
+          if (recorded.length >= _maxPcmBytes && !_vadStopping) {
+            _vadStopping = true;
+            _stopListeningInBackground();
+          }
+        },
+        onError: (Object error) {
+          lastError = error.toString();
+          if (listening) {
+            unawaited(stopListening().catchError((_) => null));
+          } else {
+            notifyListeners();
+          }
+        },
+        cancelOnError: true,
+      );
+      if (listening) {
+        _recordingTimeout = Timer(
+          const Duration(seconds: _maxAudioSeconds),
+          _stopListeningInBackground,
+        );
+      }
+    } catch (error) {
+      listening = false;
+      _vadStopping = false;
+      _recordedAudio = null;
+      lastError = error.toString();
+      notifyListeners();
+      rethrow;
+    }
   }
 
   void _updateVoiceActivity(Uint8List chunk) {
@@ -405,7 +579,7 @@ class SherpaSpeechService extends ChangeNotifier {
       energy += sample * sample;
     }
     final rms = math.sqrt(energy / sampleCount);
-    final duration = (sampleCount * 1000 / 16000)
+    final duration = (sampleCount * 1000 / _sampleRate)
         .round()
         .clamp(1, 1000)
         .toInt();
@@ -428,78 +602,124 @@ class SherpaSpeechService extends ChangeNotifier {
     _silenceMilliseconds += duration;
     if (_silenceMilliseconds >= 850) {
       _vadStopping = true;
-      unawaited(stopListening());
+      _stopListeningInBackground();
     }
   }
 
-  Future<String?> stopListening() async {
-    if (!listening) return null;
+  void _stopListeningInBackground() {
+    unawaited(
+      stopListening().catchError((Object error) {
+        lastError = error.toString();
+        notifyListeners();
+        return null;
+      }),
+    );
+  }
+
+  Future<String?> stopListening() {
+    final activeStop = _stopOperation;
+    if (activeStop != null) return activeStop;
+    if (!listening) return Future.value(null);
+    listening = false;
+    _vadStopping = true;
     _recordingTimeout?.cancel();
     _recordingTimeout = null;
-    await _recorder.stop();
-    await _recordingSubscription?.cancel();
-    _recordingSubscription = null;
-    listening = false;
-    _vadStopping = false;
-    final bytes = _recordedAudio?.takeBytes() ?? Uint8List(0);
+    notifyListeners();
+    final operation = _stopListeningOnce(_startOperation);
+    _stopOperation = operation;
+    return operation.whenComplete(() {
+      if (identical(_stopOperation, operation)) _stopOperation = null;
+    });
+  }
+
+  Future<String?> _stopListeningOnce(Future<void>? pendingStart) async {
+    if (pendingStart != null) {
+      try {
+        await pendingStart;
+      } catch (_) {
+        return null;
+      }
+    }
+    Object? recorderError;
+    try {
+      if (_recordingStarted) await _recorder.stop();
+    } catch (error) {
+      recorderError = error;
+    } finally {
+      _recordingStarted = false;
+      await _recordingSubscription?.cancel();
+      _recordingSubscription = null;
+      _vadStopping = false;
+    }
+    final recordedBytes = _recordedAudio?.takeBytes() ?? Uint8List(0);
     _recordedAudio = null;
-    if (bytes.isEmpty) {
+    if (recorderError != null) {
+      lastError = recorderError.toString();
+      notifyListeners();
+      throw StateError('停止麦克风录音失败：$recorderError');
+    }
+    if (recordedBytes.isEmpty) {
       notifyListeners();
       return null;
     }
+    final bytes = recordedBytes.length <= _maxPcmBytes
+        ? recordedBytes
+        : Uint8List.sublistView(recordedBytes, 0, _maxPcmBytes);
     recognizing = true;
     notifyListeners();
     try {
-      late final String text;
-      try {
-        text = await (await _asrWorker()).recognize(bytes);
-      } catch (_) {
-        await _closeAsrWorker();
-        rethrow;
+      final directory = await _asrDirectory();
+      if (!_runtimeLoaded) {
+        await _runtimeChannel.invokeMethod<void>('load', {
+          'modelRoot': directory.path,
+        });
+        _runtimeLoaded = true;
       }
-      if (text.isNotEmpty) _recognitionController.add(text);
-      return text;
+      final value = await _runtimeChannel.invokeMapMethod<dynamic, dynamic>(
+        'recognize',
+        {'modelRoot': directory.path, 'pcm16le': bytes},
+      );
+      if (value == null) throw StateError('SenseVoice QNN 未返回识别结果');
+      final recognition = SenseVoiceRecognition.fromMap(value);
+      hardwareAccelerationVerified =
+          value['hardwareAccelerated'] == true &&
+          value['provider'] == 'QNN_HTP';
+      if (!hardwareAccelerationVerified) {
+        throw StateError('SenseVoice 未能验证 QNN HTP 执行，拒绝 CPU 回退结果');
+      }
+      lastRecognition = recognition;
+      _recognitionDetailsController.add(recognition);
+      if (recognition.text.isNotEmpty) {
+        _recognitionController.add(recognition.text);
+      }
+      return recognition.text;
     } catch (error) {
+      hardwareAccelerationVerified = false;
       lastError = error.toString();
       rethrow;
     } finally {
+      await _releaseRuntime();
       recognizing = false;
       notifyListeners();
     }
   }
 
-  Future<_SenseVoiceWorker> _asrWorker() async {
-    final existing = _asrWorkerFuture;
-    if (existing != null) return existing;
-    final directory = await _asrDirectory();
-    final future = _SenseVoiceWorker.start(
-      '${directory.path}${Platform.pathSeparator}model.int8.onnx',
-      '${directory.path}${Platform.pathSeparator}tokens.txt',
-    );
-    _asrWorkerFuture = future;
+  Future<void> _releaseRuntime() async {
+    if (!_runtimeLoaded) return;
+    _runtimeLoaded = false;
     try {
-      return await future;
-    } catch (_) {
-      if (identical(_asrWorkerFuture, future)) _asrWorkerFuture = null;
-      rethrow;
-    }
-  }
-
-  Future<void> _closeAsrWorker() async {
-    final future = _asrWorkerFuture;
-    _asrWorkerFuture = null;
-    if (future == null) return;
-    try {
-      await (await future).close();
+      await _runtimeChannel.invokeMethod<void>('release');
     } catch (_) {}
   }
 
   @override
   void dispose() {
     _recordingTimeout?.cancel();
+    if (_recordingStarted) unawaited(_recorder.stop());
     _recordingSubscription?.cancel();
-    unawaited(_closeAsrWorker());
+    unawaited(_releaseRuntime());
     _recognitionController.close();
+    _recognitionDetailsController.close();
     _recorder.dispose();
     super.dispose();
   }
@@ -507,133 +727,4 @@ class SherpaSpeechService extends ChangeNotifier {
 
 class _SpeechDownloadCancelled implements Exception {
   const _SpeechDownloadCancelled();
-}
-
-class _SenseVoiceWorker {
-  final Isolate _isolate;
-  final SendPort _commands;
-  bool _closed = false;
-
-  _SenseVoiceWorker(this._isolate, this._commands);
-
-  static Future<_SenseVoiceWorker> start(String model, String tokens) async {
-    final ready = ReceivePort();
-    final errors = ReceivePort();
-    final isolate = await Isolate.spawn<List<Object>>(
-      _senseVoiceWorkerMain,
-      <Object>[ready.sendPort, model, tokens],
-      errorsAreFatal: true,
-      onError: errors.sendPort,
-      debugName: 'talk2u-sensevoice',
-    );
-    try {
-      final value = await Future.any<dynamic>([ready.first, errors.first]);
-      if (value is SendPort) return _SenseVoiceWorker(isolate, value);
-      throw StateError('SenseVoice 识别器初始化失败: $value');
-    } catch (_) {
-      isolate.kill(priority: Isolate.immediate);
-      rethrow;
-    } finally {
-      ready.close();
-      errors.close();
-    }
-  }
-
-  Future<String> recognize(Uint8List pcm) async {
-    if (_closed) throw StateError('SenseVoice 识别器已关闭');
-    final response = ReceivePort();
-    _commands.send(<Object>[
-      'recognize',
-      TransferableTypedData.fromList(<Uint8List>[pcm]),
-      response.sendPort,
-    ]);
-    try {
-      final value = await response.first.timeout(const Duration(seconds: 90));
-      if (value is List && value.length == 2 && value.first == 'ok') {
-        return value[1] as String;
-      }
-      final message = value is List && value.length > 1 ? value[1] : value;
-      throw StateError('SenseVoice 识别失败: $message');
-    } finally {
-      response.close();
-    }
-  }
-
-  Future<void> close() async {
-    if (_closed) return;
-    _closed = true;
-    final response = ReceivePort();
-    _commands.send(<Object>['close', response.sendPort]);
-    try {
-      await response.first.timeout(const Duration(seconds: 3));
-    } finally {
-      response.close();
-      _isolate.kill(priority: Isolate.immediate);
-    }
-  }
-}
-
-void _senseVoiceWorkerMain(List<Object> arguments) {
-  final ready = arguments[0] as SendPort;
-  final model = arguments[1] as String;
-  final tokens = arguments[2] as String;
-  sherpa.initBindings();
-  final recognizer = sherpa.OfflineRecognizer(
-    sherpa.OfflineRecognizerConfig(
-      model: sherpa.OfflineModelConfig(
-        senseVoice: sherpa.OfflineSenseVoiceModelConfig(
-          model: model,
-          language: 'auto',
-          useInverseTextNormalization: true,
-        ),
-        tokens: tokens,
-        numThreads: 2,
-        debug: false,
-      ),
-    ),
-  );
-  final commands = ReceivePort();
-  ready.send(commands.sendPort);
-  commands.listen((dynamic message) {
-    if (message is! List || message.isEmpty) return;
-    if (message.first == 'close') {
-      recognizer.free();
-      (message[1] as SendPort).send(true);
-      commands.close();
-      return;
-    }
-    if (message.first != 'recognize' || message.length != 3) return;
-    final response = message[2] as SendPort;
-    try {
-      final pcm = (message[1] as TransferableTypedData)
-          .materialize()
-          .asUint8List();
-      response.send(<Object>['ok', _recognizeSenseVoice(pcm, recognizer)]);
-    } catch (error) {
-      response.send(<Object>['error', error.toString()]);
-    }
-  });
-}
-
-String _recognizeSenseVoice(
-  Uint8List pcm,
-  sherpa.OfflineRecognizer recognizer,
-) {
-  final samples = Float32List(pcm.length ~/ 2);
-  final data = ByteData.sublistView(pcm);
-  for (var index = 0; index < samples.length; index++) {
-    samples[index] = data.getInt16(index * 2, Endian.little) / 32768.0;
-  }
-  final stream = recognizer.createStream();
-  try {
-    stream.acceptWaveform(samples: samples, sampleRate: 16000);
-    recognizer.decode(stream);
-    return recognizer
-        .getResult(stream)
-        .text
-        .replaceAll(RegExp(r'<\|[^>]+\|>'), '')
-        .trim();
-  } finally {
-    stream.free();
-  }
 }

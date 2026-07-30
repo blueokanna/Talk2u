@@ -2,7 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:talk2u/src/models/provider_profile.dart';
 
 void main() {
-  test('migrates a persisted Android offline provider to Qwen3 Genie', () {
+  test('migrates a persisted Android offline provider to Qwen3 QAIRT', () {
     const legacy = ProviderProfile(
       id: ProviderProfile.androidOfflineId,
       name: 'Legacy local model',
@@ -17,9 +17,9 @@ void main() {
     ], includeAndroidOffline: true);
 
     expect(profiles, hasLength(1));
-    expect(profiles.single.apiUrl, 'device://genie');
+    expect(profiles.single.apiUrl, 'device://geniex-qairt-npu');
     expect(profiles.single.chatModel, 'Qwen3-4B-Instruct-2507');
-    expect(profiles.single.maxOutputTokens, 768);
+    expect(profiles.single.maxOutputTokens, 256);
   });
 
   test('removes the Android-only provider on unsupported platforms', () {

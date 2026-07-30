@@ -35,10 +35,24 @@ migrate_working_dir/
 /.tools/
 /coverage/
 /assets/live2d/vendor/live2dcubismcore.min.js
+**/libLive2DCubismCore.a
+**/libLive2DCubismCore.so
+**/Live2DCubismCore.dll
+**/Live2DCubismCore.lib
+**/Live2DCubismCore.dylib
+**/Live2DCubismCore.bundle
+/android/app/src/main/jniLibs/**/libLive2DCubismCore.so
+/third_party/CubismSdkForNative*/
+/third_party/Live2D*/
+/.models/
 
 # Local model sources and QAIRT build products are reproducible, large artifacts.
 /model-sources/
 /qairt-build/
+
+# Downloaded SenseVoice QNN release artifacts are verified and installed at runtime.
+/model/ASR/*.tar.bz2
+/model/ASR/sherpa-onnx-qnn-SM8850-*/
 
 # Symbolication related
 app.*.symbols

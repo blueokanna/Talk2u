@@ -58,13 +58,18 @@ struct VulkanProbeResult {
     bool swapchainExtension = false;
     bool logicalDevice = false;
     bool hardwareDevice = false;
+    bool androidHardwareBuffer = false;
+    bool externalMemory = false;
+    bool externalSemaphore = false;
+    bool externalSemaphoreFd = false;
     int resultCode = VK_ERROR_INITIALIZATION_FAILED;
     std::string deviceName;
     std::string apiVersion;
 
     bool Ready() const {
         return loader && instance && surfaceExtensions && graphicsQueue &&
-               swapchainExtension && logicalDevice && hardwareDevice;
+               swapchainExtension && logicalDevice && hardwareDevice &&
+               androidHardwareBuffer && externalMemory && externalSemaphore && externalSemaphoreFd;
     }
 };
 
@@ -82,6 +87,21 @@ bool HasExtension(const std::vector<VkExtensionProperties>& extensions, const ch
     return std::any_of(extensions.begin(), extensions.end(), [name](const auto& extension) {
         return std::string(extension.extensionName) == name;
     });
+}
+
+bool HasExtension(const char* extensions, const char* name) {
+    if (extensions == nullptr || name == nullptr || *name == '\0') return false;
+    const std::string values = extensions;
+    const std::string target = name;
+    size_t position = 0;
+    while ((position = values.find(target, position)) != std::string::npos) {
+        const bool startsToken = position == 0 || values[position - 1] == ' ';
+        const size_t end = position + target.size();
+        const bool endsToken = end == values.size() || values[end] == ' ';
+        if (startsToken && endsToken) return true;
+        position = end;
+    }
+    return false;
 }
 
 VulkanProbeResult ProbeVulkan() {
@@ -206,6 +226,14 @@ VulkanProbeResult ProbeVulkan() {
             }
             if (!HasExtension(deviceExtensions, "VK_KHR_swapchain")) continue;
             output.swapchainExtension = true;
+            output.androidHardwareBuffer = HasExtension(
+                deviceExtensions,
+                "VK_ANDROID_external_memory_android_hardware_buffer");
+            output.externalMemory = HasExtension(deviceExtensions, "VK_KHR_external_memory");
+            output.externalSemaphore = HasExtension(deviceExtensions, "VK_KHR_external_semaphore");
+            output.externalSemaphoreFd = HasExtension(
+                deviceExtensions,
+                "VK_KHR_external_semaphore_fd");
 
             const float priority = 1.0F;
             VkDeviceQueueCreateInfo queueInfo{};
@@ -258,6 +286,12 @@ struct OpenGlProbeResult {
     std::string renderer;
     std::string version;
     bool software = false;
+    bool eglImageBase = false;
+    bool eglImageNativeBuffer = false;
+    bool eglFenceSync = false;
+    bool eglNativeFenceSync = false;
+    bool eglWaitSync = false;
+    bool glEglImage = false;
 };
 
 struct NnApiDeviceProbe {
@@ -397,6 +431,9 @@ bool TryOpenGlContext(EGLDisplay display, int requestedMajor, OpenGlProbeResult*
     output->vendor = vendor == nullptr ? "" : vendor;
     output->renderer = renderer == nullptr ? "" : renderer;
     output->version = version == nullptr ? "" : version;
+    output->glEglImage = HasExtension(
+        reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS)),
+        "GL_OES_EGL_image");
     std::string rendererName = output->renderer;
     std::transform(rendererName.begin(), rendererName.end(), rendererName.begin(), [](unsigned char value) {
         return static_cast<char>(std::tolower(value));
@@ -438,6 +475,17 @@ OpenGlProbeResult ProbeOpenGl() {
         output.minor = eglMinor;
         TryOpenGlContext(display, 2, &output);
     }
+    const char* eglExtensions = eglQueryString(display, EGL_EXTENSIONS);
+    output.eglImageBase = HasExtension(eglExtensions, "EGL_KHR_image_base");
+    output.eglImageNativeBuffer = HasExtension(
+        eglExtensions,
+        "EGL_ANDROID_image_native_buffer");
+    output.eglFenceSync = HasExtension(eglExtensions, "EGL_KHR_fence_sync");
+    output.eglNativeFenceSync = HasExtension(
+        eglExtensions,
+        "EGL_ANDROID_native_fence_sync");
+    output.eglWaitSync = eglMajor > 1 || (eglMajor == 1 && eglMinor >= 5) ||
+                         HasExtension(eglExtensions, "EGL_KHR_wait_sync");
     eglTerminate(display);
     return output;
 }
@@ -446,11 +494,20 @@ std::string BuildResultJson() {
     const VulkanProbeResult vulkan = ProbeVulkan();
     const OpenGlProbeResult openGl = ProbeOpenGl();
     const NnApiProbeResult nnapi = ProbeNnApi();
-    const char* preferred = vulkan.Ready() ? "vulkan" : openGl.ready ? "opengl-es" : "none";
+    const bool hardwareBufferInterop =
+        vulkan.androidHardwareBuffer && vulkan.externalMemory &&
+        vulkan.externalSemaphore && vulkan.externalSemaphoreFd &&
+        openGl.eglImageBase && openGl.eglImageNativeBuffer &&
+        openGl.eglFenceSync && openGl.eglNativeFenceSync &&
+        openGl.eglWaitSync && openGl.glEglImage;
+    const char* preferred = vulkan.Ready() && hardwareBufferInterop
+        ? "vulkan"
+        : openGl.ready ? "opengl-es" : "none";
 
     std::ostringstream output;
-    output << "{\"schemaVersion\":2"
+    output << "{\"schemaVersion\":3"
            << ",\"preferredNativeBackend\":\"" << preferred << "\""
+           << ",\"hardwareBufferInterop\":" << (hardwareBufferInterop ? "true" : "false")
            << ",\"vulkan\":{"
            << "\"ready\":" << (vulkan.Ready() ? "true" : "false")
            << ",\"loader\":" << (vulkan.loader ? "true" : "false")
@@ -460,6 +517,10 @@ std::string BuildResultJson() {
            << ",\"swapchainExtension\":" << (vulkan.swapchainExtension ? "true" : "false")
            << ",\"logicalDevice\":" << (vulkan.logicalDevice ? "true" : "false")
            << ",\"hardwareDevice\":" << (vulkan.hardwareDevice ? "true" : "false")
+           << ",\"androidHardwareBuffer\":" << (vulkan.androidHardwareBuffer ? "true" : "false")
+           << ",\"externalMemory\":" << (vulkan.externalMemory ? "true" : "false")
+           << ",\"externalSemaphore\":" << (vulkan.externalSemaphore ? "true" : "false")
+           << ",\"externalSemaphoreFd\":" << (vulkan.externalSemaphoreFd ? "true" : "false")
            << ",\"resultCode\":" << vulkan.resultCode
            << ",\"deviceName\":\"" << JsonEscape(vulkan.deviceName.c_str()) << "\""
            << ",\"apiVersion\":\"" << JsonEscape(vulkan.apiVersion.c_str()) << "\"}"
@@ -469,6 +530,12 @@ std::string BuildResultJson() {
            << ",\"eglMinor\":" << openGl.minor
            << ",\"eglError\":" << openGl.eglError
            << ",\"software\":" << (openGl.software ? "true" : "false")
+           << ",\"eglImageBase\":" << (openGl.eglImageBase ? "true" : "false")
+           << ",\"eglImageNativeBuffer\":" << (openGl.eglImageNativeBuffer ? "true" : "false")
+           << ",\"eglFenceSync\":" << (openGl.eglFenceSync ? "true" : "false")
+           << ",\"eglNativeFenceSync\":" << (openGl.eglNativeFenceSync ? "true" : "false")
+           << ",\"eglWaitSync\":" << (openGl.eglWaitSync ? "true" : "false")
+           << ",\"glEglImage\":" << (openGl.glEglImage ? "true" : "false")
            << ",\"vendor\":\"" << JsonEscape(openGl.vendor.c_str()) << "\""
            << ",\"renderer\":\"" << JsonEscape(openGl.renderer.c_str()) << "\""
            << ",\"version\":\"" << JsonEscape(openGl.version.c_str()) << "\"}"

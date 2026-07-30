@@ -8,12 +8,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
+import 'package:talk2u/l10n/generated/app_localizations.dart';
+import 'package:talk2u/src/services/accelerator_telemetry_service.dart';
 import 'package:talk2u/src/services/offline_speech_service.dart';
 import 'package:webview_cef/webview_cef.dart';
 import 'package:webview_windows/webview_windows.dart' as windows_webview;
 
 abstract final class Live2dModelPaths {
-  static const bundledMao = 'asset:///model/mao/runtime/mao_pro.model3.json';
+  static const bundledMao =
+      'asset:///model/Live2d/mao/runtime/mao_pro.model3.json';
 }
 
 Future<void>? _desktopCefInitialization;
@@ -215,8 +218,9 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
       }
       controller.dispose();
       if (!mounted || generation != _viewGeneration) return;
+      final strings = AppLocalizations.of(context);
       setState(() {
-        _error = 'Live2D Windows WebView2 启动失败: $error';
+        _error = strings.live2dRuntimeFailed('$error');
         _recoverableError = true;
       });
     }
@@ -274,7 +278,8 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
         WebviewEventsListener(
           onConsoleMessage: (level, message, source, line) {
             if (level >= 4 && mounted && _error == null) {
-              setState(() => _error = 'Live2D 脚本错误: $message');
+              final strings = AppLocalizations.of(context);
+              setState(() => _error = strings.live2dScriptFailed(message));
             }
           },
         ),
@@ -294,8 +299,9 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
       if (mounted) setState(() {});
     } catch (error) {
       if (!mounted || generation != _viewGeneration) return;
+      final strings = AppLocalizations.of(context);
       setState(() {
-        _error = 'Live2D 桌面运行时启动失败: $error';
+        _error = strings.live2dRuntimeFailed('$error');
         _recoverableError = true;
       });
     }
@@ -324,9 +330,10 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
     try {
       final status = jsonDecode(message) as Map<String, dynamic>;
       if (!mounted) return;
+      final strings = AppLocalizations.of(context);
       setState(() {
         _error = status['type'] == 'error'
-            ? status['message'] as String? ?? 'Live2D 加载失败'
+            ? status['message'] as String? ?? strings.live2dLoadFailed
             : null;
         _recoverableError =
             status['type'] == 'error' && status['recoverable'] == true;
@@ -338,7 +345,10 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
         _scheduleRendererRestart();
       }
     } catch (_) {
-      if (mounted) setState(() => _error = 'Live2D 返回了无效状态');
+      if (mounted) {
+        final strings = AppLocalizations.of(context);
+        setState(() => _error = strings.live2dInvalidStatus);
+      }
     }
   }
 
@@ -375,29 +385,24 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
     }
   }
 
-  Map<String, dynamic> _decodeDiagnostics(String raw) {
+  Map<String, dynamic> _decodeDiagnostics(
+    String raw,
+    AppLocalizations strings,
+  ) {
     dynamic value = jsonDecode(raw);
     if (value is String) value = jsonDecode(value);
-    if (value is! Map) throw const FormatException('诊断结果不是 JSON 对象');
+    if (value is! Map) throw FormatException(strings.diagnosticsInvalidJson);
     return Map<String, dynamic>.from(value);
   }
 
-  String _joinValues(dynamic value) {
-    if (value is List) return value.map((item) => '$item').join(', ');
-    return value?.toString() ?? '无';
-  }
-
-  String _nnapiDeviceNames(dynamic value) {
-    if (value is! List) return '未知';
-    final names = value
-        .whereType<Map>()
-        .where((device) => device['hardware'] == true)
-        .map(
-          (device) =>
-              '${device['name'] ?? 'unknown'} · FL ${device['featureLevel'] ?? '?'}',
-        )
-        .toList(growable: false);
-    return names.isEmpty ? '未枚举到非 CPU 加速设备' : names.join(', ');
+  String _usageValue(
+    Map<dynamic, dynamic>? metric,
+    AppLocalizations strings,
+    String unavailable,
+  ) {
+    final percent = metric?['percent'];
+    if (metric?['available'] != true || percent is! num) return unavailable;
+    return strings.percentValue(percent.toStringAsFixed(1));
   }
 
   Future<void> _showDiagnostics() async {
@@ -407,6 +412,7 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
             _windowsController == null)) {
       return;
     }
+    final strings = AppLocalizations.of(context);
     setState(() => _diagnosticsLoading = true);
     try {
       final raw = _channel != null
@@ -420,108 +426,75 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
             );
       final details = raw == null
           ? _readyDetails ?? const {}
-          : _decodeDiagnostics(raw.toString());
+          : _decodeDiagnostics(raw.toString(), strings);
       if (!mounted) return;
-      final core = details['coreVersion'] as Map?;
+      final usage = details['resourceUsage'] as Map?;
       final renderer = details['renderer'] as Map?;
       final policy = details['rendererPolicy'] as Map?;
-      final natural = details['naturalCapabilities'] as Map?;
       final platform = renderer?['platform'] as Map?;
-      final nativeProbe = platform?['nativeProbe'] as Map?;
-      final vulkanProbe = nativeProbe?['vulkan'] as Map?;
-      final openGlProbe = nativeProbe?['openGlEs'] as Map?;
-      final nnapiProbe = nativeProbe?['nnapi'] as Map?;
+      final interop = platform?['vulkanInterop'] as Map?;
+      final backend =
+          policy?['actualBackend']?.toString() ??
+          renderer?['backend']?.toString() ??
+          strings.usageUnavailable;
+      final gpuDevice =
+          interop?['device']?.toString() ??
+          renderer?['renderer']?.toString() ??
+          strings.usageUnavailable;
+      final frameCount = details['frameCount']?.toString() ?? '0';
+      final accelerator = await AcceleratorTelemetryService.instance.sample();
+      if (!mounted) return;
       await showDialog<void>(
         context: context,
         builder: (context) => AlertDialog(
-          title: const Text('Live2D 运行诊断'),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _DiagnosticRow(
-                  label: 'Cubism Core',
-                  value: core == null
-                      ? '未知'
-                      : '${core['major']}.${core['minor']}.${core['patch']}',
+          title: Text(strings.live2dDiagnostics),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _DiagnosticRow(label: strings.renderBackend, value: backend),
+              _DiagnosticRow(label: strings.gpuDevice, value: gpuDevice),
+              _DiagnosticRow(label: strings.renderedFrames, value: frameCount),
+              _DiagnosticRow(
+                label: strings.cpuUsage,
+                value: _usageValue(
+                  usage?['cpu'] as Map?,
+                  strings,
+                  strings.usageUnavailable,
                 ),
-                _DiagnosticRow(
-                  label: '模型配置',
-                  value: 'model3 v${details['modelVersion'] ?? 3}',
+              ),
+              _DiagnosticRow(
+                label: strings.gpuUsage,
+                value: _usageValue(
+                  usage?['gpu'] as Map?,
+                  strings,
+                  strings.gpuUsageUnavailable,
                 ),
-                _DiagnosticRow(
-                  label: 'Web 框架',
-                  value: '${details['frameworkVersion'] ?? 'unknown'}',
-                ),
-                _DiagnosticRow(
-                  label: '图形 API',
-                  value: '${renderer?['api'] ?? 'unknown'}',
-                ),
-                _DiagnosticRow(
-                  label: '实际后端',
-                  value:
-                      '${policy?['actualBackend'] ?? renderer?['backend'] ?? 'unknown'}',
-                ),
-                _DiagnosticRow(
-                  label: '原生候选',
-                  value:
-                      '${nativeProbe?['preferredNativeBackend'] ?? 'unknown'}（预检，不代表当前画面）',
-                ),
-                _DiagnosticRow(
-                  label: 'Vulkan 预检',
-                  value: vulkanProbe?['ready'] == true
-                      ? '通过 ${vulkanProbe?['apiVersion'] ?? ''} ${vulkanProbe?['deviceName'] ?? ''}'
-                      : '未通过 (VkResult ${vulkanProbe?['resultCode'] ?? 'unknown'})',
-                ),
-                _DiagnosticRow(
-                  label: 'OpenGL 预检',
-                  value: openGlProbe?['ready'] == true
-                      ? '通过 ES ${openGlProbe?['major'] ?? '?'} ${openGlProbe?['renderer'] ?? ''}'
-                      : '未通过 (EGL ${openGlProbe?['eglError'] ?? 'unknown'})',
-                ),
-                _DiagnosticRow(
-                  label: 'NNAPI 设备',
-                  value: nnapiProbe?['hardwareDevice'] == true
-                      ? _nnapiDeviceNames(nnapiProbe?['devices'])
-                      : '未枚举到非 CPU 加速设备',
-                ),
-                _DiagnosticRow(
-                  label: 'GPU',
-                  value: '${renderer?['renderer'] ?? 'unknown'}',
-                ),
-                _DiagnosticRow(
-                  label: '口型参数',
-                  value: _joinValues(details['lipSyncIds']),
-                ),
-                _DiagnosticRow(
-                  label: '动作覆盖',
-                  value: _joinValues(details['cueCoverage']),
-                ),
-                _DiagnosticRow(
-                  label: '自然表现',
-                  value: natural == null
-                      ? '未知'
-                      : natural.entries
-                            .where((entry) => entry.value == true)
-                            .map((entry) => entry.key)
-                            .join(', '),
-                ),
-              ],
-            ),
+              ),
+              _DiagnosticRow(
+                label: strings.npuUsage,
+                value:
+                    accelerator?.available != true ||
+                        accelerator?.percent == null
+                    ? strings.npuUsageUnavailable
+                    : strings.npuRecentWorkload(
+                        accelerator!.percent!.toStringAsFixed(1),
+                      ),
+              ),
+            ],
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context),
-              child: const Text('关闭'),
+              child: Text(strings.close),
             ),
           ],
         ),
       );
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('无法读取 Live2D 诊断: $error')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(strings.diagnosticsFailed('$error'))),
+      );
     } finally {
       if (mounted) setState(() => _diagnosticsLoading = false);
     }
@@ -539,6 +512,7 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
 
   @override
   Widget build(BuildContext context) {
+    final strings = AppLocalizations.of(context);
     final Widget renderer;
     if (defaultTargetPlatform == TargetPlatform.android) {
       renderer = PlatformViewLink(
@@ -554,7 +528,12 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
               id: params.id,
               viewType: 'talk2u/live2d',
               layoutDirection: TextDirection.ltr,
-              creationParams: {'modelPath': widget.modelPath},
+              creationParams: {
+                'modelPath': widget.modelPath,
+                'backgroundColor': Theme.of(
+                  context,
+                ).scaffoldBackgroundColor.toARGB32(),
+              },
               creationParamsCodec: const StandardMessageCodec(),
             )
             ..addOnPlatformViewCreatedListener(params.onPlatformViewCreated)
@@ -577,54 +556,59 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
                   ready ? controller.webviewWidget : controller.loadingWidget,
             );
     } else {
-      renderer = const Center(child: Text('当前平台没有可用的 Live2D 运行时'));
+      renderer = Center(child: Text(strings.currentPlatformUnavailable));
     }
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        renderer,
-        if (_readyDetails != null)
-          Align(
-            alignment: Alignment.topRight,
-            child: SafeArea(
-              child: IconButton.filledTonal(
-                tooltip: 'Live2D 运行诊断',
-                onPressed: _diagnosticsLoading ? null : _showDiagnostics,
-                icon: _diagnosticsLoading
-                    ? const SizedBox.square(
-                        dimension: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.info_outline),
-              ),
-            ),
-          ),
-        if (_error != null)
-          Align(
-            alignment: Alignment.bottomCenter,
-            child: Material(
-              color: Theme.of(context).colorScheme.errorContainer,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        _error!,
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
-                    ),
-                    IconButton(
-                      tooltip: _recoverableError ? '恢复 Live2D' : '重新加载 Live2D',
-                      onPressed: _restartRenderer,
-                      icon: const Icon(Icons.refresh),
-                    ),
-                  ],
+    return ClipRect(
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          renderer,
+          if (_readyDetails != null)
+            Align(
+              alignment: Alignment.topRight,
+              child: SafeArea(
+                child: IconButton.filledTonal(
+                  tooltip: strings.live2dDiagnosticsTooltip,
+                  onPressed: _diagnosticsLoading ? null : _showDiagnostics,
+                  icon: _diagnosticsLoading
+                      ? const SizedBox.square(
+                          dimension: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.info_outline),
                 ),
               ),
             ),
-          ),
-      ],
+          if (_error != null)
+            Align(
+              alignment: Alignment.bottomCenter,
+              child: Material(
+                color: Theme.of(context).colorScheme.errorContainer,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          _error!,
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: strings.reloadLive2d,
+                        onPressed: _restartRenderer,
+                        icon: const Icon(Icons.refresh),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }

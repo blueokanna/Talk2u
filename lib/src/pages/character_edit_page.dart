@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:talk2u/l10n/generated/app_localizations.dart';
 import 'package:talk2u/src/models/character.dart';
 import 'package:talk2u/src/services/live2d_model_importer.dart';
 
@@ -65,6 +66,7 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
 
   Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
+    final strings = AppLocalizations.of(context);
 
     setState(() => _isSaving = true);
 
@@ -97,7 +99,9 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
       if (mounted) {
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(SnackBar(content: Text('保存失败: $e')));
+        ).showSnackBar(
+          SnackBar(content: Text(strings.characterSaveFailed('$e'))),
+        );
       }
     } finally {
       if (mounted) setState(() => _isSaving = false);
@@ -119,6 +123,7 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
   }
 
   Future<void> _pickLive2dModel() async {
+    final strings = AppLocalizations.of(context);
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
       allowedExtensions: const ['zip'],
@@ -133,13 +138,15 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
       if (modelPath == null || !mounted) return;
       setState(() => _live2dModelController.text = modelPath);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Live2D 模型已导入，共发现 ${modelPaths.length} 个模型')),
+        SnackBar(content: Text(strings.live2dModelsImported(modelPaths.length))),
       );
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('Live2D 模型导入失败: $error')));
+      ).showSnackBar(
+        SnackBar(content: Text(strings.live2dModelImportFailed('$error'))),
+      );
     } finally {
       if (mounted) setState(() => _isImportingLive2d = false);
     }
@@ -147,10 +154,11 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
 
   Future<String?> _selectImportedModel(List<String> modelPaths) async {
     if (modelPaths.length == 1) return modelPaths.first;
+    final strings = AppLocalizations.of(context);
     return showDialog<String>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: const Text('选择 Live2D 模型'),
+        title: Text(strings.chooseLive2dModel),
         content: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 420, maxHeight: 360),
           child: ListView.separated(
@@ -176,7 +184,7 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('取消'),
+            child: Text(strings.cancel),
           ),
         ],
       ),
@@ -184,22 +192,20 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
   }
 
   Future<void> _installBundledMao() async {
+    final strings = AppLocalizations.of(context);
     final accepted = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: const Text('使用虹色 Mao 示例模型'),
-        content: const Text(
-          '该模型由 Live2D Inc. 提供，使用前必须同意 Cubism 示例模型使用授权要求。'
-          '仓库中的 model/mao/ReadMe.txt 包含来源与许可说明。',
-        ),
+        title: Text(strings.maoLicenseTitle),
+        content: Text(strings.maoLicenseDescription),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('取消'),
+            child: Text(strings.cancel),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('我已阅读并同意'),
+            child: Text(strings.licenseAccepted),
           ),
         ],
       ),
@@ -212,12 +218,14 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
       setState(() => _live2dModelController.text = modelPath);
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(const SnackBar(content: Text('Cubism 5 Mao 模型已安装')));
+      ).showSnackBar(SnackBar(content: Text(strings.maoInstalled)));
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('内置模型安装失败: $error')));
+      ).showSnackBar(
+        SnackBar(content: Text(strings.maoInstallFailed('$error'))),
+      );
     } finally {
       if (mounted) setState(() => _isImportingLive2d = false);
     }
@@ -226,10 +234,13 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final strings = AppLocalizations.of(context);
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(_isEditing ? '编辑角色' : '创建角色'),
+        title: Text(
+          _isEditing ? strings.editCharacter : strings.createCharacter,
+        ),
         centerTitle: true,
       ),
       body: Form(
@@ -240,17 +251,18 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
             _buildSectionCard(
               theme,
               children: [
-                _buildFieldLabel(theme, '姓名', required: true),
+                _buildFieldLabel(theme, strings.characterName, required: true),
                 const SizedBox(height: 8),
                 TextFormField(
                   controller: _nameController,
                   maxLength: 10,
-                  decoration: _inputDecoration('输入AI昵称'),
-                  validator: (v) =>
-                      (v == null || v.trim().isEmpty) ? '请输入角色名称' : null,
+                  decoration: _inputDecoration(strings.characterNameHint),
+                  validator: (v) => (v == null || v.trim().isEmpty)
+                      ? strings.characterNameRequired
+                      : null,
                 ),
                 const SizedBox(height: 16),
-                _buildFieldLabel(theme, '性别', required: true),
+                _buildFieldLabel(theme, strings.gender, required: true),
                 const SizedBox(height: 8),
                 _buildGenderSelector(theme),
               ],
@@ -259,10 +271,14 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
             _buildSectionCard(
               theme,
               children: [
-                _buildFieldLabel(theme, '角色设定', required: true),
+                _buildFieldLabel(
+                  theme,
+                  strings.characterSetting,
+                  required: true,
+                ),
                 const SizedBox(height: 4),
                 Text(
-                  '填写AI角色设定信息，会影响对话效果；可以描述背景、角色性格、身份、与你的关系等。',
+                  strings.characterSettingHelp,
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: theme.colorScheme.outline,
                   ),
@@ -273,9 +289,10 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
                   maxLength: 1200,
                   maxLines: 6,
                   minLines: 4,
-                  decoration: _inputDecoration('描述角色的性格、身份、背景等'),
-                  validator: (v) =>
-                      (v == null || v.trim().isEmpty) ? '请输入角色设定' : null,
+                  decoration: _inputDecoration(strings.characterSettingHint),
+                  validator: (v) => (v == null || v.trim().isEmpty)
+                      ? strings.characterSettingRequired
+                      : null,
                 ),
               ],
             ),
@@ -283,10 +300,10 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
             _buildSectionCard(
               theme,
               children: [
-                _buildFieldLabel(theme, '角色简介'),
+                _buildFieldLabel(theme, strings.characterDescription),
                 const SizedBox(height: 4),
                 Text(
-                  '介绍你的AI角色，不影响对话效果；一个有趣的简介能够增加聊天的兴趣',
+                  strings.characterDescriptionHelp,
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: theme.colorScheme.outline,
                   ),
@@ -297,7 +314,7 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
                   maxLength: 1000,
                   maxLines: 5,
                   minLines: 3,
-                  decoration: _inputDecoration('介绍你的AI角色'),
+                  decoration: _inputDecoration(strings.characterDescriptionHint),
                 ),
               ],
             ),
@@ -305,14 +322,14 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
             _buildSectionCard(
               theme,
               children: [
-                _buildFieldLabel(theme, '角色开场白'),
+                _buildFieldLabel(theme, strings.characterGreeting),
                 const SizedBox(height: 8),
                 TextFormField(
                   controller: _greetingController,
                   maxLength: 200,
                   maxLines: 4,
                   minLines: 2,
-                  decoration: _inputDecoration('请输入角色开场白'),
+                  decoration: _inputDecoration(strings.characterGreetingHint),
                 ),
               ],
             ),
@@ -320,10 +337,10 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
             _buildSectionCard(
               theme,
               children: [
-                _buildFieldLabel(theme, '对话风格示例'),
+                _buildFieldLabel(theme, strings.dialogueStyleExample),
                 const SizedBox(height: 4),
                 Text(
-                  '请填写体现AI角色说话风格、说话语气的对话文本。\n如：不许看别人，乖乖在我身边，哪都不许去。',
+                  strings.dialogueStyleHelp,
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: theme.colorScheme.outline,
                   ),
@@ -334,7 +351,7 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
                   maxLength: 100,
                   maxLines: 3,
                   minLines: 2,
-                  decoration: _inputDecoration('体现角色说话风格的示例'),
+                  decoration: _inputDecoration(strings.dialogueStyleHint),
                 ),
               ],
             ),
@@ -342,18 +359,18 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
             _buildSectionCard(
               theme,
               children: [
-                _buildFieldLabel(theme, '用户名称'),
+                _buildFieldLabel(theme, strings.userName),
                 const SizedBox(height: 8),
                 TextFormField(
                   controller: _userNameController,
                   maxLength: 10,
-                  decoration: _inputDecoration('AI对你的称呼'),
+                  decoration: _inputDecoration(strings.userNameHint),
                 ),
                 const SizedBox(height: 16),
-                _buildFieldLabel(theme, '用户聊天人设'),
+                _buildFieldLabel(theme, strings.userPersona),
                 const SizedBox(height: 4),
                 Text(
-                  'AI眼中你扮演的身份，可以描述角色性格、身份、经历等',
+                  strings.userPersonaHelp,
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: theme.colorScheme.outline,
                   ),
@@ -364,7 +381,7 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
                   maxLength: 500,
                   maxLines: 4,
                   minLines: 2,
-                  decoration: _inputDecoration('描述你在对话中的身份'),
+                  decoration: _inputDecoration(strings.userPersonaHint),
                 ),
               ],
             ),
@@ -372,12 +389,12 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
             _buildSectionCard(
               theme,
               children: [
-                _buildFieldLabel(theme, 'Live2D 模型'),
+                _buildFieldLabel(theme, strings.live2dModel),
                 const SizedBox(height: 8),
                 TextFormField(
                   controller: _live2dModelController,
                   readOnly: true,
-                  decoration: _inputDecoration('未导入 Live2D ZIP 模型包').copyWith(
+                  decoration: _inputDecoration(strings.noLive2dModel).copyWith(
                     prefixIcon: const Icon(Icons.view_in_ar_outlined),
                     suffixIcon: _isImportingLive2d
                         ? const Padding(
@@ -385,7 +402,7 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
                         : IconButton(
-                            tooltip: '导入 Live2D ZIP 模型包',
+                            tooltip: strings.importLive2dModel,
                             icon: const Icon(Icons.folder_open_outlined),
                             onPressed: _pickLive2dModel,
                           ),
@@ -397,7 +414,7 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
                   child: OutlinedButton.icon(
                     onPressed: _isImportingLive2d ? null : _installBundledMao,
                     icon: const Icon(Icons.download_for_offline_outlined),
-                    label: const Text('安装内置 Cubism 5 Mao 模型'),
+                    label: Text(strings.installMaoModel),
                   ),
                 ),
               ],
@@ -406,7 +423,7 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
             _buildSectionCard(
               theme,
               children: [
-                _buildFieldLabel(theme, '标签'),
+                _buildFieldLabel(theme, strings.tags),
                 const SizedBox(height: 8),
                 Wrap(
                   spacing: 8,
@@ -424,7 +441,7 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
                     ),
                     ActionChip(
                       avatar: const Icon(Icons.add, size: 18),
-                      label: const Text('添加标签'),
+                      label: Text(strings.addTag),
                       onPressed: () => _showAddTagDialog(theme),
                       side: BorderSide(
                         color: theme.colorScheme.outlineVariant,
@@ -453,7 +470,7 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
                         color: Colors.white,
                       ),
                     )
-                  : const Text('确认'),
+                  : Text(strings.confirm),
             ),
             const SizedBox(height: 32),
           ],
@@ -503,12 +520,13 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
   }
 
   Widget _buildGenderSelector(ThemeData theme) {
+    final strings = AppLocalizations.of(context);
     return Row(
       children: CharacterGender.values.map((g) {
         final label = switch (g) {
-          CharacterGender.male => '男性',
-          CharacterGender.female => '女性',
-          CharacterGender.other => '其他',
+          CharacterGender.male => strings.genderMale,
+          CharacterGender.female => strings.genderFemale,
+          CharacterGender.other => strings.genderOther,
         };
         final isSelected = _gender == g;
         return Padding(
@@ -539,14 +557,15 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
 
   void _showAddTagDialog(ThemeData theme) {
     _tagController.clear();
+    final strings = AppLocalizations.of(context);
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('添加标签'),
+        title: Text(strings.addTag),
         content: TextField(
           controller: _tagController,
           autofocus: true,
-          decoration: _inputDecoration('输入标签名称'),
+          decoration: _inputDecoration(strings.tagNameHint),
           onSubmitted: (_) {
             _addTag();
             Navigator.pop(ctx);
@@ -555,14 +574,14 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: const Text('取消'),
+            child: Text(strings.cancel),
           ),
           FilledButton(
             onPressed: () {
               _addTag();
               Navigator.pop(ctx);
             },
-            child: const Text('添加'),
+            child: Text(strings.addTag),
           ),
         ],
       ),

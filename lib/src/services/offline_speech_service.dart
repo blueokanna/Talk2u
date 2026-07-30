@@ -1,6 +1,4 @@
 import 'dart:async';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:talk2u/src/services/moss_tts_service.dart';
 import 'package:talk2u/src/services/sherpa_speech_service.dart';
@@ -88,6 +86,10 @@ class SpeechCapabilities {
   final String ttsVoice;
   final String ttsLocale;
   final String sttLocale;
+  final bool ttsHardwareVerified;
+  final bool sttHardwareVerified;
+  final String ttsProvider;
+  final String sttProvider;
   final List<SpeechVoice> ttsVoices;
 
   const SpeechCapabilities({
@@ -98,6 +100,10 @@ class SpeechCapabilities {
     this.ttsVoice = '',
     this.ttsLocale = '',
     this.sttLocale = '',
+    this.ttsHardwareVerified = false,
+    this.sttHardwareVerified = false,
+    this.ttsProvider = '',
+    this.sttProvider = '',
     this.ttsVoices = const [],
   });
 
@@ -110,6 +116,10 @@ class SpeechCapabilities {
         ttsVoice: value['ttsVoice'] as String? ?? '',
         ttsLocale: value['ttsLocale'] as String? ?? '',
         sttLocale: value['sttLocale'] as String? ?? '',
+        ttsHardwareVerified: value['ttsHardwareVerified'] == true,
+        sttHardwareVerified: value['sttHardwareVerified'] == true,
+        ttsProvider: value['ttsProvider'] as String? ?? '',
+        sttProvider: value['sttProvider'] as String? ?? '',
         ttsVoices: (value['ttsVoices'] as List? ?? const [])
             .whereType<Map>()
             .map(SpeechVoice.fromMap)
@@ -127,23 +137,14 @@ class OfflineSpeechService extends ChangeNotifier with WidgetsBindingObserver {
         .instance
         .recognitionResults
         .listen(_handleSherpaRecognition);
-    _subscription = _events.receiveBroadcastStream().listen(
-      _handleEvent,
-      onError: (Object error) {
-        lastError = error.toString();
-        notifyListeners();
-      },
-    );
   }
 
   static final instance = OfflineSpeechService._();
-  static const _methods = MethodChannel('talk2u/speech');
-  static const _events = EventChannel('talk2u/speech_events');
 
-  StreamSubscription<dynamic>? _subscription;
   StreamSubscription<String>? _sherpaRecognitionSubscription;
+  Future<void>? _startListeningOperation;
+  Future<void>? _stopListeningOperation;
   final _recognitionController = StreamController<String>.broadcast();
-  SpeechCapabilities _systemCapabilities = const SpeechCapabilities();
   double amplitude = 0;
   bool generating = false;
   bool speaking = false;
@@ -156,57 +157,34 @@ class OfflineSpeechService extends ChangeNotifier with WidgetsBindingObserver {
   bool sttModelDownloadScheduled = false;
   String? lastError;
   int _activeAnimationCueIndex = -1;
-  bool _usingMossTts = false;
-  bool _usingSherpaStt = false;
   int _spokenTextLength = 0;
-  String _spokenText = '';
   Timer? _animationTimelineTimer;
-  DateTime? _speechStartedAt;
   DateTime? _lastAnimationCueChangedAt;
   int _latestSpeechPosition = 0;
 
   Stream<String> get recognitionResults => _recognitionController.stream;
-  SpeechCapabilities get systemCapabilities => _systemCapabilities;
   SpeechCapabilities get capabilities {
-    final sherpa = SherpaSpeechService.instance;
     final moss = MossTtsService.instance;
+    final sherpa = SherpaSpeechService.instance;
     return SpeechCapabilities(
-      offlineTts: _systemCapabilities.offlineTts || moss.ready,
-      offlineStt: _systemCapabilities.offlineStt || sherpa.asrReady,
-      sttModelDownload: _systemCapabilities.sttModelDownload,
-      audioAmplitude: _systemCapabilities.audioAmplitude || moss.ready,
-      ttsVoice: moss.ready
-          ? moss.selectedVoice.displayLabel
-          : _systemCapabilities.ttsVoice,
-      ttsLocale: moss.ready
-          ? moss.selectedVoice.locale
-          : _systemCapabilities.ttsLocale,
-      sttLocale: _systemCapabilities.offlineStt
-          ? _systemCapabilities.sttLocale
-          : sherpa.asrReady
-          ? 'zh / en / yue / ja / ko'
-          : '',
-      ttsVoices: _systemCapabilities.ttsVoices,
+      offlineTts: moss.ready && moss.hardwareRuntimeAvailable,
+      offlineStt: sherpa.asrReady,
+      sttModelDownload: false,
+      audioAmplitude: moss.ready && moss.hardwareRuntimeAvailable,
+      ttsVoice: moss.ready ? moss.selectedVoice.displayLabel : '',
+      ttsLocale: moss.ready ? moss.selectedVoice.locale : '',
+      sttLocale: sherpa.asrReady ? 'zh-CN / en-US' : '',
+      ttsHardwareVerified: moss.hardwareAccelerationVerified,
+      sttHardwareVerified: sherpa.hardwareAccelerationVerified,
+      ttsProvider: moss.activeProvider,
+      sttProvider: sherpa.asrReady ? SherpaSpeechService.activeProvider : '',
     );
   }
 
   Future<void> initialize() async {
     await MossTtsService.instance.initialize();
     await SherpaSpeechService.instance.initialize();
-    if (defaultTargetPlatform != TargetPlatform.android) {
-      notifyListeners();
-      return;
-    }
-    try {
-      final value = await _methods.invokeMapMethod<dynamic, dynamic>(
-        'refreshCapabilities',
-      );
-      _systemCapabilities = SpeechCapabilities.fromMap(value ?? const {});
-      notifyListeners();
-    } on PlatformException catch (error) {
-      lastError = error.message;
-      notifyListeners();
-    }
+    notifyListeners();
   }
 
   Future<void> speak(String text) async {
@@ -214,39 +192,20 @@ class OfflineSpeechService extends ChangeNotifier with WidgetsBindingObserver {
     final plan = prepareSpeech(text);
     if (plan.spokenText.isEmpty) throw StateError('回复中没有可朗读文本');
     _spokenTextLength = plan.spokenText.length;
-    _spokenText = plan.spokenText;
     animationCues = inferAnimationCues(text);
     animationCue = 'neutral';
     _activeAnimationCueIndex = -1;
     animationCueRevision++;
     lastError = null;
     notifyListeners();
-    if (MossTtsService.instance.ready) {
-      try {
-        _usingMossTts = true;
-        await MossTtsService.instance.speak(plan.spokenText);
-        return;
-      } catch (error) {
-        if (defaultTargetPlatform != TargetPlatform.android ||
-            !_systemCapabilities.offlineTts) {
-          lastError = error.toString();
-          notifyListeners();
-          rethrow;
-        }
-      }
-    }
-    if (defaultTargetPlatform != TargetPlatform.android ||
-        !_systemCapabilities.offlineTts) {
-      throw StateError('未检测到可用的端侧 TTS 语音模型');
+    final moss = MossTtsService.instance;
+    if (!moss.ready || !moss.hardwareRuntimeAvailable) {
+      throw StateError('未检测到经过验证的 Qualcomm QNN MOSS-TTS 部署，已禁用 CPU/系统 TTS 兜底');
     }
     try {
-      _usingMossTts = false;
-      await _methods.invokeMethod<void>('speak', {
-        'text': plan.spokenText,
-        'style': _speechStyle(animationCues),
-      });
-    } on PlatformException catch (error) {
-      lastError = error.message ?? error.code;
+      await moss.speak(plan.spokenText);
+    } catch (error) {
+      lastError = error.toString();
       notifyListeners();
       rethrow;
     }
@@ -254,87 +213,71 @@ class OfflineSpeechService extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> stopSpeaking() async {
     _stopAnimationTimeline();
-    if (_usingMossTts) {
-      await MossTtsService.instance.stopSpeaking();
-    } else if (defaultTargetPlatform == TargetPlatform.android) {
-      await _methods.invokeMethod<void>('stopSpeaking');
-    }
+    await MossTtsService.instance.stopSpeaking();
     generating = false;
     notifyListeners();
   }
 
-  Future<void> startListening() async {
-    if (defaultTargetPlatform == TargetPlatform.android &&
-        _systemCapabilities.offlineStt) {
-      _usingSherpaStt = false;
-      try {
-        await _methods.invokeMethod<void>('startListening');
-        return;
-      } on PlatformException {
-        if (!SherpaSpeechService.instance.asrReady) rethrow;
-      }
+  Future<void> startListening() {
+    final activeStart = _startListeningOperation;
+    if (activeStart != null) return activeStart;
+    if (listening || _stopListeningOperation != null) return Future.value();
+    if (!SherpaSpeechService.instance.asrReady) {
+      throw StateError('请先安装 SenseVoice 中英文端侧识别模型');
     }
-    _usingSherpaStt = true;
-    await SherpaSpeechService.instance.startListening();
-  }
-
-  Future<void> stopListening() async {
-    if (_usingSherpaStt) {
-      await SherpaSpeechService.instance.stopListening();
-    } else if (defaultTargetPlatform == TargetPlatform.android) {
-      await _methods.invokeMethod<void>('stopListening');
-    }
-  }
-
-  Future<void> installOfflineTtsData() async {
-    if (defaultTargetPlatform != TargetPlatform.android) {
-      throw UnsupportedError('离线 TTS 数据安装入口仅适用于 Android');
-    }
-    await _methods.invokeMethod<void>('installOfflineTtsData');
-  }
-
-  Future<void> selectTtsVoice(String name) async {
-    if (defaultTargetPlatform != TargetPlatform.android) {
-      throw UnsupportedError('系统离线音色选择仅适用于 Android');
-    }
+    listening = true;
     lastError = null;
+    notifyListeners();
+    final operation = _startListeningOnce();
+    _startListeningOperation = operation;
+    return operation.whenComplete(() {
+      if (identical(_startListeningOperation, operation)) {
+        _startListeningOperation = null;
+      }
+    });
+  }
+
+  Future<void> _startListeningOnce() async {
     try {
-      final value = await _methods.invokeMapMethod<dynamic, dynamic>(
-        'selectTtsVoice',
-        {'name': name},
-      );
-      _systemCapabilities = SpeechCapabilities.fromMap(value ?? const {});
-      notifyListeners();
-    } on PlatformException catch (error) {
-      lastError = error.message ?? error.code;
+      if (!listening) return;
+      await SherpaSpeechService.instance.startListening();
+    } catch (error) {
+      listening = false;
+      lastError = error.toString();
       notifyListeners();
       rethrow;
     }
   }
 
-  Future<void> openVoiceInputSettings() async {
-    if (defaultTargetPlatform != TargetPlatform.android) {
-      throw UnsupportedError('离线语音识别设置入口仅适用于 Android');
+  Future<void> stopListening() {
+    final activeStop = _stopListeningOperation;
+    if (activeStop != null) return activeStop;
+    final pendingStart = _startListeningOperation;
+    if (!listening && pendingStart == null) return Future.value();
+    listening = false;
+    notifyListeners();
+    final operation = _stopListeningOnce(pendingStart);
+    _stopListeningOperation = operation;
+    return operation.whenComplete(() {
+      if (identical(_stopListeningOperation, operation)) {
+        _stopListeningOperation = null;
+      }
+    });
+  }
+
+  Future<void> _stopListeningOnce(Future<void>? pendingStart) async {
+    if (pendingStart != null) {
+      try {
+        await pendingStart;
+      } catch (_) {
+        return;
+      }
     }
-    await _methods.invokeMethod<void>('openVoiceInputSettings');
+    await SherpaSpeechService.instance.stopListening();
   }
 
   Future<void> downloadOfflineSttModel() async {
-    if (defaultTargetPlatform != TargetPlatform.android) {
-      throw UnsupportedError('端侧语音识别模型下载仅适用于 Android');
-    }
-    sttModelDownloadProgress = null;
-    sttModelDownloadScheduled = true;
-    lastError = null;
-    notifyListeners();
-    try {
-      await _methods.invokeMethod<String>('downloadOfflineSttModel');
-    } on PlatformException catch (error) {
-      sttModelDownloadScheduled = false;
-      lastError = error.message ?? error.code;
-      notifyListeners();
-      rethrow;
-    }
+    await SherpaSpeechService.instance.downloadAsr();
   }
 
   @override
@@ -683,14 +626,6 @@ class OfflineSpeechService extends ChangeNotifier with WidgetsBindingObserver {
     ].any(value.contains);
   }
 
-  static String _speechStyle(List<SpeechAnimationCue> cues) {
-    const supported = {'happy', 'sad', 'angry', 'shy', 'surprise', 'dramatic'};
-    for (final cue in cues) {
-      if (supported.contains(cue.cue)) return cue.cue;
-    }
-    return 'neutral';
-  }
-
   static List<_SpeechTextSegment> _speechTextSegments(String text) {
     const strong = '。！？；\n!?;.';
     const soft = '，、,：:';
@@ -788,112 +723,11 @@ class OfflineSpeechService extends ChangeNotifier with WidgetsBindingObserver {
     _lastAnimationCueChangedAt = now;
   }
 
-  void _startAnimationTimeline() {
-    _stopAnimationTimeline();
-    _speechStartedAt = DateTime.now();
-    _latestSpeechPosition = 0;
-    _lastAnimationCueChangedAt = null;
-    _activateAnimationCue(0, force: true);
-    if (animationCues.length < 2 || _spokenText.isEmpty) return;
-    final estimatedDuration = _estimatedSpeechDuration(_spokenText);
-    _animationTimelineTimer = Timer.periodic(
-      const Duration(milliseconds: 120),
-      (timer) {
-        if (!speaking || _speechStartedAt == null) {
-          timer.cancel();
-          return;
-        }
-        final elapsed = DateTime.now().difference(_speechStartedAt!);
-        final progress = (elapsed.inMilliseconds / estimatedDuration).clamp(
-          0.0,
-          1.0,
-        );
-        final estimatedPosition = (progress * _spokenTextLength).floor();
-        _activateAnimationCue(
-          estimatedPosition > _latestSpeechPosition
-              ? estimatedPosition
-              : _latestSpeechPosition,
-        );
-      },
-    );
-  }
-
-  int _estimatedSpeechDuration(String text) {
-    var milliseconds = 0;
-    for (final rune in text.runes) {
-      if ('。！？；，、.!?;,\n'.runes.contains(rune)) {
-        milliseconds += 180;
-      } else if (String.fromCharCode(rune).trim().isEmpty) {
-        milliseconds += 35;
-      } else if (rune >= 0x3400 && rune <= 0x9fff) {
-        milliseconds += 125;
-      } else {
-        milliseconds += 65;
-      }
-    }
-    return milliseconds.clamp(900, 600000).toInt();
-  }
-
   void _stopAnimationTimeline() {
     _animationTimelineTimer?.cancel();
     _animationTimelineTimer = null;
-    _speechStartedAt = null;
     _latestSpeechPosition = 0;
     _lastAnimationCueChangedAt = null;
-  }
-
-  void _handleEvent(dynamic raw) {
-    if (raw is! Map) return;
-    switch (raw['type']) {
-      case 'capabilities':
-        if (raw['value'] is Map) {
-          _systemCapabilities = SpeechCapabilities.fromMap(raw['value'] as Map);
-        }
-      case 'speechStart':
-        speaking = true;
-        _startAnimationTimeline();
-      case 'speechDone':
-        _stopAnimationTimeline();
-        speaking = false;
-        amplitude = 0;
-        _activeAnimationCueIndex = -1;
-      case 'speechRange':
-        _activateAnimationCue((raw['start'] as num?)?.toInt() ?? 0);
-      case 'amplitude':
-        amplitude = (raw['value'] as num?)?.toDouble().clamp(0, 1) ?? 0;
-      case 'listening':
-        listening = true;
-      case 'listeningEnd':
-        listening = false;
-      case 'recognitionResult':
-        final text = raw['text'] as String?;
-        if (text != null) {
-          recognizedText = text;
-          if (raw['final'] != false) _recognitionController.add(text);
-        }
-      case 'error':
-        _stopAnimationTimeline();
-        lastError = raw['message'] as String?;
-        speaking = false;
-        amplitude = 0;
-        _activeAnimationCueIndex = -1;
-      case 'recognitionError':
-        lastError = raw['message'] as String? ?? '离线语音识别错误: ${raw['code']}';
-        listening = false;
-      case 'sttModelDownloadScheduled':
-        sttModelDownloadScheduled = true;
-      case 'sttModelDownloadProgress':
-        sttModelDownloadScheduled = true;
-        sttModelDownloadProgress = (raw['value'] as num?)?.toInt();
-      case 'sttModelDownloadDone':
-        sttModelDownloadScheduled = false;
-        sttModelDownloadProgress = 100;
-        unawaited(initialize());
-      case 'sttModelDownloadError':
-        sttModelDownloadScheduled = false;
-        lastError = '端侧语音识别模型下载失败: ${raw['code']}';
-    }
-    notifyListeners();
   }
 
   void _handleSherpaRecognition(String text) {
@@ -903,18 +737,12 @@ class OfflineSpeechService extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void _handleSherpaState() {
-    if (_usingSherpaStt) {
-      listening = SherpaSpeechService.instance.listening;
-      lastError = SherpaSpeechService.instance.lastError;
-    }
+    listening = SherpaSpeechService.instance.listening;
+    lastError = SherpaSpeechService.instance.lastError;
     notifyListeners();
   }
 
   void _handleMossState() {
-    if (!_usingMossTts) {
-      notifyListeners();
-      return;
-    }
     final wasSpeaking = speaking;
     final moss = MossTtsService.instance;
     generating = moss.generating;
@@ -923,7 +751,6 @@ class OfflineSpeechService extends ChangeNotifier with WidgetsBindingObserver {
     if (speaking) {
       _animationTimelineTimer?.cancel();
       _animationTimelineTimer = null;
-      _speechStartedAt = null;
       _activateAnimationCue(
         (moss.playbackProgress * _spokenTextLength).floor(),
         force: !wasSpeaking && _activeAnimationCueIndex < 0,
@@ -945,7 +772,6 @@ class OfflineSpeechService extends ChangeNotifier with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     MossTtsService.instance.removeListener(_handleMossState);
     SherpaSpeechService.instance.removeListener(_handleSherpaState);
-    _subscription?.cancel();
     _sherpaRecognitionSubscription?.cancel();
     _recognitionController.close();
     super.dispose();

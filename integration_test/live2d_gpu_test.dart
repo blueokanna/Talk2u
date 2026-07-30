@@ -18,7 +18,7 @@ void main() {
         home: Scaffold(
           body: Live2dAvatar(
             modelPath:
-                'file:///android_asset/flutter_assets/model/mao/runtime/'
+                'file:///android_asset/flutter_assets/model/Live2d/mao/runtime/'
                 'mao_pro.model3.json',
           ),
         ),
@@ -51,8 +51,14 @@ void main() {
     debugPrint('Talk2U Live2D diagnostics: $values');
 
     expect(
-      values.any((value) => value == 'webgl2' || value == 'webgl1'),
+      values.any(
+        (value) =>
+            value.contains('Cubism') &&
+            value.contains('OpenGL') &&
+            value.contains('Vulkan'),
+      ),
       isTrue,
+      reason: 'Live2D did not use the native OpenGL-to-Vulkan path',
     );
     expect(
       values.any((value) => value.toLowerCase().contains('swiftshader')),
@@ -63,16 +69,6 @@ void main() {
       values.any((value) => value.toLowerCase().contains('adreno')),
       isTrue,
       reason: 'Hardware GPU name was not reported',
-    );
-    expect(
-      values.any((value) => value.startsWith('通过 1.')),
-      isTrue,
-      reason: 'Vulkan native preflight did not pass',
-    );
-    expect(
-      values.any((value) => value.startsWith('通过 ES ')),
-      isTrue,
-      reason: 'OpenGL ES native fallback preflight did not pass',
     );
   });
 
@@ -151,16 +147,17 @@ void main() {
   testWidgets('SM8850 MOSS synthesizes and plays a verified WAV', (
     tester,
   ) async {
+    const accelerator = MethodChannel('talk2u/accelerator_telemetry');
+    await accelerator.invokeMapMethod<Object?, Object?>('sample');
     final moss = MossTtsService.instance;
     await moss.initialize();
     expect(moss.runtimeReady, isTrue);
-    if (!moss.ready) {
-      debugPrint('Talk2U MOSS diagnostics: skipped because model is absent');
-      return;
-    }
+    expect(moss.ready, isTrue, reason: 'Prepared MOSS deployment is absent');
 
     var sawPlayback = false;
     var peakAmplitude = 0.0;
+    var peakHtpDuty = 0.0;
+    var htpInvocations = 0;
     void observePlayback() {
       sawPlayback = sawPlayback || moss.speaking;
       if (moss.playbackAmplitude > peakAmplitude) {
@@ -174,6 +171,14 @@ void main() {
       for (var attempt = 0; attempt < 240; attempt++) {
         await tester.pump(const Duration(milliseconds: 500));
         observePlayback();
+        final sample = await accelerator.invokeMapMethod<Object?, Object?>(
+          'sample',
+        );
+        expect(sample?['globalChipUtilization'], isFalse);
+        final duty = sample?['percent'];
+        if (duty is num && duty > peakHtpDuty) peakHtpDuty = duty.toDouble();
+        final invocations = sample?['invocations'];
+        if (invocations is num) htpInvocations = invocations.toInt();
         if (!moss.generating && !moss.speaking) break;
       }
 
@@ -182,14 +187,18 @@ void main() {
       expect(moss.speaking, isFalse, reason: 'MOSS playback timed out');
       expect(sawPlayback, isTrue);
       expect(peakAmplitude, greaterThan(0.01));
+      expect(peakHtpDuty, greaterThan(0));
+      expect(htpInvocations, greaterThan(0));
       debugPrint(
         'Talk2U MOSS diagnostics: provider=${moss.activeProvider}, '
         'acceleration=${moss.accelerationLabel}, peak=$peakAmplitude',
       );
-      expect(moss.activeProvider, anyOf('NNAPI_ACCELERATOR', 'CPU'));
-      if (moss.activeProvider == 'CPU') {
-        expect(moss.accelerationLabel, contains('CPU/NEON 回退'));
-      }
+      expect(
+        moss.activeProvider,
+        'QNN_HTP(prefill,decode)+ORT_CPU(sampler,codec)',
+      );
+      expect(moss.hardwareAccelerationVerified, isTrue);
+      expect(moss.accelerationLabel, 'Qualcomm QNN HTP + ORT CPU');
     } finally {
       moss.removeListener(observePlayback);
       await moss.stopSpeaking();

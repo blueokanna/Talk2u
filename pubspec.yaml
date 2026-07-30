@@ -30,6 +30,9 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  intl: any
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
@@ -44,12 +47,10 @@ dependencies:
   share_plus: ^10.0.0
   freezed_annotation: ^3.1.0
   crypto: ^3.0.6
-  dart_sentencepiece_tokenizer: ^1.3.2
   archive: ^4.0.9
   path: ^1.9.0
   audioplayers: ^6.5.1
   record: ^6.0.0
-  sherpa_onnx: ^1.13.4
   webview_cef:
     path: third_party/webview_cef_linux
   webview_windows: ^0.4.0
@@ -93,6 +94,7 @@ flutter_launcher_icons:
 
 # The following section is specific to Flutter packages.
 flutter:
+  generate: true
 
   # The following line ensures that the Material Icons font is
   # included with your application, so that you can use the icons in
@@ -100,13 +102,11 @@ flutter:
   uses-material-design: true
   assets:
     - assets/Talk2U.png
-    - assets/live2d/
-    - assets/live2d/vendor/
-    - model/mao/ReadMe.txt
-    - model/mao/runtime/
-    - model/mao/runtime/expressions/
-    - model/mao/runtime/motions/
-    - model/mao/runtime/mao_pro.4096/
+    - model/Live2d/mao/ReadMe.txt
+    - model/Live2d/mao/runtime/
+    - model/Live2d/mao/runtime/expressions/
+    - model/Live2d/mao/runtime/motions/
+    - model/Live2d/mao/runtime/mao_pro.4096/
 
   # To add assets to your application, add an assets section, like this:
   # assets:

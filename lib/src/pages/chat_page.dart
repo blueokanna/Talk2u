@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:talk2u/l10n/generated/app_localizations.dart';
 import 'package:talk2u/src/state/chat_state.dart';
 import 'package:talk2u/src/rust/api/data_models.dart';
 import 'package:talk2u/src/widgets/message_bubble.dart';
@@ -41,7 +42,6 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   bool _callTransitioning = false;
   bool _callRestartScheduled = false;
   int _callGeneration = 0;
-
   @override
   void initState() {
     super.initState();
@@ -173,6 +173,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   }
 
   Future<void> _toggleListening() async {
+    final strings = AppLocalizations.of(context);
     final speech = OfflineSpeechService.instance;
     try {
       if (speech.listening) {
@@ -193,12 +194,15 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       if (!mounted) return;
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('离线语音识别不可用: $error')));
+      ).showSnackBar(
+        SnackBar(content: Text(strings.offlineSttUnavailable('$error'))),
+      );
     }
   }
 
   Future<void> _toggleCallMode() async {
     if (_callTransitioning) return;
+    final strings = AppLocalizations.of(context);
     _callTransitioning = true;
     try {
       if (_callMode) {
@@ -208,7 +212,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       final speech = OfflineSpeechService.instance;
       await speech.initialize();
       if (!speech.capabilities.offlineStt || !speech.capabilities.offlineTts) {
-        throw StateError('持续通话需要可用的端侧语音识别和语音合成');
+        throw StateError(strings.continuousCallRequiresSpeech);
       }
       await speech.stopSpeaking();
       if (speech.listening) await speech.stopListening();
@@ -223,7 +227,9 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       setState(() => _callMode = false);
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('无法开始持续通话: $error')));
+      ).showSnackBar(
+        SnackBar(content: Text(strings.continuousCallStartFailed('$error'))),
+      );
     } finally {
       _callTransitioning = false;
     }
@@ -313,6 +319,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     }
     final speech = OfflineSpeechService.instance;
     if (speech.listening) return;
+    final strings = AppLocalizations.of(context);
     try {
       await speech.startListening();
     } catch (error) {
@@ -320,7 +327,9 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       setState(() => _callMode = false);
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('持续通话已停止: $error')));
+      ).showSnackBar(
+        SnackBar(content: Text(strings.continuousCallStopped('$error'))),
+      );
     }
   }
 
@@ -342,11 +351,12 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   }
 
   Future<void> _speakReply(String reply) async {
+    final strings = AppLocalizations.of(context);
     try {
       final speech = OfflineSpeechService.instance;
       if (!speech.capabilities.offlineTts) await speech.initialize();
       if (!speech.capabilities.offlineTts) {
-        throw StateError('未检测到可用的端侧 TTS 语音包');
+        throw StateError(strings.noOfflineTtsVoice);
       }
       if (speech.speaking || speech.generating) await speech.stopSpeaking();
       await speech.speak(reply);
@@ -354,11 +364,14 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       if (!mounted) return;
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('离线语音合成不可用: $error')));
+      ).showSnackBar(
+        SnackBar(content: Text(strings.offlineTtsUnavailable('$error'))),
+      );
     }
   }
 
   Future<void> _importLive2dModel() async {
+    final strings = AppLocalizations.of(context);
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
       allowedExtensions: const ['zip'],
@@ -382,13 +395,15 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
         _modelOverrideCharacterId = characterId;
       });
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Live2D 模型已切换，共发现 ${modelPaths.length} 个模型')),
+        SnackBar(content: Text(strings.live2dModelsImported(modelPaths.length))),
       );
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('Live2D 模型导入失败: $error')));
+      ).showSnackBar(
+        SnackBar(content: Text(strings.live2dModelImportFailed('$error'))),
+      );
     } finally {
       if (mounted) setState(() => _isImportingLive2d = false);
     }
@@ -396,10 +411,11 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
 
   Future<String?> _selectImportedModel(List<String> modelPaths) async {
     if (modelPaths.length == 1) return modelPaths.first;
+    final strings = AppLocalizations.of(context);
     return showDialog<String>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: const Text('选择 Live2D 模型'),
+        title: Text(strings.chooseLive2dModel),
         content: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 420, maxHeight: 360),
           child: ListView.separated(
@@ -425,7 +441,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('取消'),
+            child: Text(strings.cancel),
           ),
         ],
       ),
@@ -453,6 +469,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   void _showChatOptions() {
     final chatState = context.read<ChatState>();
     final theme = Theme.of(context);
+    final strings = AppLocalizations.of(context);
 
     showModalBottomSheet(
       context: context,
@@ -498,8 +515,8 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                           Icons.refresh_rounded,
                           color: theme.colorScheme.primary,
                         ),
-                        title: const Text('重启'),
-                        subtitle: const Text('清除对话记录，保留角色设定和开场白'),
+                        title: Text(strings.restart),
+                        subtitle: Text(strings.restartConversationSubtitle),
                         contentPadding: EdgeInsets.zero,
                         onTap: () {
                           Navigator.pop(ctx);
@@ -510,7 +527,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                     const Divider(height: 24),
 
                     Text(
-                      '对话风格',
+                      strings.conversationStyle,
                       style: theme.textTheme.titleSmall?.copyWith(
                         fontWeight: FontWeight.w600,
                       ),
@@ -518,10 +535,11 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                     const SizedBox(height: 8),
                     Wrap(
                       spacing: 8,
+                      runSpacing: 8,
                       children: [
                         _buildStyleChip(
                           theme,
-                          '自由',
+                          strings.styleFree,
                           DialogueStyle.free,
                           chatState.dialogueStyle,
                           (style) {
@@ -531,7 +549,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                         ),
                         _buildStyleChip(
                           theme,
-                          '纯对话',
+                          strings.styleDialogue,
                           DialogueStyle.sayOnly,
                           chatState.dialogueStyle,
                           (style) {
@@ -541,7 +559,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                         ),
                         _buildStyleChip(
                           theme,
-                          '纯动作',
+                          strings.styleAction,
                           DialogueStyle.doOnly,
                           chatState.dialogueStyle,
                           (style) {
@@ -551,7 +569,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                         ),
                         _buildStyleChip(
                           theme,
-                          '混合（自动识别）',
+                          strings.styleMixed,
                           DialogueStyle.mixed,
                           chatState.dialogueStyle,
                           (style) {
@@ -565,7 +583,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                     const Divider(height: 24),
 
                     Text(
-                      '平台与模型',
+                      strings.providerAndModel,
                       style: theme.textTheme.titleSmall?.copyWith(
                         fontWeight: FontWeight.w600,
                       ),
@@ -574,10 +592,10 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                     DropdownButtonFormField<String>(
                       initialValue: chatState.selectedProviderId,
                       isExpanded: true,
-                      decoration: const InputDecoration(
-                        labelText: 'API 平台',
-                        border: OutlineInputBorder(),
-                        prefixIcon: Icon(Icons.hub_outlined),
+                      decoration: InputDecoration(
+                        labelText: strings.apiProvider,
+                        border: const OutlineInputBorder(),
+                        prefixIcon: const Icon(Icons.hub_outlined),
                       ),
                       items: chatState.providers
                           .map(
@@ -586,7 +604,9 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                               child: Text(
                                 provider.isConfigured
                                     ? provider.name
-                                    : '${provider.name}（未配置）',
+                                    : strings.providerNotConfigured(
+                                        provider.name,
+                                      ),
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
@@ -613,8 +633,9 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                         children: [
                           _buildModelOption(
                             theme,
-                            chatState.selectedProvider?.chatModel ?? '未配置',
-                            '对话模型',
+                            chatState.selectedProvider?.chatModel ??
+                                strings.notConfigured,
+                            strings.chatModel,
                             chatState.selectedProvider?.chatModel ?? '',
                             false,
                           ),
@@ -623,7 +644,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                             _buildModelOption(
                               theme,
                               chatState.selectedProvider!.thinkingModel!,
-                              '推理模型，自动启用推理管线',
+                              strings.reasoningModelHint,
                               chatState.selectedProvider!.thinkingModel!,
                               true,
                             ),
@@ -702,6 +723,12 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       selected: isSelected,
       onSelected: (_) => onSelected(style),
       selectedColor: theme.colorScheme.primaryContainer,
+      checkmarkColor: theme.colorScheme.onPrimaryContainer,
+      labelStyle: theme.textTheme.labelLarge?.copyWith(
+        color: isSelected
+            ? theme.colorScheme.onPrimaryContainer
+            : theme.colorScheme.onSurfaceVariant,
+      ),
       side: BorderSide(
         color: isSelected
             ? theme.colorScheme.primary
@@ -717,6 +744,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     String modelId,
     bool supportsThinking,
   ) {
+    final strings = AppLocalizations.of(context);
     return ListTile(
       contentPadding: const EdgeInsets.symmetric(horizontal: 4),
       leading: Radio<String>(value: modelId),
@@ -732,7 +760,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                 borderRadius: BorderRadius.circular(4),
               ),
               child: Text(
-                '思考',
+                strings.thinking,
                 style: theme.textTheme.labelSmall?.copyWith(
                   color: theme.colorScheme.onTertiaryContainer,
                 ),
@@ -751,15 +779,16 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   }
 
   void _confirmRestartStory() {
+    final strings = AppLocalizations.of(context);
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('重启剧情'),
-        content: const Text('确定要重启剧情吗？所有对话记录将被清除，但角色设定和开场白会保留。'),
+        title: Text(strings.restartStory),
+        content: Text(strings.restartStoryConfirm),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: const Text('取消'),
+            child: Text(strings.cancel),
           ),
           FilledButton(
             onPressed: () {
@@ -769,7 +798,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
             style: FilledButton.styleFrom(
               backgroundColor: Theme.of(ctx).colorScheme.error,
             ),
-            child: const Text('重启'),
+            child: Text(strings.restart),
           ),
         ],
       ),
@@ -779,8 +808,16 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final strings = AppLocalizations.of(context);
 
     return Scaffold(
+      // The IME belongs to the Flutter control layer. Keeping the window and
+      // Scaffold body stable prevents the Live2D AHardwareBuffer/Vulkan
+      // swapchain underneath it from being resized and recreated.
+      resizeToAvoidBottomInset: false,
+      onDrawerChanged: (isOpened) {
+        if (isOpened) FocusManager.instance.primaryFocus?.unfocus();
+      },
       appBar: AppBar(
         title: Consumer<ChatState>(
           builder: (context, state, _) {
@@ -843,9 +880,9 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                 return IconButton(
                   tooltip: speech.capabilities.offlineTts
                       ? (speech.speaking || speech.generating
-                            ? '停止朗读'
-                            : '离线朗读上一条回复')
-                      : '设备无离线 TTS 语音包',
+                            ? strings.stopReading
+                            : strings.readLastReply)
+                      : strings.noOfflineTtsPack,
                   onPressed: speech.capabilities.offlineTts
                       ? () => _speakLastReply(state)
                       : null,
@@ -867,7 +904,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                   color: isThinking ? theme.colorScheme.primary : null,
                 ),
                 tooltip:
-                    '${state.selectedProvider?.name ?? '未配置'} · ${state.selectedModel}',
+                    '${state.selectedProvider?.name ?? strings.notConfigured} · ${state.selectedModel}',
                 onPressed: () {
                   state.setEnableThinking(!state.enableThinking);
                 },
@@ -876,7 +913,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
           ),
           IconButton(
             icon: const Icon(Icons.person_rounded),
-            tooltip: '角色列表',
+            tooltip: strings.characterList,
             onPressed: _openCharacterList,
           ),
           IconButton(
@@ -915,15 +952,18 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                       Icons.settings_rounded,
                       color: Theme.of(context).colorScheme.primary,
                     ),
-                    title: const Text('设置'),
-                    subtitle: const Text('API 密钥、模型配置'),
+                    title: Text(strings.settings),
+                    subtitle: Text(strings.settingsSubtitle),
                     onTap: () async {
                       Navigator.pop(context);
+                      FocusManager.instance.primaryFocus?.unfocus();
                       await Navigator.push(
                         context,
-                        MaterialPageRoute(builder: (_) => const SettingsPage()),
+                        MaterialPageRoute(
+                          builder: (_) => const SettingsPage(),
+                        ),
                       );
-                      await chatState.reloadProviderSettings();
+                      if (mounted) await chatState.reloadProviderSettings();
                     },
                   ),
                 ],
@@ -950,16 +990,24 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
               ? Live2dModelPaths.bundledMao
               : configuredPath;
           final keyboardVisible = MediaQuery.viewInsetsOf(context).bottom > 0;
-          return Column(
+          final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
+          return Stack(
+            fit: StackFit.expand,
             children: [
-              Expanded(
-                child: Stack(
+              Live2dAvatar(
+                key: ValueKey(modelPath),
+                modelPath: modelPath,
+              ),
+              AnimatedPadding(
+                duration: const Duration(milliseconds: 160),
+                curve: Curves.easeOutCubic,
+                padding: EdgeInsets.only(bottom: keyboardInset),
+                child: Column(
+                  children: [
+                    Expanded(
+                      child: Stack(
                   fit: StackFit.expand,
                   children: [
-                    Live2dAvatar(
-                      key: ValueKey(modelPath),
-                      modelPath: modelPath,
-                    ),
                     Positioned(
                       left: 12,
                       top: 12,
@@ -968,7 +1016,9 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             IconButton.filledTonal(
-                              tooltip: _showTranscript ? '隐藏对话' : '查看对话',
+                              tooltip: _showTranscript
+                                  ? strings.hideConversation
+                                  : strings.showConversation,
                               onPressed: () => setState(
                                 () => _showTranscript = !_showTranscript,
                               ),
@@ -980,7 +1030,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                             ),
                             const SizedBox(width: 8),
                             IconButton.filledTonal(
-                              tooltip: '导入 Live2D ZIP 模型',
+                              tooltip: strings.importLive2dModel,
                               onPressed: _isImportingLive2d
                                   ? null
                                   : _importLive2dModel,
@@ -995,7 +1045,9 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                             ),
                             const SizedBox(width: 8),
                             IconButton.filled(
-                              tooltip: _callMode ? '结束持续通话' : '开始持续通话',
+                              tooltip: _callMode
+                                  ? strings.endContinuousCall
+                                  : strings.startContinuousCall,
                               onPressed: _callTransitioning
                                   ? null
                                   : _toggleCallMode,
@@ -1044,38 +1096,43 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                           ),
                         ),
                       ),
+                          ],
+                        ),
+                      ),
+                    _buildExecutionStatus(chatState),
+                    if (chatState.errorMessage != null)
+                      keyboardVisible
+                          ? ConstrainedBox(
+                              constraints: const BoxConstraints(maxHeight: 112),
+                              child: SingleChildScrollView(
+                                child: _buildErrorBanner(chatState),
+                              ),
+                            )
+                          : _buildErrorBanner(chatState),
+                    AnimatedBuilder(
+                      animation: OfflineSpeechService.instance,
+                      builder: (context, _) {
+                        final speech = OfflineSpeechService.instance;
+                        return ChatInput(
+                          isStreaming: chatState.isStreaming,
+                          onSend: _handleSend,
+                          onStop: () {
+                            unawaited(
+                              OfflineSpeechService.instance.stopSpeaking(),
+                            );
+                            unawaited(chatState.stopGeneration());
+                          },
+                          onVoiceInput: _toggleListening,
+                          isListening: speech.listening,
+                          voiceEnabled: speech.capabilities.offlineStt,
+                          allowVoiceDuringStreaming: _callMode,
+                          dictatedText: speech.recognizedText,
+                          maxLines: keyboardVisible ? 3 : 5,
+                        );
+                      },
+                    ),
                   ],
                 ),
-              ),
-              _buildExecutionStatus(chatState),
-              if (chatState.errorMessage != null)
-                keyboardVisible
-                    ? ConstrainedBox(
-                        constraints: const BoxConstraints(maxHeight: 112),
-                        child: SingleChildScrollView(
-                          child: _buildErrorBanner(chatState),
-                        ),
-                      )
-                    : _buildErrorBanner(chatState),
-              AnimatedBuilder(
-                animation: OfflineSpeechService.instance,
-                builder: (context, _) {
-                  final speech = OfflineSpeechService.instance;
-                  return ChatInput(
-                    isStreaming: chatState.isStreaming,
-                    onSend: _handleSend,
-                    onStop: () {
-                      unawaited(OfflineSpeechService.instance.stopSpeaking());
-                      unawaited(chatState.stopGeneration());
-                    },
-                    onVoiceInput: _toggleListening,
-                    isListening: speech.listening,
-                    voiceEnabled: speech.capabilities.offlineStt,
-                    allowVoiceDuringStreaming: _callMode,
-                    dictatedText: speech.recognizedText,
-                    maxLines: keyboardVisible ? 3 : 5,
-                  );
-                },
               ),
             ],
           );
@@ -1085,6 +1142,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   }
 
   Widget _buildExecutionStatus(ChatState chatState) {
+    final strings = AppLocalizations.of(context);
     return AnimatedBuilder(
       animation: Listenable.merge([
         OfflineLlmService.instance,
@@ -1100,31 +1158,21 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
           items.add((
             icon: llm.hardwareAccelerationVerified
                 ? Icons.memory
-                : llm.usingCpuFallback
-                ? Icons.developer_board_outlined
                 : Icons.pending_outlined,
-            label: 'LLM · ${llm.accelerationDescription}',
+            label: strings.llmRoute(llm.accelerationDescription),
             color: llm.hardwareAccelerationVerified
                 ? colors.primary
-                : llm.usingCpuFallback
-                ? colors.tertiary
                 : colors.onSurfaceVariant,
           ));
         }
         if (moss.ready) {
-          final cpuFallback =
-              moss.providerMeasured && moss.activeProvider == 'CPU';
           items.add((
             icon: moss.hardwareAccelerationVerified
                 ? Icons.graphic_eq
-                : cpuFallback
-                ? Icons.volume_up_outlined
                 : Icons.pending_outlined,
-            label: 'TTS · ${moss.accelerationLabel}',
+            label: strings.ttsRoute(moss.accelerationLabel),
             color: moss.hardwareAccelerationVerified
                 ? colors.primary
-                : cpuFallback
-                ? colors.tertiary
                 : colors.onSurfaceVariant,
           ));
         }
@@ -1175,6 +1223,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
 
   Widget _buildTranscriptPanel(ChatState chatState) {
     final theme = Theme.of(context);
+    final strings = AppLocalizations.of(context);
     return ColoredBox(
       color: theme.colorScheme.surface.withValues(alpha: 0.94),
       child: Column(
@@ -1184,9 +1233,14 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
             child: Row(
               children: [
                 const SizedBox(width: 16),
-                Expanded(child: Text('对话', style: theme.textTheme.titleSmall)),
+                Expanded(
+                  child: Text(
+                    strings.conversation,
+                    style: theme.textTheme.titleSmall,
+                  ),
+                ),
                 IconButton(
-                  tooltip: '隐藏对话',
+                  tooltip: strings.hideConversation,
                   onPressed: () => setState(() => _showTranscript = false),
                   icon: const Icon(Icons.close),
                 ),
@@ -1232,6 +1286,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
 
   Widget _buildEmptyState() {
     final theme = Theme.of(context);
+    final strings = AppLocalizations.of(context);
     return LayoutBuilder(
       builder: (context, constraints) {
         final minimumHeight = (constraints.maxHeight - 32)
@@ -1252,14 +1307,14 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                   ),
                   const SizedBox(height: 16),
                   Text(
-                    '开始新的对话',
+                    strings.startNewConversation,
                     style: theme.textTheme.titleMedium?.copyWith(
                       color: theme.colorScheme.outline,
                     ),
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    '输入消息开始聊天，或选择一个角色',
+                    strings.startNewConversationHint,
                     textAlign: TextAlign.center,
                     style: theme.textTheme.bodyMedium?.copyWith(
                       color: theme.colorScheme.outline.withValues(alpha: 0.7),
@@ -1269,7 +1324,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                   FilledButton.tonalIcon(
                     onPressed: _openCharacterList,
                     icon: const Icon(Icons.person_add_rounded),
-                    label: const Text('选择角色'),
+                    label: Text(strings.chooseCharacter),
                   ),
                 ],
               ),
@@ -1282,15 +1337,8 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
 
   Widget _buildErrorBanner(ChatState chatState) {
     final theme = Theme.of(context);
+    final strings = AppLocalizations.of(context);
     final errorMsg = chatState.errorMessage ?? '';
-    final isDetailedError =
-        errorMsg.contains('API') ||
-        errorMsg.contains('token') ||
-        errorMsg.contains('超时') ||
-        errorMsg.contains('连接') ||
-        errorMsg.contains('status') ||
-        errorMsg.contains('尝试') ||
-        errorMsg.contains('网络');
     return AnimatedSize(
       duration: const Duration(milliseconds: 200),
       curve: Curves.easeOutCubic,
@@ -1319,7 +1367,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                         style: theme.textTheme.bodySmall?.copyWith(
                           color: theme.colorScheme.onErrorContainer,
                         ),
-                        maxLines: isDetailedError ? 8 : 4,
+                        maxLines: 8,
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
@@ -1341,7 +1389,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                         TextButton.icon(
                           onPressed: _handleRetry,
                           icon: const Icon(Icons.refresh, size: 18),
-                          label: const Text('重试'),
+                          label: Text(strings.retry),
                           style: TextButton.styleFrom(
                             foregroundColor: theme.colorScheme.error,
                             padding: const EdgeInsets.symmetric(horizontal: 12),

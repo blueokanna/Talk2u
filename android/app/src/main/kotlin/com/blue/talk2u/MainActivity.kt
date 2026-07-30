@@ -1,32 +1,17 @@
 package com.blue.talk2u
 
-import android.Manifest
 import android.app.ActivityManager
 import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
-import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
-import android.media.AudioFormat
 import android.os.Build
 import android.os.Bundle
 import android.os.StatFs
-import android.os.SystemClock
-import android.provider.Settings
-import android.speech.ModelDownloadListener
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
-import android.speech.tts.TextToSpeech
-import android.speech.tts.UtteranceProgressListener
-import android.speech.tts.Voice
 import android.util.Log
-import androidx.core.app.ActivityCompat
-import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
-import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
@@ -34,36 +19,13 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.Locale
-import java.util.concurrent.CancellationException
 import java.util.concurrent.Executors
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.ZipInputStream
-import kotlin.math.sqrt
 import org.json.JSONArray
 import org.json.JSONObject
 
-class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
-    private data class TtsSegment(
-        val offset: Int,
-        val first: Boolean,
-        val last: Boolean,
-    )
-
-    private data class TtsChunk(
-        val offset: Int,
-        val text: String,
-        val rate: Float,
-        val pitch: Float,
-        val volume: Float,
-    )
-
-    private data class TtsProsody(
-        val rate: Float,
-        val pitchOffset: Float,
-        val volume: Float,
-    )
-
+class MainActivity : FlutterActivity() {
     companion object {
         init {
             System.loadLibrary("rust_lib_talk2u")
@@ -72,41 +34,32 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
 
     private external fun initializeRustTls(context: Context): Boolean
 
-    private val speechChannelName = "talk2u/speech"
-    private val speechEventsName = "talk2u/speech_events"
     private val live2dModelsChannelName = "talk2u/live2d_models"
     private val llmRuntimeChannelName = "talk2u/llm_runtime"
     private val mossTtsChannelName = "talk2u/moss_tts"
-    private val recordAudioRequest = 4102
-    private val speechPreferences by lazy {
-        getSharedPreferences("talk2u_speech", Context.MODE_PRIVATE)
-    }
-
-    private var textToSpeech: TextToSpeech? = null
-    private var ttsReady = false
-    private var selectedTtsVoiceName = ""
-    private var selectedTtsLocale = ""
-    private var baseTtsPitch = 1.0f
-    private var speechRecognizer: SpeechRecognizer? = null
-    private var modelDownloadRecognizer: SpeechRecognizer? = null
-    private var eventSink: EventChannel.EventSink? = null
-    private var pendingRecognitionResult: MethodChannel.Result? = null
-    @Volatile private var ttsAudioEncoding = AudioFormat.ENCODING_PCM_16BIT
-    @Volatile private var lastAmplitudeEmitAt = 0L
-    @Volatile private var loggedTtsAmplitude = false
-    private var ttsInitialized = false
-    private val ttsSegments = ConcurrentHashMap<String, TtsSegment>()
+    private val acceleratorTelemetryChannelName = "talk2u/accelerator_telemetry"
+    private val mossImportRequest = 4203
+    private val modelStore by lazy { ModelStore(applicationContext) }
     private val mossExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "talk2u-moss-tts").apply { priority = Thread.NORM_PRIORITY - 1 }
     }
     private val llmExecutor = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "talk2u-qwen3-genie").apply { priority = Thread.NORM_PRIORITY - 1 }
+        Thread(runnable, "talk2u-qwen3-qairt").apply { priority = Thread.NORM_PRIORITY - 1 }
     }
-    private val llmSessionOwner = GenieRuntimeBridge.newOwner()
+    private val asrExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "talk2u-sensevoice-qnn").apply { priority = Thread.NORM_PRIORITY - 1 }
+    }
+    private val genieXRuntime by lazy { GenieXRuntime(applicationContext) }
+    private val senseVoiceRuntime by lazy { SenseVoiceQnnRuntime(applicationContext) }
     @Volatile private var mossCancellation = AtomicBoolean(false)
     @Volatile private var activityDestroyed = false
-    private var mossEngine: MossOnnxEngine? = null
-    private var mossEngineRoot: String? = null
+    @Volatile private var mossInitializing = false
+    @Volatile private var mossInitializationStage = "idle"
+    @Volatile private var mossInitializationError: String? = null
+    @Volatile private var mossEngine: NativeMossRuntime? = null
+    @Volatile private var mossEngineRoot: String? = null
+    private var pendingMossImportResult: MethodChannel.Result? = null
+    private val acceleratorTelemetrySampler = AcceleratorTelemetry.Sampler()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         val tlsReady = runCatching { initializeRustTls(applicationContext) }
@@ -127,60 +80,20 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
                 Log.i("Talk2U/GPU", GpuBackendProbe.diagnostics().toString())
             }, "talk2u-gpu-probe").start()
         }
-        textToSpeech = TextToSpeech(this, this)
-
-        EventChannel(flutterEngine.dartExecutor.binaryMessenger, speechEventsName)
-            .setStreamHandler(object : EventChannel.StreamHandler {
-                override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
-                    eventSink = events
-                }
-
-                override fun onCancel(arguments: Any?) {
-                    eventSink = null
-                }
-            })
-
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, speechChannelName)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, acceleratorTelemetryChannelName)
             .setMethodCallHandler { call, result ->
-                when (call.method) {
-                    "capabilities" -> result.success(capabilities())
-                    "refreshCapabilities" -> {
-                        refreshSpeechCapabilities()
-                        result.success(capabilities())
-                    }
-                    "selectTtsVoice" -> selectTtsVoice(
-                        call.argument<String>("name").orEmpty(),
-                        result,
-                    )
-                    "speak" -> speak(
-                        call.argument<String>("text").orEmpty(),
-                        call.argument<String>("style").orEmpty(),
-                        result,
-                    )
-                    "stopSpeaking" -> {
-                        textToSpeech?.stop()
-                        emit(mapOf("type" to "amplitude", "value" to 0.0))
-                        emit(mapOf("type" to "speechDone"))
-                        result.success(null)
-                    }
-                    "startListening" -> startListening(result)
-                    "stopListening" -> {
-                        speechRecognizer?.stopListening()
-                        result.success(null)
-                    }
-                    "installOfflineTtsData" -> launchSpeechSettings(
-                        TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA,
-                        result,
-                    )
-                    "openVoiceInputSettings" -> launchSpeechSettings(
-                        Settings.ACTION_VOICE_INPUT_SETTINGS,
-                        result,
-                    )
-                    "downloadOfflineSttModel" -> requestOfflineSttModel(result)
-                    else -> result.notImplemented()
+                if (call.method != "sample") {
+                    result.notImplemented()
+                    return@setMethodCallHandler
                 }
+                val mossTelemetry = runCatching { mossEngine?.telemetry() }.getOrNull()
+                result.success(
+                    acceleratorTelemetrySampler.sample(
+                        qnnReady = QnnRuntime.status.ready,
+                        moss = mossTelemetry,
+                    ),
+                )
             }
-
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, live2dModelsChannelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -200,83 +113,117 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
                 }
             }
 
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, llmRuntimeChannelName)
+        val llmRuntimeChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            llmRuntimeChannelName,
+        )
+        llmRuntimeChannel
             .setMethodCallHandler { call, result ->
                 when (call.method) {
-                    "capabilities" -> result.success(llmRuntimeCapabilities())
-                    "load" -> {
-                        val root = secureAppModelRoot(call.argument<String>("modelRoot"))
-                        if (root == null) {
-                            result.error("invalid_qwen3_model_path", "Qwen3 模型路径不安全", null)
-                        } else {
-                            llmExecutor.execute {
-                                runCatching {
-                                    GenieRuntimeBridge.load(
-                                        llmSessionOwner,
-                                        root,
-                                        QnnRuntime.status.ready,
-                                    ).asMap()
-                                }.fold(
-                                    onSuccess = { value -> deliverLlmResult(result) { result.success(value) } },
-                                    onFailure = { error ->
-                                        Log.e("Talk2U/Genie", "Unable to load Qwen3 deployment", error)
-                                        deliverLlmResult(result) {
-                                            result.error(
-                                                "qwen3_load_failed",
-                                                error.message ?: error.javaClass.simpleName,
-                                                llmErrorDetails("load", error),
-                                            )
-                                        }
-                                    },
-                                )
+                    "capabilities" -> llmExecutor.execute {
+                        runCatching { llmRuntimeCapabilities() }.fold(
+                            onSuccess = { value -> deliverLlmResult(result) { result.success(value) } },
+                            onFailure = { error -> deliverLlmError(result, "capabilities", error) },
+                        )
+                    }
+                    "modelStatus" -> llmExecutor.execute {
+                        runCatching { genieXRuntime.modelStatus() }.fold(
+                            onSuccess = { value -> deliverLlmResult(result) { result.success(value) } },
+                            onFailure = { error -> deliverLlmError(result, "model_status", error) },
+                        )
+                    }
+                    "download" -> llmExecutor.execute {
+                        runCatching {
+                            genieXRuntime.downloadModel { progress ->
+                                deliverLlmResult(result) {
+                                    llmRuntimeChannel.invokeMethod(
+                                        "downloadProgress",
+                                        mapOf(
+                                            "downloadedBytes" to progress.downloadedBytes,
+                                            "totalBytes" to progress.totalBytes,
+                                        ),
+                                    )
+                                }
                             }
-                        }
+                        }.fold(
+                            onSuccess = { value -> deliverLlmResult(result) { result.success(value) } },
+                            onFailure = { error -> deliverLlmError(result, "download", error) },
+                        )
+                    }
+                    "cancelDownload" -> {
+                        genieXRuntime.cancelDownload()
+                        result.success(null)
+                    }
+                    "deleteModel" -> llmExecutor.execute {
+                        runCatching { genieXRuntime.deleteModel() }.fold(
+                            onSuccess = { deliverLlmResult(result) { result.success(null) } },
+                            onFailure = { error -> deliverLlmError(result, "delete", error) },
+                        )
+                    }
+                    "load" -> llmExecutor.execute {
+                        runCatching { genieXRuntime.load() }.fold(
+                            onSuccess = { value -> deliverLlmResult(result) { result.success(value) } },
+                            onFailure = { error ->
+                                Log.e("Talk2U/LLM", "Unable to load Qwen3 QAIRT/NPU model", error)
+                                deliverLlmError(result, "load", error)
+                            },
+                        )
                     }
                     "generate" -> {
-                        val prompt = call.argument<String>("prompt").orEmpty()
-                        val root = secureAppModelRoot(call.argument<String>("modelRoot"))
-                        if (root == null) {
-                            result.error("invalid_qwen3_model_path", "Qwen3 模型路径不安全", null)
-                        } else if (prompt.isBlank()) {
-                            result.error("invalid_qwen3_prompt", "Qwen3 提示词为空", null)
+                        val messages: List<Pair<String, String>> =
+                            (call.argument<List<*>>("messages") ?: emptyList<Any?>())
+                            .mapNotNull { value ->
+                                val message = value as? Map<*, *> ?: return@mapNotNull null
+                                val content = message["content"]?.toString().orEmpty()
+                                if (content.isBlank()) null else
+                                    message["role"]?.toString().orEmpty() to content
+                            }
+                        val maxTokens = call.argument<Int>("maxTokens")?.coerceIn(1, 256) ?: 256
+                        val generationId = call.argument<Int>("generationId")
+                        if (messages.isEmpty()) {
+                            result.error("invalid_qwen3_messages", "Qwen3 chat messages are empty", null)
+                        } else if (generationId == null || generationId <= 0) {
+                            result.error("invalid_qwen3_generation", "Qwen3 generationId is invalid", null)
                         } else {
                             llmExecutor.execute {
                                 runCatching {
-                                    GenieRuntimeBridge.ensureLoaded(
-                                        llmSessionOwner,
-                                        root,
-                                        QnnRuntime.status.ready,
-                                    )
-                                    GenieRuntimeBridge.query(llmSessionOwner, prompt)
+                                    genieXRuntime.ensureLoaded()
+                                    genieXRuntime.generate(
+                                        messages,
+                                        maxTokens,
+                                    ) { text ->
+                                        deliverLlmResult(result) {
+                                            llmRuntimeChannel.invokeMethod(
+                                                "token",
+                                                mapOf(
+                                                    "generationId" to generationId,
+                                                    "text" to text,
+                                                ),
+                                            )
+                                        }
+                                    }
                                 }.fold(
                                     onSuccess = { text ->
                                         Log.i(
-                                            "Talk2U/Genie",
-                                            "query backend=${GenieRuntimeBridge.activeBackend()} " +
-                                                "verified=${GenieRuntimeBridge.activeBackendVerified()}",
+                                            "Talk2U/LLM",
+                                            "query details=${genieXRuntime.diagnostics()}",
                                         )
                                         deliverLlmResult(result) { result.success(text) }
                                     },
                                     onFailure = { error ->
-                                        deliverLlmResult(result) {
-                                            result.error(
-                                                "qwen3_generate_failed",
-                                                error.message ?: error.javaClass.simpleName,
-                                                llmErrorDetails("generate", error),
-                                            )
-                                        }
+                                        deliverLlmError(result, "generate", error)
                                     },
                                 )
                             }
                         }
                     }
                     "stop" -> {
-                        GenieRuntimeBridge.stop(llmSessionOwner)
+                        genieXRuntime.stop()
                         result.success(null)
                     }
                     "release" -> {
                         llmExecutor.execute {
-                            GenieRuntimeBridge.release(llmSessionOwner)
+                            genieXRuntime.close()
                             deliverLlmResult(result) { result.success(null) }
                         }
                     }
@@ -284,11 +231,83 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
                 }
             }
 
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            SenseVoiceQnnRuntime.CHANNEL,
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "capabilities" -> result.success(
+                    senseVoiceRuntime.diagnostics() + mapOf(
+                        "qnn" to QnnRuntime.status.asMap(),
+                    ),
+                )
+                "load" -> {
+                    val root = secureAppModelRoot(call.argument<String>("modelRoot"))
+                    if (root == null) {
+                        result.error("invalid_sensevoice_path", "SenseVoice 模型路径不安全", null)
+                    } else {
+                        asrExecutor.execute {
+                            runCatching { senseVoiceRuntime.load(root) }.fold(
+                                onSuccess = { value ->
+                                    deliverLlmResult(result) { result.success(value) }
+                                },
+                                onFailure = { error ->
+                                    Log.e("Talk2U/ASR", "Unable to load SenseVoice QNN", error)
+                                    deliverLlmResult(result) {
+                                        result.error(
+                                            "sensevoice_load_failed",
+                                            error.message ?: error.javaClass.simpleName,
+                                            senseVoiceRuntime.diagnostics(),
+                                        )
+                                    }
+                                },
+                            )
+                        }
+                    }
+                }
+                "recognize" -> {
+                    val root = secureAppModelRoot(call.argument<String>("modelRoot"))
+                    val pcm = call.argument<ByteArray>("pcm16le")
+                    if (root == null) {
+                        result.error("invalid_sensevoice_path", "SenseVoice 模型路径不安全", null)
+                    } else if (pcm == null || pcm.isEmpty()) {
+                        result.error("invalid_sensevoice_audio", "SenseVoice PCM 音频为空", null)
+                    } else {
+                        asrExecutor.execute {
+                            runCatching {
+                                senseVoiceRuntime.load(root)
+                                senseVoiceRuntime.recognize(pcm)
+                            }.fold(
+                                onSuccess = { value ->
+                                    deliverLlmResult(result) { result.success(value) }
+                                },
+                                onFailure = { error ->
+                                    Log.e("Talk2U/ASR", "SenseVoice QNN recognition failed", error)
+                                    deliverLlmResult(result) {
+                                        result.error(
+                                            "sensevoice_recognition_failed",
+                                            error.message ?: error.javaClass.simpleName,
+                                            senseVoiceRuntime.diagnostics(),
+                                        )
+                                    }
+                                },
+                            )
+                        }
+                    }
+                }
+                "release" -> asrExecutor.execute {
+                    senseVoiceRuntime.close()
+                    deliverLlmResult(result) { result.success(null) }
+                }
+                else -> result.notImplemented()
+            }
+        }
+
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, mossTtsChannelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "availableStorageBytes" -> result.success(StatFs(filesDir.path).availableBytes)
-                    "probe" -> runCatching { MossOnnxEngine.probeRuntime() }
+                    "probe" -> runCatching { QnnRuntime.status.ready }
                         .fold(
                             onSuccess = result::success,
                             onFailure = {
@@ -299,7 +318,12 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
                                 )
                             },
                         )
-                    "providers" -> runCatching { MossOnnxEngine.runtimeProviders() }
+                    "providers" -> runCatching {
+                        check(QnnRuntime.status.ready && QnnRuntime.status.epDeviceCount > 0) {
+                            "QNN Plugin EP 未暴露可用设备"
+                        }
+                        listOf("QNN_HTP", "ORT_CPU")
+                    }
                         .fold(
                             onSuccess = {
                                 Log.i("Talk2U/MOSS", "availableProviders=$it")
@@ -313,7 +337,44 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
                                 )
                             },
                         )
-                    "runtimeDetails" -> result.success(MossOnnxEngine.runtimeDetails())
+                    "runtimeDetails" -> result.success(
+                        mapOf(
+                            "engine" to "native-onnxruntime-qnn-plugin-ep",
+                            "providerPlan" to mapOf(
+                                "prefill" to "QNN_HTP",
+                                "decode" to "QNN_HTP",
+                                "sampler" to "ORT_CPU",
+                                "codec" to "ORT_CPU",
+                            ),
+                            "ortVersion" to BuildConfig.ORT_VERSION,
+                            "qnnPluginVersion" to BuildConfig.QNN_PLUGIN_VERSION,
+                            "htpArchitecture" to "v81",
+                            "hardwareOnly" to true,
+                        ) + mossRuntimeState(),
+                    )
+                    "runtimeState" -> result.success(mossRuntimeState())
+                    "initialize" -> initializeMoss(result)
+                    "modelInfo" -> result.success(modelStore.inspectInstalled()?.asMap())
+                    "importModel" -> beginMossModelImport(result)
+                    "deleteModel" -> mossExecutor.execute {
+                        runCatching {
+                            closeMossEngine()
+                            modelStore.deleteInstalled()
+                        }.fold(
+                            onSuccess = {
+                                deliverMossResult(result) { result.success(null) }
+                            },
+                            onFailure = { error ->
+                                deliverMossResult(result) {
+                                    result.error(
+                                        "moss_delete_failed",
+                                        error.message ?: error.javaClass.simpleName,
+                                        null,
+                                    )
+                                }
+                            },
+                        )
+                    }
                     "synthesize" -> synthesizeMoss(call.arguments as? Map<*, *>, result)
                     "cancel" -> {
                         mossCancellation.set(true)
@@ -328,210 +389,7 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
             "talk2u/live2d",
             Live2dViewFactory(this, flutterEngine.dartExecutor.binaryMessenger),
         )
-    }
-
-    override fun onInit(status: Int) {
-        ttsInitialized = true
-        ttsReady = status == TextToSpeech.SUCCESS && selectOfflineVoice()
-        Log.i(
-            "Talk2U.Speech",
-            "TTS initialized status=$status ready=$ttsReady voice=$selectedTtsVoiceName locale=$selectedTtsLocale",
-        )
-        if (ttsReady) {
-            textToSpeech?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                override fun onStart(utteranceId: String?) {
-                    lastAmplitudeEmitAt = 0L
-                    loggedTtsAmplitude = false
-                    val segment = utteranceId?.let(ttsSegments::get)
-                    Log.i("Talk2U.Speech", "speechStart id=$utteranceId offset=${segment?.offset ?: 0}")
-                    if (segment?.first != false) emit(mapOf("type" to "speechStart"))
-                }
-
-                override fun onDone(utteranceId: String?) {
-                    val segment = utteranceId?.let(ttsSegments::remove)
-                    Log.i("Talk2U.Speech", "speechDone id=$utteranceId last=${segment?.last != false}")
-                    if (segment?.last != false) {
-                        emit(mapOf("type" to "amplitude", "value" to 0.0))
-                        emit(mapOf("type" to "speechDone"))
-                    }
-                }
-
-                override fun onStop(utteranceId: String?, interrupted: Boolean) {
-                    if (utteranceId == null || ttsSegments.remove(utteranceId) == null) return
-                    ttsSegments.clear()
-                    Log.i("Talk2U.Speech", "speechStop id=$utteranceId interrupted=$interrupted")
-                    emit(mapOf("type" to "amplitude", "value" to 0.0))
-                    emit(mapOf("type" to "speechDone"))
-                }
-
-                @Suppress("DEPRECATION")
-                override fun onError(utteranceId: String?) {
-                    if (utteranceId == null || ttsSegments.remove(utteranceId) == null) return
-                    ttsSegments.clear()
-                    Log.e("Talk2U.Speech", "speechError id=$utteranceId")
-                    emit(mapOf("type" to "error", "message" to "离线 TTS 合成失败"))
-                }
-
-                override fun onError(utteranceId: String?, errorCode: Int) {
-                    if (utteranceId == null || ttsSegments.remove(utteranceId) == null) return
-                    ttsSegments.clear()
-                    Log.e("Talk2U.Speech", "speechError id=$utteranceId code=$errorCode")
-                    emit(mapOf("type" to "error", "message" to "离线 TTS 错误: $errorCode"))
-                }
-
-                override fun onBeginSynthesis(
-                    utteranceId: String?,
-                    sampleRateInHz: Int,
-                    audioFormat: Int,
-                    channelCount: Int,
-                ) {
-                    ttsAudioEncoding = audioFormat
-                    Log.i(
-                        "Talk2U.Speech",
-                        "speechSynthesis id=$utteranceId rate=$sampleRateInHz format=$audioFormat channels=$channelCount",
-                    )
-                }
-
-                override fun onRangeStart(
-                    utteranceId: String?,
-                    start: Int,
-                    end: Int,
-                    frame: Int,
-                ) {
-                    val offset = utteranceId?.let(ttsSegments::get)?.offset ?: 0
-                    Log.d("Talk2U.Speech", "speechRange id=$utteranceId start=${offset + start} end=${offset + end}")
-                    emit(
-                        mapOf(
-                            "type" to "speechRange",
-                            "start" to offset + start,
-                            "end" to offset + end,
-                            "frame" to frame,
-                        ),
-                    )
-                }
-
-                override fun onAudioAvailable(utteranceId: String?, audio: ByteArray?) {
-                    if (audio == null || audio.isEmpty()) return
-                    val normalized = calculatePcmAmplitude(audio, ttsAudioEncoding)
-                    if (normalized > 0.01 && !loggedTtsAmplitude) {
-                        loggedTtsAmplitude = true
-                        Log.i("Talk2U.Speech", "speechAmplitude id=$utteranceId value=$normalized")
-                    }
-                    emitAmplitude(normalized)
-                }
-            })
-        }
-        emit(mapOf("type" to "capabilities", "value" to capabilities()))
-    }
-
-    private fun selectOfflineVoice(): Boolean {
-        val engine = textToSpeech ?: return false
-        val voices = offlineTtsVoices()
-        if (voices.isEmpty()) return false
-        Log.i(
-            "Talk2U.Speech",
-            "TTS voices=" + voices.joinToString(" | ") {
-                "${it.name}:${it.locale.toLanguageTag()}:network=${it.isNetworkConnectionRequired}"
-            },
-        )
-        val savedName = speechPreferences.getString("tts_voice", null)
-        val preferred = voices
-            .sortedByDescending { voiceScore(it) + if (it.name == savedName) 100000 else 0 }
-            .firstOrNull {
-                runCatching { applyTtsVoice(engine, it) }.getOrDefault(false)
-            }
-        return preferred != null
-    }
-
-    private fun offlineTtsVoices(): List<Voice> {
-        return textToSpeech?.voices
-            ?.filter { !it.isNetworkConnectionRequired }
-            ?.sortedWith(
-                compareByDescending<Voice> { it.locale.language == Locale.CHINESE.language }
-                    .thenByDescending { it.quality }
-                    .thenBy { it.name },
-            )
-            .orEmpty()
-    }
-
-    private fun voiceScore(voice: Voice): Int {
-        val name = voice.name.lowercase(Locale.ROOT)
-        var score = voice.quality
-        if (voice.locale.language == Locale.CHINESE.language) score += 1000
-        if ("中文" in name || "普通话" in name || "mandarin" in name) score += 900
-        if ("自然" in name || "情感" in name || "neural" in name) score += 160
-        if ("温柔" in name || "warm" in name || "gentle" in name) score += 120
-        if ("英文" in name || "english" in name) score -= 800
-        return score
-    }
-
-    private fun voiceGender(voice: Voice): String {
-        val name = voice.name.lowercase(Locale.ROOT)
-        return when {
-            "女声" in name || "女性" in name || "female" in name || "woman" in name -> "female"
-            "男声" in name || "男性" in name || "male" in name -> "male"
-            else -> "unknown"
-        }
-    }
-
-    private fun applyTtsVoice(engine: TextToSpeech, voice: Voice): Boolean {
-        if (engine.setVoice(voice) == TextToSpeech.ERROR) return false
-        engine.setSpeechRate(0.93f)
-        baseTtsPitch = when (voiceGender(voice)) {
-            "male" -> 0.94f
-            "female" -> 1.03f
-            else -> 1.0f
-        }
-        engine.setPitch(baseTtsPitch)
-        selectedTtsVoiceName = voice.name
-        selectedTtsLocale = voice.locale.toLanguageTag()
-        return true
-    }
-
-    private fun selectTtsVoice(name: String, result: MethodChannel.Result) {
-        val engine = textToSpeech
-        if (!ttsInitialized || engine == null) {
-            result.error("offline_tts_unavailable", "设备离线 TTS 引擎尚未初始化", null)
-            return
-        }
-        val voice = offlineTtsVoices().firstOrNull { it.name == name }
-        if (voice == null) {
-            result.error("tts_voice_unavailable", "选择的离线音色已不可用", null)
-            return
-        }
-        engine.stop()
-        if (!applyTtsVoice(engine, voice)) {
-            result.error("tts_voice_failed", "无法启用选择的离线音色", null)
-            return
-        }
-        speechPreferences.edit().putString("tts_voice", voice.name).apply()
-        ttsReady = true
-        val value = capabilities()
-        emit(mapOf("type" to "capabilities", "value" to value))
-        result.success(value)
-    }
-
-    private fun capabilities(): Map<String, Any> {
-        val onDeviceStt = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-            SpeechRecognizer.isOnDeviceRecognitionAvailable(this)
-        return mapOf(
-            "offlineTts" to ttsReady,
-            "offlineStt" to onDeviceStt,
-            "sttModelDownload" to (
-                onDeviceStt && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
-            ),
-            "audioAmplitude" to (ttsReady && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N),
-            "ttsVoice" to selectedTtsVoiceName,
-            "ttsLocale" to selectedTtsLocale,
-            "ttsVoices" to offlineTtsVoices().map {
-                mapOf(
-                    "name" to it.name,
-                    "locale" to it.locale.toLanguageTag(),
-                    "gender" to voiceGender(it),
-                )
-            },
-            "sttLocale" to if (onDeviceStt) "zh-CN" else "",
-        )
+        initializeMossAutomatically()
     }
 
     private fun llmRuntimeCapabilities(): Map<String, Any?> {
@@ -543,7 +401,7 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
             Build.HARDWARE.orEmpty()
         }
         return mapOf(
-            "schemaVersion" to 2,
+            "schemaVersion" to 3,
             "device" to mapOf(
                 "manufacturer" to Build.MANUFACTURER,
                 "brand" to Build.BRAND,
@@ -553,21 +411,24 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
                 "abis" to Build.SUPPORTED_ABIS.toList(),
                 "totalMemoryBytes" to memory.totalMem,
             ),
-            "targetProfile" to if (socModel.equals("SM8850", true)) "sm8850-v81" else "generic-arm64",
-            "modelId" to "Qwen/Qwen3-4B-Instruct-2507",
-            "modelFormat" to "genie-deployment",
-            "genieBundled" to BuildConfig.GENIE_BUNDLED,
-            "genieRuntimePresent" to GenieRuntimeBridge.available(),
-            "qnn" to QnnRuntime.status.asMap(),
-            "activeBackend" to GenieRuntimeBridge.activeBackend(),
-            "activeBackendVerified" to GenieRuntimeBridge.activeBackendVerified(),
-            "fallbackFailures" to GenieRuntimeBridge.activeFallbackFailures(),
-            "contextSize" to 8192,
+            "targetProfile" to "$socModel-qairt-npu",
+            "availableStorageBytes" to StatFs(filesDir.path).availableBytes,
+            "modelId" to GenieXRuntime.MODEL_NAME,
+            "modelFormat" to "QAIRT context binary",
+            "runtime" to "GenieX",
+            "runtimeDetails" to genieXRuntime.diagnostics(),
+            "activeBackend" to genieXRuntime.diagnostics()["activeBackend"],
+            "activeBackendVerified" to genieXRuntime.diagnostics()["activeBackendVerified"],
+            "contextSize" to GenieXRuntime.CONTEXT_SIZE,
             "backends" to listOf(
-                mapOf("id" to "qnn-htp", "priority" to 0, "requiresValidatedContext" to true),
-                mapOf("id" to "cpu", "priority" to 1, "composerModelSupported" to true),
+                mapOf(
+                    "id" to GenieXRuntime.BACKEND,
+                    "priority" to 0,
+                    "device" to "Qualcomm HTP/NPU",
+                    "fallbackAllowed" to false,
+                ),
             ),
-        )
+        ) + genieXRuntime.modelStatus()
     }
 
     private fun secureAppModelRoot(value: String?): File? {
@@ -587,59 +448,25 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
     private fun llmErrorDetails(operation: String, error: Throwable): Map<String, Any?> = mapOf(
         "operation" to operation,
         "cause" to error.javaClass.simpleName,
-        "activeBackend" to GenieRuntimeBridge.activeBackend(),
-        "activeBackendVerified" to GenieRuntimeBridge.activeBackendVerified(),
-        "fallbackFailures" to GenieRuntimeBridge.activeFallbackFailures(),
-        "qnn" to QnnRuntime.status.asMap(),
+        "activeBackend" to genieXRuntime.diagnostics()["activeBackend"],
+        "activeBackendVerified" to genieXRuntime.diagnostics()["activeBackendVerified"],
+        "runtime" to "GenieX/QAIRT",
         "retryable" to true,
     )
 
-    private fun calculatePcmAmplitude(audio: ByteArray, encoding: Int): Double {
-        var sumSquares = 0.0
-        var sampleCount = 0
-        when (encoding) {
-            AudioFormat.ENCODING_PCM_8BIT -> {
-                for (byte in audio) {
-                    val sample = ((byte.toInt() and 0xff) - 128) / 128.0
-                    sumSquares += sample * sample
-                    sampleCount++
-                }
-            }
-            AudioFormat.ENCODING_PCM_FLOAT -> {
-                var index = 0
-                while (index + 3 < audio.size) {
-                    val bits = (audio[index].toInt() and 0xff) or
-                        ((audio[index + 1].toInt() and 0xff) shl 8) or
-                        ((audio[index + 2].toInt() and 0xff) shl 16) or
-                        (audio[index + 3].toInt() shl 24)
-                    val sample = Float.fromBits(bits).toDouble().coerceIn(-1.0, 1.0)
-                    sumSquares += sample * sample
-                    sampleCount++
-                    index += 4
-                }
-            }
-            else -> {
-                var index = 0
-                while (index + 1 < audio.size) {
-                    val value = (audio[index].toInt() and 0xff) or
-                        (audio[index + 1].toInt() shl 8)
-                    val sample = value.toShort().toInt() / 32768.0
-                    sumSquares += sample * sample
-                    sampleCount++
-                    index += 2
-                }
-            }
+    private fun deliverLlmError(
+        result: MethodChannel.Result,
+        operation: String,
+        error: Throwable,
+    ) {
+        Log.e("Talk2U/LLM", "GenieX $operation failed", error)
+        deliverLlmResult(result) {
+            result.error(
+                "qwen3_${operation}_failed",
+                error.message ?: error.javaClass.simpleName,
+                llmErrorDetails(operation, error),
+            )
         }
-        if (sampleCount == 0) return 0.0
-        val rms = sqrt(sumSquares / sampleCount)
-        return ((rms - 0.008).coerceAtLeast(0.0) * 8.0).coerceAtMost(1.0)
-    }
-
-    private fun emitAmplitude(value: Double) {
-        val now = SystemClock.uptimeMillis()
-        if (now - lastAmplitudeEmitAt < 32L) return
-        lastAmplitudeEmitAt = now
-        emit(mapOf("type" to "amplitude", "value" to value))
     }
 
     private fun importLive2dArchive(archivePath: String): List<String> {
@@ -699,7 +526,7 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
             val staging = File(modelsRoot, "bundled-mao-staging-${System.currentTimeMillis()}")
             require(staging.mkdirs()) { "无法创建内置 Mao 模型目录" }
             try {
-                copyAssetTree("flutter_assets/model/mao/runtime", staging)
+                copyAssetTree("flutter_assets/model/Live2d/mao/runtime", staging)
                 require(File(staging, "mao_pro.model3.json").isFile) {
                     "APK 中缺少内置 Mao 模型；请检查 pubspec assets"
                 }
@@ -1148,391 +975,181 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
         configFile.writeText(config.toString(2), Charsets.UTF_8)
     }
 
-    private fun speak(text: String, style: String, result: MethodChannel.Result) {
-        if (!ttsReady) {
-            result.error("offline_tts_unavailable", "设备未安装可用的离线 TTS 语音包", null)
+    private fun beginMossModelImport(result: MethodChannel.Result) {
+        if (pendingMossImportResult != null) {
+            result.error("moss_import_busy", "已有 MOSS 模型导入请求正在进行", null)
             return
         }
-        if (text.isBlank()) {
-            result.error("empty_text", "朗读文本不能为空", null)
-            return
-        }
-        val engine = textToSpeech
-        if (engine == null) {
-            result.error("offline_tts_unavailable", "设备离线 TTS 引擎尚未初始化", null)
-            return
-        }
-        val chunks = splitTtsText(
-            text,
-            TextToSpeech.getMaxSpeechInputLength().coerceAtMost(280),
-            style,
-        )
-        val batchId = System.currentTimeMillis()
-        ttsSegments.clear()
-        Log.i("Talk2U.Speech", "speak requested chars=${text.length} chunks=${chunks.size}")
-        for ((index, chunk) in chunks.withIndex()) {
-            val utteranceId = "talk2u-$batchId-$index"
-            ttsSegments[utteranceId] = TtsSegment(
-                offset = chunk.offset,
-                first = index == 0,
-                last = index == chunks.lastIndex,
+        pendingMossImportResult = result
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+            addFlags(
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION,
             )
-            val queueMode = if (index == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
-            engine.setSpeechRate(chunk.rate)
-            engine.setPitch(chunk.pitch)
-            val parameters = Bundle().apply {
-                putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, chunk.volume)
-            }
-            val status = engine.speak(chunk.text, queueMode, parameters, utteranceId)
-            if (status == TextToSpeech.ERROR) {
-                engine.stop()
-                ttsSegments.clear()
-                result.error("tts_start_failed", "无法启动离线 TTS", null)
-                return
-            }
         }
-        result.success(null)
-    }
-
-    private fun splitTtsText(text: String, maximumLength: Int, style: String): List<TtsChunk> {
-        val result = mutableListOf<TtsChunk>()
-        val strongBoundaries = setOf('。', '！', '？', '；', '\n', '!', '?', ';', '.', '…')
-        val softBoundaries = setOf('，', '、', ',', ':', '：')
-        val allBoundaries = (strongBoundaries + softBoundaries + ' ').toCharArray()
-        val closingPunctuation = setOf('”', '’', '」', '』', '）', ')', '】', ']')
-        var cursor = 0
-        while (cursor < text.length) {
-            while (cursor < text.length && text[cursor].isWhitespace()) cursor++
-            if (cursor >= text.length) break
-            var end = (cursor + maximumLength).coerceAtMost(text.length)
-            var foundBoundary = false
-            for (index in cursor until end) {
-                val character = text[index]
-                val strong = character in strongBoundaries && index - cursor >= 2
-                val soft = character in softBoundaries && index - cursor >= 36
-                if (strong || soft) {
-                    end = index + 1
-                    while (end < text.length && text[end] in closingPunctuation) end++
-                    foundBoundary = true
-                    break
-                }
-            }
-            if (!foundBoundary && end < text.length) {
-                val boundary = text.lastIndexOfAny(allBoundaries, end - 1)
-                if (boundary > cursor) end = boundary + 1
-            }
-            if (
-                end < text.length &&
-                end > cursor &&
-                Character.isHighSurrogate(text[end - 1]) &&
-                Character.isLowSurrogate(text[end])
-            ) {
-                end--
-            }
-            val raw = text.substring(cursor, end)
-            val leading = raw.indexOfFirst { !it.isWhitespace() }.coerceAtLeast(0)
-            val value = raw.trim()
-            if (value.isNotEmpty()) {
-                val prosody = ttsProsody(value, style)
-                result.add(
-                    TtsChunk(
-                        offset = cursor + leading,
-                        text = value,
-                        rate = prosody.rate,
-                        pitch = (baseTtsPitch + prosody.pitchOffset).coerceIn(0.78f, 1.16f),
-                        volume = prosody.volume,
-                    ),
-                )
-            }
-            cursor = end
-        }
-        return result
-    }
-
-    private fun ttsProsody(text: String, style: String): TtsProsody {
-        val lower = text.lowercase(Locale.ROOT)
-        return when {
-            style == "sad" -> TtsProsody(0.80f, -0.07f, 0.86f)
-            style == "angry" -> TtsProsody(1.04f, -0.06f, 1.0f)
-            style == "happy" -> TtsProsody(1.05f, 0.075f, 1.0f)
-            style == "surprise" -> TtsProsody(1.08f, 0.10f, 1.0f)
-            style == "dramatic" -> TtsProsody(0.86f, -0.035f, 0.9f)
-            style == "shy" -> TtsProsody(0.86f, 0.02f, 0.88f)
-            listOf("轻声", "小声", "低语", "耳语", "悄悄", "whisper").any(lower::contains) ->
-                TtsProsody(0.84f, -0.01f, 0.78f)
-            listOf("难过", "伤心", "悲伤", "哭", "失落", "孤独", "遗憾", "绝望", "sad").any(lower::contains) ->
-                TtsProsody(0.80f, -0.07f, 0.86f)
-            listOf("温柔", "温暖", "安心", "安慰", "拥抱", "柔和", "tender", "gentle").any(lower::contains) ->
-                TtsProsody(0.87f, 0.015f, 0.92f)
-            listOf("生气", "愤怒", "恼火", "争吵", "怒吼", "厉声", "angry").any(lower::contains) ->
-                TtsProsody(1.04f, -0.06f, 1.0f)
-            listOf("开心", "高兴", "喜悦", "兴奋", "幸福", "哈哈", "欢呼", "happy").any(lower::contains) ->
-                TtsProsody(1.05f, 0.075f, 1.0f)
-            listOf("惊讶", "震惊", "突然", "意外", "竟然", "surprise").any(lower::contains) ->
-                TtsProsody(1.08f, 0.10f, 1.0f)
-            listOf("黑暗", "寂静", "危险", "危机", "紧张", "屏住呼吸", "suspense").any(lower::contains) ->
-                TtsProsody(0.86f, -0.035f, 0.9f)
-            listOf("害羞", "脸红", "不好意思", "小声", "shy").any(lower::contains) ->
-                TtsProsody(0.86f, 0.02f, 0.88f)
-            '？' in text || '?' in text -> TtsProsody(0.94f, 0.055f, 0.96f)
-            '！' in text || '!' in text -> TtsProsody(1.02f, 0.035f, 1.0f)
-            else -> TtsProsody(0.93f, 0.0f, 0.96f)
-        }
-    }
-
-    private fun launchSpeechSettings(action: String, result: MethodChannel.Result) {
-        try {
-            startActivity(Intent(action))
-            result.success(null)
-        } catch (error: Exception) {
-            try {
-                startActivity(Intent(Settings.ACTION_SETTINGS))
-                result.success(null)
-            } catch (fallbackError: Exception) {
+        runCatching { startActivityForResult(intent, mossImportRequest) }
+            .onFailure { error ->
+                pendingMossImportResult = null
                 result.error(
-                    "speech_settings_unavailable",
-                    fallbackError.message ?: error.message ?: "设备没有可用的语音设置页面",
+                    "moss_import_picker_failed",
+                    error.message ?: "无法打开 MOSS 模型目录选择器",
                     null,
                 )
             }
-        }
     }
 
-    private fun recognitionIntent(): Intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-        putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
-        putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-        putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
-    }
-
-    private fun requestOfflineSttModel(result: MethodChannel.Result) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
-            !SpeechRecognizer.isOnDeviceRecognitionAvailable(this)
-        ) {
-            launchSpeechSettings(Settings.ACTION_VOICE_INPUT_SETTINGS, result)
+    @Deprecated("Kept for Android document-tree result delivery")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != mossImportRequest) return
+        val pending = pendingMossImportResult ?: return
+        pendingMossImportResult = null
+        val uri = data?.data
+        if (resultCode != RESULT_OK || uri == null) {
+            pending.error("moss_import_cancelled", "未选择 MOSS QNN 部署目录", null)
             return
         }
-        modelDownloadRecognizer?.destroy()
-        val recognizer = try {
-            SpeechRecognizer.createOnDeviceSpeechRecognizer(this)
-        } catch (error: RuntimeException) {
-            result.error("stt_model_download_unavailable", error.message, null)
-            return
-        }
-        modelDownloadRecognizer = recognizer
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                recognizer.triggerModelDownload(
-                    recognitionIntent(),
-                    mainExecutor,
-                    object : ModelDownloadListener {
-                        override fun onProgress(completedPercent: Int) {
-                            emit(
-                                mapOf(
-                                    "type" to "sttModelDownloadProgress",
-                                    "value" to completedPercent.coerceIn(0, 100),
-                                ),
-                            )
-                        }
-
-                        override fun onSuccess() {
-                            emit(mapOf("type" to "sttModelDownloadDone"))
-                            releaseModelDownloadRecognizer()
-                        }
-
-                        override fun onScheduled() {
-                            emit(mapOf("type" to "sttModelDownloadScheduled"))
-                        }
-
-                        override fun onError(error: Int) {
-                            emit(mapOf("type" to "sttModelDownloadError", "code" to error))
-                            releaseModelDownloadRecognizer()
-                        }
-                    },
-                )
-            } else {
-                @Suppress("DEPRECATION")
-                recognizer.triggerModelDownload(recognitionIntent())
-                emit(mapOf("type" to "sttModelDownloadScheduled"))
-            }
-            result.success("requested")
-        } catch (error: RuntimeException) {
-            releaseModelDownloadRecognizer()
-            result.error("stt_model_download_failed", error.message, null)
-        }
-    }
-
-    private fun releaseModelDownloadRecognizer() {
-        modelDownloadRecognizer?.destroy()
-        modelDownloadRecognizer = null
-    }
-
-    private fun refreshSpeechCapabilities() {
-        if (ttsInitialized) ttsReady = selectOfflineVoice()
-        emit(mapOf("type" to "capabilities", "value" to capabilities()))
-    }
-
-    private fun startListening(result: MethodChannel.Result) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
-            !SpeechRecognizer.isOnDeviceRecognitionAvailable(this)
-        ) {
-            result.error("offline_stt_unavailable", "设备没有可验证的离线语音识别服务", null)
-            return
-        }
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) !=
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            pendingRecognitionResult = result
-            ActivityCompat.requestPermissions(
-                this,
-                arrayOf(Manifest.permission.RECORD_AUDIO),
-                recordAudioRequest,
+        runCatching {
+            contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION,
             )
+        }
+        mossExecutor.execute {
+            runCatching {
+                closeMossEngine()
+                val info = modelStore.importFromTree(uri) { progress ->
+                    if (progress.copiedBytes == progress.totalBytes) {
+                        Log.i("Talk2U/MOSS", "imported ${progress.fileName}")
+                    }
+                }
+                mossEngine(info.root)
+                info
+            }.fold(
+                onSuccess = { info ->
+                    deliverMossResult(pending) {
+                        pending.success(info.asMap() + mossRuntimeState())
+                    }
+                },
+                onFailure = { error ->
+                    Log.e("Talk2U/MOSS", "MOSS deployment import failed", error)
+                    deliverMossResult(pending) {
+                        pending.error(
+                            "moss_import_failed",
+                            error.message ?: error.javaClass.simpleName,
+                            null,
+                        )
+                    }
+                },
+            )
+        }
+    }
+
+    private fun ModelStore.ModelInfo.asMap(): Map<String, Any> = mapOf(
+        "root" to root.path,
+        "bytes" to totalBytes,
+        "target" to target,
+        "qnnSdkVersion" to qnnSdkVersion,
+        "ortVersion" to ortVersion,
+        "voices" to voices.map { mapOf("id" to it.id, "label" to it.label) },
+    )
+
+    private fun mossRuntimeState(): Map<String, Any?> = mapOf(
+        "initialized" to (mossEngine != null),
+        "initializing" to mossInitializing,
+        "stage" to mossInitializationStage,
+        "error" to mossInitializationError,
+        "provider" to "QNN_HTP(prefill,decode)+ORT_CPU(sampler,codec)",
+    )
+
+    private fun initializeMoss(result: MethodChannel.Result) {
+        val info = modelStore.inspectInstalled()
+        if (info == null) {
+            result.error("moss_model_missing", "请先导入 MOSS QNN HTP v81 部署包", null)
             return
         }
-        if (createAndStartRecognizer()) {
-            result.success(null)
-        } else {
-            result.error("offline_stt_start_failed", "无法启动设备的离线语音识别器", null)
-        }
-    }
-
-    private fun createAndStartRecognizer(): Boolean {
-        speechRecognizer?.destroy()
-        try {
-            speechRecognizer = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                SpeechRecognizer.createOnDeviceSpeechRecognizer(this)
-            } else {
-                return false
-            }
-        } catch (error: RuntimeException) {
-            emit(
-                mapOf(
-                    "type" to "recognitionError",
-                    "message" to (error.message ?: "离线语音识别器创建失败"),
-                ),
+        mossExecutor.execute {
+            runCatching {
+                mossEngine(info.root)
+                mossRuntimeState()
+            }.fold(
+                onSuccess = { state ->
+                    deliverMossResult(result) { result.success(state) }
+                },
+                onFailure = { error ->
+                    Log.e("Talk2U/MOSS", "Automatic MOSS initialization failed", error)
+                    deliverMossResult(result) {
+                        result.error(
+                            "moss_initialization_failed",
+                            error.message ?: error.javaClass.simpleName,
+                            mossRuntimeState(),
+                        )
+                    }
+                },
             )
-            return false
-        }
-        speechRecognizer?.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) = emit(mapOf("type" to "listening"))
-            override fun onBeginningOfSpeech() = Unit
-            override fun onRmsChanged(rmsdB: Float) {
-                emit(mapOf("type" to "inputLevel", "value" to ((rmsdB + 2f) / 12f).coerceIn(0f, 1f)))
-            }
-            override fun onBufferReceived(buffer: ByteArray?) = Unit
-            override fun onEndOfSpeech() = emit(mapOf("type" to "listeningEnd"))
-            override fun onError(error: Int) = emit(mapOf("type" to "recognitionError", "code" to error))
-            override fun onResults(results: Bundle?) {
-                val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
-                if (text != null) emit(mapOf("type" to "recognitionResult", "text" to text, "final" to true))
-            }
-            override fun onPartialResults(partialResults: Bundle?) {
-                val text = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
-                if (text != null) emit(mapOf("type" to "recognitionResult", "text" to text, "final" to false))
-            }
-            override fun onEvent(eventType: Int, params: Bundle?) = Unit
-        })
-        return try {
-            speechRecognizer?.startListening(recognitionIntent())
-            true
-        } catch (error: RuntimeException) {
-            speechRecognizer?.destroy()
-            speechRecognizer = null
-            emit(
-                mapOf(
-                    "type" to "recognitionError",
-                    "message" to (error.message ?: "离线语音识别启动失败"),
-                ),
-            )
-            false
         }
     }
 
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray,
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode != recordAudioRequest) return
-        val result = pendingRecognitionResult ?: return
-        pendingRecognitionResult = null
-        if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
-            if (createAndStartRecognizer()) {
-                result.success(null)
-            } else {
-                result.error("offline_stt_start_failed", "无法启动设备的离线语音识别器", null)
-            }
-        } else {
-            result.error("microphone_denied", "麦克风权限被拒绝", null)
+    private fun initializeMossAutomatically() {
+        if (!QnnRuntime.status.ready || modelStore.inspectInstalled() == null) return
+        mossExecutor.execute {
+            val info = modelStore.inspectInstalled() ?: return@execute
+            runCatching { mossEngine(info.root) }
+                .onFailure { Log.e("Talk2U/MOSS", "Startup MOSS initialization failed", it) }
         }
-    }
-
-    private fun emit(event: Any) {
-        runOnUiThread { eventSink?.success(event) }
     }
 
     private fun synthesizeMoss(arguments: Map<*, *>?, result: MethodChannel.Result) {
-        val modelRootValue = arguments?.get("modelRoot") as? String
         val outputValue = arguments?.get("outputPath") as? String
-        val chunksValue = arguments?.get("tokenChunks") as? List<*>
-        if (modelRootValue.isNullOrBlank() || outputValue.isNullOrBlank() || chunksValue.isNullOrEmpty()) {
+        val text = (arguments?.get("text") as? String).orEmpty().trim()
+        if (outputValue.isNullOrBlank() || text.isEmpty()) {
             result.error("invalid_moss_request", "MOSS-TTS-Nano 推理参数不完整", null)
             return
         }
-        val modelRoot = runCatching { File(modelRootValue).canonicalFile }.getOrNull()
-        val outputFile = runCatching { File(outputValue).canonicalFile }.getOrNull()
-        val dataRoot = applicationInfo.dataDir?.let(::File)?.canonicalFile
-        val cacheRoot = cacheDir.canonicalFile
-        if (modelRoot == null || dataRoot == null || !modelRoot.isInside(dataRoot)) {
-            result.error("invalid_moss_model_path", "MOSS-TTS-Nano 模型路径不安全", null)
+        val modelInfo = modelStore.inspectInstalled()
+        if (modelInfo == null) {
+            result.error("moss_model_missing", "请先导入 MOSS QNN HTP v81 部署包", null)
             return
         }
+        val modelRoot = modelInfo.root.canonicalFile
+        val outputFile = runCatching { File(outputValue).canonicalFile }.getOrNull()
+        val cacheRoot = cacheDir.canonicalFile
         if (outputFile == null || !outputFile.isInside(cacheRoot)) {
             result.error("invalid_moss_output_path", "MOSS-TTS-Nano 音频输出路径不安全", null)
             return
         }
-        val tokenChunks = runCatching {
-            chunksValue.map { rawChunk ->
-                val values = rawChunk as? List<*> ?: error("token chunk is not a list")
-                require(values.isNotEmpty() && values.size <= 512)
-                IntArray(values.size) { index ->
-                    val value = values[index] as? Number ?: error("token is not numeric")
-                    value.toInt().also { require(it in 0 until 16384) }
-                }
-            }.also {
-                require(it.size <= 64)
-                require(it.sumOf(IntArray::size) <= 8192)
-            }
-        }.getOrElse {
-            result.error("invalid_moss_tokens", "MOSS-TTS-Nano 文本 token 无效", null)
-            return
-        }
-        val voices = setOf(
-            "Junhao", "Zhiming", "Weiguo", "Xiaoyu", "Yuewen", "Lingyu",
-            "Trump", "Ava", "Bella", "Adam", "Nathan", "Soyo", "Saki",
-            "Mortis", "Umiri", "Mei", "Anon", "Arisa",
-        )
+        val voices = modelInfo.voices.mapTo(HashSet(), ModelStore.Voice::id)
         val voice = (arguments["voice"] as? String).orEmpty().let {
-            if (it in voices) it else "Junhao"
+            if (it in voices) it else modelInfo.voices.first().id
         }
-        val maxFrames = (arguments["maxFrames"] as? Number)?.toInt()?.coerceIn(40, 375) ?: 375
+        val maxFrames = (arguments["maxFrames"] as? Number)?.toInt()?.coerceIn(1, 375) ?: 375
         val seed = (arguments["seed"] as? Number)?.toLong() ?: System.nanoTime()
         mossCancellation.set(true)
         val cancellation = AtomicBoolean(false)
         mossCancellation = cancellation
         mossExecutor.execute {
             try {
+                if (cancellation.get()) {
+                    deliverMossResult(result) {
+                        result.error("moss_cancelled", "MOSS-TTS-Nano 推理已取消", null)
+                    }
+                    return@execute
+                }
                 val engine = mossEngine(modelRoot)
                 val synthesis = engine.synthesize(
-                    textTokenChunks = tokenChunks,
+                    text = text,
                     outputFile = outputFile,
                     voice = voice,
                     maxFrames = maxFrames,
                     seed = seed,
-                    cancelled = cancellation,
                 )
+                if (cancellation.get()) {
+                    outputFile.delete()
+                    deliverMossResult(result) {
+                        result.error("moss_cancelled", "MOSS-TTS-Nano 推理已取消", null)
+                    }
+                    return@execute
+                }
                 deliverMossResult(result) {
                     Log.i(
                         "Talk2U/MOSS",
@@ -1545,15 +1162,14 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
                             "sampleRate" to synthesis.sampleRate,
                             "durationMs" to synthesis.durationMs,
                             "elapsedMs" to synthesis.elapsedMs,
+                            "prefillMs" to synthesis.prefillMs,
+                            "decodeMs" to synthesis.decodeMs,
+                            "codecMs" to synthesis.codecMs,
+                            "htpBusyMs" to synthesis.htpBusyMs,
                             "generatedFrames" to synthesis.generatedFrames,
                             "provider" to synthesis.provider,
                         ),
                     )
-                }
-            } catch (_: CancellationException) {
-                outputFile.delete()
-                deliverMossResult(result) {
-                    result.error("moss_cancelled", "MOSS-TTS-Nano 推理已取消", null)
                 }
             } catch (error: Throwable) {
                 outputFile.delete()
@@ -1574,18 +1190,29 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
         }
     }
 
-    private fun mossEngine(modelRoot: File): MossOnnxEngine {
+    private fun mossEngine(modelRoot: File): NativeMossRuntime {
         val path = modelRoot.canonicalPath
         val current = mossEngine
         if (current != null && mossEngineRoot == path) return current
         closeMossEngine()
-        return MossOnnxEngine(
-            modelRoot = modelRoot,
-            cpuThreads = mossCpuThreads(),
-            requireHardware = false,
-        ).also {
-            mossEngine = it
-            mossEngineRoot = path
+        mossInitializing = true
+        mossInitializationStage = "plugin"
+        mossInitializationError = null
+        return try {
+            NativeMossRuntime.create(applicationContext, modelRoot) { stage ->
+                mossInitializationStage = stage
+                Log.i("Talk2U/MOSS", "initializing stage=$stage")
+            }.also {
+                mossEngine = it
+                mossEngineRoot = path
+                mossInitializationStage = "ready"
+            }
+        } catch (error: Throwable) {
+            mossInitializationStage = "failed"
+            mossInitializationError = error.message ?: error.javaClass.simpleName
+            throw error
+        } finally {
+            mossInitializing = false
         }
     }
 
@@ -1593,11 +1220,7 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
         mossEngine?.close()
         mossEngine = null
         mossEngineRoot = null
-    }
-
-    private fun mossCpuThreads(): Int {
-        val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
-        return if (cores >= 6) 4 else 2
+        if (!mossInitializing) mossInitializationStage = "idle"
     }
 
     private fun deliverMossResult(result: MethodChannel.Result, action: () -> Unit) {
@@ -1611,11 +1234,6 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
         return path == root.path || path.startsWith(root.path + File.separator)
     }
 
-    override fun onResume() {
-        super.onResume()
-        if (ttsInitialized) refreshSpeechCapabilities()
-    }
-
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
         if (level < ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) return
@@ -1627,18 +1245,12 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
         mossCancellation.set(true)
         mossExecutor.execute(::closeMossEngine)
         mossExecutor.shutdown()
-        llmExecutor.execute { GenieRuntimeBridge.release(llmSessionOwner) }
+        llmExecutor.execute { genieXRuntime.close() }
         llmExecutor.shutdown()
-        pendingRecognitionResult?.error("activity_destroyed", "语音识别已随页面关闭", null)
-        pendingRecognitionResult = null
-        speechRecognizer?.destroy()
-        speechRecognizer = null
-        releaseModelDownloadRecognizer()
-        textToSpeech?.stop()
-        textToSpeech?.shutdown()
-        textToSpeech = null
-        ttsSegments.clear()
-        ttsReady = false
+        asrExecutor.execute { senseVoiceRuntime.close() }
+        asrExecutor.shutdown()
+        pendingMossImportResult?.error("activity_destroyed", "MOSS 模型导入已随页面关闭", null)
+        pendingMossImportResult = null
         super.onDestroy()
     }
 }

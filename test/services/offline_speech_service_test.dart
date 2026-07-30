@@ -4,8 +4,23 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:talk2u/src/services/moss_tts_service.dart';
 import 'package:talk2u/src/services/offline_speech_service.dart';
+import 'package:talk2u/src/services/sherpa_speech_service.dart';
 
 void main() {
+  test('preserves SenseVoice ASR, LID, SER, and AED fields', () {
+    final result = SenseVoiceRecognition.fromMap(const {
+      'text': '你好',
+      'language': 'zh',
+      'emotion': 'happy',
+      'event': 'speech',
+    });
+
+    expect(result.text, '你好');
+    expect(result.language, 'zh');
+    expect(result.emotion, 'happy');
+    expect(result.event, 'speech');
+  });
+
   test('parses verified Android speech capabilities', () {
     final capabilities = SpeechCapabilities.fromMap({
       'offlineTts': true,

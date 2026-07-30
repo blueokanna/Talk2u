@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:talk2u/l10n/generated/app_localizations.dart';
 import 'package:talk2u/src/rust/api/data_models.dart';
 
 class ConversationListPage extends StatelessWidget {
@@ -17,23 +18,24 @@ class ConversationListPage extends StatelessWidget {
     this.currentConversationId,
   });
 
-  String _formatTime(int timestamp) {
+  String _formatTime(int timestamp, AppLocalizations strings) {
     final date = DateTime.fromMillisecondsSinceEpoch(timestamp);
     final now = DateTime.now();
     final diff = now.difference(date);
 
-    if (diff.inMinutes < 1) return '刚刚';
-    if (diff.inHours < 1) return '${diff.inMinutes}分钟前';
+    if (diff.inMinutes < 1) return strings.justNow;
+    if (diff.inHours < 1) return strings.minutesAgo(diff.inMinutes);
     if (diff.inDays < 1) {
       return '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';
     }
-    if (diff.inDays < 7) return '${diff.inDays}天前';
+    if (diff.inDays < 7) return strings.daysAgo(diff.inDays);
     return '${date.month}/${date.day}';
   }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final strings = AppLocalizations.of(context);
 
     return Column(
       children: [
@@ -48,7 +50,7 @@ class ConversationListPage extends StatelessWidget {
               ),
               const SizedBox(width: 10),
               Text(
-                '对话',
+                strings.conversations,
                 style: theme.textTheme.titleLarge?.copyWith(
                   fontWeight: FontWeight.w600,
                 ),
@@ -57,7 +59,7 @@ class ConversationListPage extends StatelessWidget {
               FilledButton.tonalIcon(
                 onPressed: onNewConversation,
                 icon: const Icon(Icons.add_rounded, size: 18),
-                label: const Text('新建'),
+                label: Text(strings.newConversation),
                 style: FilledButton.styleFrom(
                   padding: const EdgeInsets.symmetric(horizontal: 12),
                   minimumSize: const Size(0, 36),
@@ -69,14 +71,14 @@ class ConversationListPage extends StatelessWidget {
         const Divider(height: 1),
         Expanded(
           child: conversations.isEmpty
-              ? _buildEmptyState(theme)
-              : _buildConversationList(theme),
+              ? _buildEmptyState(theme, strings)
+              : _buildConversationList(theme, strings),
         ),
       ],
     );
   }
 
-  Widget _buildEmptyState(ThemeData theme) {
+  Widget _buildEmptyState(ThemeData theme, AppLocalizations strings) {
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -88,14 +90,14 @@ class ConversationListPage extends StatelessWidget {
           ),
           const SizedBox(height: 12),
           Text(
-            '暂无对话',
+            strings.noConversations,
             style: theme.textTheme.bodyLarge?.copyWith(
               color: theme.colorScheme.outline,
             ),
           ),
           const SizedBox(height: 4),
           Text(
-            '点击新建开始聊天',
+            strings.startConversationHint,
             style: theme.textTheme.bodySmall?.copyWith(
               color: theme.colorScheme.outline.withValues(alpha: 0.7),
             ),
@@ -105,13 +107,13 @@ class ConversationListPage extends StatelessWidget {
     );
   }
 
-  Widget _buildConversationList(ThemeData theme) {
+  Widget _buildConversationList(ThemeData theme, AppLocalizations strings) {
     return ListView.builder(
       padding: const EdgeInsets.symmetric(vertical: 4),
       itemCount: conversations.length,
       itemBuilder: (context, index) {
         final conv = conversations[index];
-        final title = conv.title.isEmpty ? '未命名对话' : conv.title;
+        final title = conv.title.isEmpty ? strings.untitledConversation : conv.title;
         final isSelected = conv.id == currentConversationId;
 
         return Padding(
@@ -135,19 +137,19 @@ class ConversationListPage extends StatelessWidget {
               final result = await showDialog<bool>(
                 context: context,
                 builder: (ctx) => AlertDialog(
-                  title: const Text('删除对话'),
-                  content: const Text('确定要删除这个对话吗？此操作不可撤销。'),
+                  title: Text(strings.deleteConversation),
+                  content: Text(strings.deleteConversationConfirm),
                   actions: [
                     TextButton(
                       onPressed: () => Navigator.pop(ctx, false),
-                      child: const Text('取消'),
+                      child: Text(strings.cancel),
                     ),
                     FilledButton(
                       onPressed: () => Navigator.pop(ctx, true),
                       style: FilledButton.styleFrom(
                         backgroundColor: theme.colorScheme.error,
                       ),
-                      child: const Text('删除'),
+                      child: Text(strings.delete),
                     ),
                   ],
                 ),
@@ -202,7 +204,7 @@ class ConversationListPage extends StatelessWidget {
                       ),
                       const SizedBox(width: 8),
                       Text(
-                        _formatTime(conv.updatedAt.toInt()),
+                        _formatTime(conv.updatedAt.toInt(), strings),
                         style: theme.textTheme.labelSmall?.copyWith(
                           color: theme.colorScheme.outline.withValues(
                             alpha: 0.7,

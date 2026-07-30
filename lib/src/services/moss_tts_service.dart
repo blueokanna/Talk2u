@@ -5,8 +5,6 @@ import 'dart:isolate';
 import 'dart:math' as math;
 
 import 'package:audioplayers/audioplayers.dart';
-import 'package:crypto/crypto.dart';
-import 'package:dart_sentencepiece_tokenizer/dart_sentencepiece_tokenizer.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
@@ -29,29 +27,6 @@ class MossVoice {
     final genderLabel = gender == 'male' ? '男声' : '女声';
     return '$label · $genderLabel';
   }
-}
-
-class _MossAsset {
-  final String repository;
-  final String revision;
-  final String directory;
-  final String fileName;
-  final int size;
-  final String sha256;
-
-  const _MossAsset({
-    required this.repository,
-    required this.revision,
-    required this.directory,
-    required this.fileName,
-    required this.size,
-    required this.sha256,
-  });
-
-  List<String> get urls => [
-    'https://huggingface.co/$repository/resolve/$revision/$fileName',
-    'https://hf-mirror.com/$repository/resolve/$revision/$fileName',
-  ];
 }
 
 class _MossAudio {
@@ -117,12 +92,7 @@ class MossTtsService extends ChangeNotifier {
   static const modelBytes = 717414286;
   static const _channel = MethodChannel('talk2u/moss_tts');
   static const _rootName = 'moss-tts-nano';
-  static const _ttsDirectoryName = 'MOSS-TTS-Nano-100M-ONNX';
-  static const _codecDirectoryName = 'MOSS-Audio-Tokenizer-Nano-ONNX';
-  static const _markerName = '.installed.json';
   static const _preferencesName = 'preferences.json';
-  static const _ttsRevision = 'f52645cb467506d8e18e746ddd59482685b74e58';
-  static const _codecRevision = 'ceff0d0749bfb3fa2d61149794ec6feef0d1e1ae';
 
   static const voices = <MossVoice>[
     MossVoice(id: 'Junhao', label: '君豪', locale: 'zh-CN', gender: 'male'),
@@ -150,108 +120,6 @@ class MossTtsService extends ChangeNotifier {
     MossVoice(id: 'Arisa', label: 'Arisa', locale: 'ja-JP', gender: 'female'),
   ];
 
-  static const _assets = <_MossAsset>[
-    _MossAsset(
-      repository: 'OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX',
-      revision: _ttsRevision,
-      directory: _ttsDirectoryName,
-      fileName: 'browser_poc_manifest.json',
-      size: 503354,
-      sha256:
-          '097d80e993dc29f0bae427590b4f77084a161cb578b50d82c29f455d5faa9eee',
-    ),
-    _MossAsset(
-      repository: 'OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX',
-      revision: _ttsRevision,
-      directory: _ttsDirectoryName,
-      fileName: 'tts_browser_onnx_meta.json',
-      size: 4487,
-      sha256:
-          '3edf25232dcd0af3d061c837e9a968a39e2f8592e06777d740503c4f2244f95c',
-    ),
-    _MossAsset(
-      repository: 'OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX',
-      revision: _ttsRevision,
-      directory: _ttsDirectoryName,
-      fileName: 'tokenizer.model',
-      size: 470897,
-      sha256:
-          'c353ee1479b536bf414c1b247f5542b6607fb8ae91320e5af1781fee200fddff',
-    ),
-    _MossAsset(
-      repository: 'OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX',
-      revision: _ttsRevision,
-      directory: _ttsDirectoryName,
-      fileName: 'moss_tts_prefill.onnx',
-      size: 283305,
-      sha256:
-          'd56126dcd0574c2f15d98fc6b35eda68d0386b5bd9c5e38e28548d6f2ea8f3db',
-    ),
-    _MossAsset(
-      repository: 'OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX',
-      revision: _ttsRevision,
-      directory: _ttsDirectoryName,
-      fileName: 'moss_tts_decode_step.onnx',
-      size: 291483,
-      sha256:
-          '698cbc2fc1c2feca16e5895614ed52bbb32ded10f236c076f477b2e69abf32d8',
-    ),
-    _MossAsset(
-      repository: 'OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX',
-      revision: _ttsRevision,
-      directory: _ttsDirectoryName,
-      fileName: 'moss_tts_local_fixed_sampled_frame.onnx',
-      size: 471262,
-      sha256:
-          '40cdb00efc171c450cf91468e01429caa41b0252222cd308e978f58fe354afa8',
-    ),
-    _MossAsset(
-      repository: 'OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX',
-      revision: _ttsRevision,
-      directory: _ttsDirectoryName,
-      fileName: 'moss_tts_global_shared.data',
-      size: 440813568,
-      sha256:
-          'bce8312c3df6a44545302cae229b61054fe0672e0b252ba59cba47adeed831dc',
-    ),
-    _MossAsset(
-      repository: 'OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX',
-      revision: _ttsRevision,
-      directory: _ttsDirectoryName,
-      fileName: 'moss_tts_local_shared.data',
-      size: 229678080,
-      sha256:
-          'bae7782032c0fb12490ab42afe009f87ae6c75a0f0596fc7b5c08e4d5ee93916',
-    ),
-    _MossAsset(
-      repository: 'OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX',
-      revision: _codecRevision,
-      directory: _codecDirectoryName,
-      fileName: 'codec_browser_onnx_meta.json',
-      size: 17036,
-      sha256:
-          '3e291c883bb7d11ff2fe8e964e3e495519760358859f35c951254c7741592731',
-    ),
-    _MossAsset(
-      repository: 'OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX',
-      revision: _codecRevision,
-      directory: _codecDirectoryName,
-      fileName: 'moss_audio_tokenizer_decode_full.onnx',
-      size: 681902,
-      sha256:
-          '0fbbafe3fd4afa2a019af5c5ced204af6e2d1db044fa40f021525d2aee95b4ac',
-    ),
-    _MossAsset(
-      repository: 'OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX',
-      revision: _codecRevision,
-      directory: _codecDirectoryName,
-      fileName: 'moss_audio_tokenizer_decode_shared.data',
-      size: 44198912,
-      sha256:
-          'e69d52e0f4e84ca27850557ee54face46632d3a5a16c89bd246c7c408466dcad',
-    ),
-  ];
-
   final AudioPlayer _player = AudioPlayer();
   StreamSubscription<void>? _completeSubscription;
   StreamSubscription<Duration>? _durationSubscription;
@@ -260,7 +128,6 @@ class MossTtsService extends ChangeNotifier {
   Completer<void>? _startupCompleter;
   Timer? _lipSyncTimer;
   final Stopwatch _playbackClock = Stopwatch();
-  HttpClientRequest? _downloadRequest;
   Duration _playbackDuration = Duration.zero;
   Duration _positionAnchor = Duration.zero;
   List<double> _amplitudeEnvelope = const [];
@@ -268,12 +135,13 @@ class MossTtsService extends ChangeNotifier {
   final Set<File> _pendingOutputs = {};
   double _segmentProgressStart = 0;
   double _segmentProgressEnd = 1;
-  bool _cancelDownload = false;
   int _operation = 0;
   String _voiceId = voices.first.id;
 
   bool initialized = false;
   bool runtimeReady = false;
+  bool runtimeInitialized = false;
+  bool initializing = false;
   bool ready = false;
   bool downloading = false;
   bool generating = false;
@@ -284,9 +152,10 @@ class MossTtsService extends ChangeNotifier {
   double playbackProgress = 0;
   String operationLabel = '';
   String? lastError;
-  List<String> runtimeProviders = const ['CPU'];
+  List<String> runtimeProviders = const [];
   String activeProvider = 'UNVERIFIED';
   bool _providerMeasured = false;
+  Future<void>? _initializationFuture;
 
   bool get supported => !kIsWeb && Platform.isAndroid;
   double get downloadProgress => totalDownloadBytes <= 0
@@ -295,25 +164,24 @@ class MossTtsService extends ChangeNotifier {
   String get voiceId => _voiceId;
   bool get providerMeasured => _providerMeasured;
   bool get hardwareAccelerationVerified =>
-      _providerMeasured &&
-      (activeProvider == 'QNN_HTP' || activeProvider == 'NNAPI_ACCELERATOR');
+      _providerMeasured && _isQnnProvider(activeProvider);
+  bool get hardwareRuntimeAvailable =>
+      runtimeReady && runtimeInitialized && runtimeProviders.isNotEmpty;
+
   String get accelerationLabel {
-    if (activeProvider == 'QNN_HTP') return 'Qualcomm QNN HTP · 禁止 CPU 回退';
-    if (activeProvider == 'NNAPI_ACCELERATOR') {
-      return 'NNAPI 非 CPU 硬件 · 已执行验证';
+    if (hardwareAccelerationVerified && activeProvider.contains('ORT_CPU')) {
+      return 'Qualcomm QNN HTP + ORT CPU';
     }
-    if (activeProvider == 'NNAPI_HYBRID') {
-      return 'NNAPI 混合加速 · 含 CPU 兜底';
-    }
-    if (_providerMeasured && activeProvider == 'CPU') return 'CPU/NEON 回退';
+    if (hardwareAccelerationVerified) return 'Qualcomm QNN HTP';
+    if (runtimeInitialized) return 'Qualcomm QNN HTP + ORT CPU · 已初始化';
+    if (initializing) return 'QNN HTP 正在初始化';
     if (runtimeProviders.contains('QNN_HTP')) return 'QNN HTP 候选 · 尚未执行验证';
-    if (runtimeProviders.contains('NNAPI_ACCELERATOR')) {
-      return 'NNAPI 非 CPU 硬件候选 · 尚未执行验证';
-    }
-    if (runtimeProviders.contains('NNAPI_HYBRID')) {
-      return 'NNAPI 混合加速候选 · 尚未执行验证';
-    }
-    return 'CPU 回退可用 · 首次合成时验证硬件后端';
+    return 'QNN HTP 不可用';
+  }
+
+  static bool _isQnnProvider(String provider) {
+    final value = provider.trim().toUpperCase();
+    return value.contains('QNN_HTP') || value.contains('QNN_GPU');
   }
 
   MossVoice get selectedVoice => voices.firstWhere(
@@ -326,257 +194,118 @@ class MossTtsService extends ChangeNotifier {
     return Directory('${support.path}${Platform.pathSeparator}$_rootName');
   }
 
-  Future<File> _markerFile() async => File(
-    '${(await _rootDirectory()).path}${Platform.pathSeparator}$_markerName',
-  );
-
   Future<File> _preferencesFile() async => File(
     '${(await _rootDirectory()).path}${Platform.pathSeparator}$_preferencesName',
   );
 
-  Future<File> _assetFile(_MossAsset asset) async => File(
-    '${(await _rootDirectory()).path}${Platform.pathSeparator}${asset.directory}'
-    '${Platform.pathSeparator}${asset.fileName}',
-  );
-
   Future<void> initialize() async {
-    if (initialized || !supported) {
+    if (!supported) {
       initialized = true;
       return;
     }
+    if (runtimeInitialized || (initialized && !ready)) return;
+    final pending = _initializationFuture;
+    if (pending != null) return pending;
+    final future = _initializeInternal();
+    _initializationFuture = future;
+    try {
+      await future;
+    } finally {
+      if (identical(_initializationFuture, future)) {
+        _initializationFuture = null;
+      }
+    }
+  }
+
+  Future<void> _initializeInternal() async {
     try {
       runtimeReady = await _channel.invokeMethod<bool>('probe') == true;
-      if (!runtimeReady) {
-        throw StateError('MOSS-TTS-Nano ONNX Runtime 无法加载');
-      }
-      try {
-        runtimeProviders =
-            await _channel.invokeListMethod<String>('providers') ??
-            const ['CPU'];
-      } on PlatformException {
-        runtimeProviders = const ['CPU'];
-      }
+      runtimeProviders = runtimeReady
+          ? (await _channel.invokeListMethod<String>('providers') ?? const [])
+          : const [];
       await _loadPreferences();
-      ready = await _validateInstalledModel();
+      final model = await _channel.invokeMapMethod<dynamic, dynamic>(
+        'modelInfo',
+      );
+      ready = model != null;
+      if (model?['bytes'] is num) {
+        downloadedBytes = (model!['bytes'] as num).toInt();
+        totalDownloadBytes = downloadedBytes;
+      }
+      if (ready && runtimeReady) await _initializeNativeRuntime();
       await _cleanupAudioCache();
-      await _deleteLegacyKokoro();
-      lastError = null;
+      lastError = runtimeReady ? null : 'Qualcomm QNN HTP 运行时不可用';
     } catch (error) {
-      lastError = '无法检查 MOSS-TTS-Nano 模型: $error';
+      runtimeInitialized = false;
+      lastError = '无法自动初始化 MOSS QNN 运行时: $error';
     } finally {
+      initializing = false;
       initialized = true;
       notifyListeners();
     }
   }
 
-  Future<bool> _validateInstalledModel() async {
-    final marker = await _markerFile();
-    if (!await marker.exists()) return false;
+  Future<void> _initializeNativeRuntime() async {
+    if (runtimeInitialized || initializing) return;
+    initializing = true;
+    operationLabel = '正在初始化 QNN HTP 上下文';
+    notifyListeners();
     try {
-      final value = jsonDecode(await marker.readAsString());
-      if (value is! Map ||
-          value['ttsRevision'] != _ttsRevision ||
-          value['codecRevision'] != _codecRevision) {
-        return false;
+      final state = await _channel.invokeMapMethod<dynamic, dynamic>(
+        'initialize',
+      );
+      runtimeInitialized = state?['initialized'] == true;
+      if (!runtimeInitialized) {
+        throw StateError(
+          state?['error']?.toString() ?? 'Native MOSS runtime 未就绪',
+        );
       }
-      for (final asset in _assets) {
-        final file = await _assetFile(asset);
-        if (!await file.exists() || await file.length() != asset.size) {
-          return false;
-        }
-      }
-      return true;
-    } catch (_) {
-      return false;
+      operationLabel = 'MOSS QNN HTP 已初始化';
+    } finally {
+      initializing = false;
+      notifyListeners();
     }
   }
 
-  Future<void> downloadModel() async {
+  Future<void> importModel() async {
     await initialize();
-    if (!supported) throw UnsupportedError('当前平台暂不支持 MOSS-TTS-Nano 端侧 ONNX');
-    if (!runtimeReady) throw StateError('MOSS-TTS-Nano ONNX Runtime 无法加载');
+    if (!supported) throw UnsupportedError('MOSS QNN 模型导入仅支持 Android');
+    if (!runtimeReady) throw StateError('Qualcomm QNN HTP 运行时不可用');
     if (downloading) return;
-    _cancelDownload = false;
     downloading = true;
-    downloadedBytes = 0;
-    totalDownloadBytes = modelBytes;
-    operationLabel = '正在检查 MOSS-TTS-Nano';
+    operationLabel = '请选择包含 moss-qnn-deployment.json 的目录';
     lastError = null;
     notifyListeners();
     try {
-      final validAssets = <_MossAsset>{};
-      var reusableBytes = 0;
-      var partialBytes = 0;
-      for (final asset in _assets) {
-        final file = await _assetFile(asset);
-        if (await file.exists() && await file.length() == asset.size) {
-          if (await fileSha256(file.path) == asset.sha256) {
-            validAssets.add(asset);
-            reusableBytes += asset.size;
-          } else {
-            await file.delete();
-          }
-        }
-        final partial = File('${file.path}.part');
-        if (!validAssets.contains(asset) && await partial.exists()) {
-          partialBytes += math.min(await partial.length(), asset.size);
-        }
-      }
-      downloadedBytes = reusableBytes;
-      notifyListeners();
-      final available =
-          await _channel.invokeMethod<int>('availableStorageBytes') ?? 0;
-      final required = modelBytes - reusableBytes - partialBytes + 268435456;
-      if (available < required) {
-        throw FileSystemException(
-          '可用存储空间不足，至少还需要 ${_formatBytes(required)}，当前 ${_formatBytes(available)}',
-        );
-      }
-      for (final asset in _assets) {
-        if (_cancelDownload) return;
-        if (validAssets.contains(asset)) continue;
-        await _downloadAsset(asset);
-      }
-      final marker = await _markerFile();
-      await marker.parent.create(recursive: true);
-      await marker.writeAsString(
-        jsonEncode({
-          'ttsRevision': _ttsRevision,
-          'codecRevision': _codecRevision,
-          'bytes': modelBytes,
-        }),
-        flush: true,
+      final model = await _channel.invokeMapMethod<dynamic, dynamic>(
+        'importModel',
       );
-      ready = await _validateInstalledModel();
-      if (!ready) throw const FormatException('MOSS-TTS-Nano 模型文件不完整');
-    } catch (error) {
-      if (!_cancelDownload) {
-        lastError = error.toString();
+      ready = model != null;
+      runtimeInitialized = model?['initialized'] == true;
+      if (model?['bytes'] is num) {
+        downloadedBytes = (model!['bytes'] as num).toInt();
+        totalDownloadBytes = downloadedBytes;
+      }
+      operationLabel = runtimeInitialized
+          ? 'MOSS QNN HTP 模型已导入并初始化'
+          : ready
+          ? 'MOSS QNN HTP 模型已导入'
+          : '';
+    } on PlatformException catch (error) {
+      if (error.code != 'moss_import_cancelled') {
+        lastError = error.message ?? error.code;
         rethrow;
       }
     } finally {
       downloading = false;
-      _downloadRequest = null;
       notifyListeners();
     }
   }
 
-  Future<void> _downloadAsset(_MossAsset asset) async {
-    final destination = await _assetFile(asset);
-    await destination.parent.create(recursive: true);
-    final partial = File('${destination.path}.part');
-    final completedBefore = downloadedBytes;
-    Object? lastFailure;
-    for (var sourceIndex = 0; sourceIndex < asset.urls.length; sourceIndex++) {
-      if (_cancelDownload) return;
-      final client = HttpClient()
-        ..connectionTimeout = const Duration(seconds: 20);
-      IOSink? sink;
-      try {
-        var existing = await partial.exists() ? await partial.length() : 0;
-        if (existing > asset.size) {
-          await partial.delete();
-          existing = 0;
-        }
-        if (existing == asset.size) {
-          operationLabel = '正在校验 ${asset.fileName}';
-          downloadedBytes = completedBefore + existing;
-          notifyListeners();
-          if (await fileSha256(partial.path) == asset.sha256) {
-            if (await destination.exists()) await destination.delete();
-            await partial.rename(destination.path);
-            return;
-          }
-          await partial.delete();
-          existing = 0;
-        }
-        downloadedBytes = completedBefore + existing;
-        operationLabel = '正在下载 ${asset.fileName}';
-        notifyListeners();
-        final request = await client
-            .getUrl(Uri.parse(asset.urls[sourceIndex]))
-            .timeout(const Duration(seconds: 20));
-        _downloadRequest = request;
-        request.headers.set(HttpHeaders.userAgentHeader, 'Talk2U/1.0');
-        if (existing > 0) {
-          request.headers.set(HttpHeaders.rangeHeader, 'bytes=$existing-');
-        }
-        final response = await request.close().timeout(
-          const Duration(seconds: 40),
-        );
-        var append = false;
-        if (existing > 0 && response.statusCode == HttpStatus.partialContent) {
-          final range = response.headers.value(HttpHeaders.contentRangeHeader);
-          if (range == null || !range.startsWith('bytes $existing-')) {
-            await response.drain<void>();
-            throw const HttpException('MOSS 模型断点续传范围无效');
-          }
-          append = true;
-        } else if (response.statusCode == HttpStatus.ok) {
-          if (existing > 0 && await partial.exists()) await partial.delete();
-          existing = 0;
-        } else {
-          await response.drain<void>();
-          throw HttpException('MOSS 模型下载返回 HTTP ${response.statusCode}');
-        }
-        sink = partial.openWrite(
-          mode: append ? FileMode.append : FileMode.write,
-        );
-        var received = existing;
-        var lastNotification = DateTime.now();
-        await for (final bytes in response.timeout(
-          const Duration(seconds: 40),
-        )) {
-          if (_cancelDownload) {
-            request.abort(const HttpException('MOSS 模型下载已暂停'));
-            break;
-          }
-          sink.add(bytes);
-          received += bytes.length;
-          downloadedBytes = completedBefore + received;
-          final now = DateTime.now();
-          if (now.difference(lastNotification).inMilliseconds >= 250) {
-            lastNotification = now;
-            notifyListeners();
-          }
-        }
-        await sink.flush();
-        await sink.close();
-        sink = null;
-        if (_cancelDownload) return;
-        if (await partial.length() != asset.size) {
-          throw const HttpException('MOSS 模型连接提前结束，可再次点击继续下载');
-        }
-        operationLabel = '正在校验 ${asset.fileName}';
-        notifyListeners();
-        if (await fileSha256(partial.path) != asset.sha256) {
-          await partial.delete();
-          throw const FormatException('MOSS 模型 SHA-256 校验失败');
-        }
-        if (await destination.exists()) await destination.delete();
-        await partial.rename(destination.path);
-        downloadedBytes = completedBefore + asset.size;
-        notifyListeners();
-        return;
-      } catch (error) {
-        lastFailure = error;
-        await sink?.close();
-        _downloadRequest = null;
-        if (_cancelDownload) return;
-      } finally {
-        client.close(force: true);
-      }
-    }
-    if (lastFailure != null) {
-      Error.throwWithStackTrace(lastFailure, StackTrace.current);
-    }
-    throw const HttpException('MOSS 模型下载源不可用');
-  }
+  Future<void> downloadModel() => importModel();
 
   void pauseDownload() {
-    _cancelDownload = true;
-    _downloadRequest?.abort(const HttpException('MOSS 模型下载已暂停'));
-    operationLabel = 'MOSS-TTS-Nano 下载已暂停';
+    operationLabel = '模型导入完成前请勿关闭应用';
     notifyListeners();
   }
 
@@ -611,7 +340,8 @@ class MossTtsService extends ChangeNotifier {
 
   Future<void> speak(String text) async {
     await initialize();
-    if (!ready) throw StateError('请先下载 MOSS-TTS-Nano 端侧模型');
+    if (!ready) throw StateError('请先导入 MOSS QNN HTP v81 部署包');
+    if (!runtimeInitialized) await _initializeNativeRuntime();
     final normalized = text.trim();
     if (normalized.isEmpty) return;
     await stopSpeaking();
@@ -635,14 +365,7 @@ class MossTtsService extends ChangeNotifier {
     Completer<void> startup,
   ) async {
     try {
-      final root = await _rootDirectory();
-      final tokenizerPath =
-          '${root.path}${Platform.pathSeparator}$_ttsDirectoryName'
-          '${Platform.pathSeparator}tokenizer.model';
       final chunks = splitMossText(text, maxCharacters: 48);
-      final tokenChunks = await Isolate.run(
-        () => tokenizeMossTextChunks(tokenizerPath, chunks),
-      );
       if (operation != _operation) throw const _MossCancelled();
       final weights = chunks
           .map((chunk) => chunk.runes.length)
@@ -650,7 +373,7 @@ class MossTtsService extends ChangeNotifier {
       final totalWeight = weights.fold<int>(0, (total, value) => total + value);
       var completedWeight = 0;
       var pending = _MossPendingAudio(
-        _synthesizeChunk(root, tokenChunks.first, operation, 0),
+        _synthesizeChunk(chunks.first, operation, 0),
       );
       for (var index = 0; index < chunks.length; index++) {
         final outcome = await pending.future;
@@ -666,12 +389,7 @@ class MossTtsService extends ChangeNotifier {
         _MossPendingAudio? next;
         if (nextIndex < chunks.length) {
           next = _MossPendingAudio(
-            _synthesizeChunk(
-              root,
-              tokenChunks[nextIndex],
-              operation,
-              nextIndex,
-            ),
+            _synthesizeChunk(chunks[nextIndex], operation, nextIndex),
           );
           generating = true;
         } else {
@@ -741,8 +459,7 @@ class MossTtsService extends ChangeNotifier {
   }
 
   Future<_MossAudio> _synthesizeChunk(
-    Directory root,
-    List<int> tokens,
+    String text,
     int operation,
     int index,
   ) async {
@@ -754,23 +471,21 @@ class MossTtsService extends ChangeNotifier {
     );
     _pendingOutputs.add(output);
     try {
-      final response = await _channel.invokeMapMethod<dynamic, dynamic>(
-        'synthesize',
-        {
-          'modelRoot': root.path,
-          'outputPath': output.path,
-          'tokenChunks': [tokens],
-          'voice': _voiceId,
-          'maxFrames': 375,
-          'seed': DateTime.now().microsecondsSinceEpoch + index,
-        },
-      );
+      final response = await _channel
+          .invokeMapMethod<dynamic, dynamic>('synthesize', {
+            'outputPath': output.path,
+            'text': text,
+            'voice': _voiceId,
+            'maxFrames': 375,
+            'seed': DateTime.now().microsecondsSinceEpoch + index,
+          });
       if (operation != _operation) throw const _MossCancelled();
       final provider = response?['provider'] as String?;
-      if (provider != null && provider.isNotEmpty) {
-        activeProvider = provider;
-        _providerMeasured = true;
+      if (provider == null || provider.isEmpty) {
+        throw StateError('MOSS-TTS-Nano 未返回有效的执行 provider');
       }
+      activeProvider = provider;
+      _providerMeasured = true;
       final outputPath = response?['path'] as String?;
       if (outputPath == null) {
         throw StateError('MOSS-TTS-Nano 没有生成可播放音频');
@@ -891,15 +606,14 @@ class MossTtsService extends ChangeNotifier {
   }
 
   Future<void> deleteModel() async {
-    if (downloading) throw StateError('请先暂停下载并等待当前文件停止写入');
-    pauseDownload();
+    if (downloading) throw StateError('请等待当前模型导入结束');
     await stopSpeaking();
     if (supported) {
-      await _channel.invokeMethod<void>('release');
+      await _channel.invokeMethod<void>('deleteModel');
     }
-    final root = await _rootDirectory();
-    if (await root.exists()) await root.delete(recursive: true);
     ready = false;
+    runtimeInitialized = false;
+    initializing = false;
     downloadedBytes = 0;
     notifyListeners();
   }
@@ -909,6 +623,8 @@ class MossTtsService extends ChangeNotifier {
     if (supported) {
       await _channel.invokeMethod<void>('release');
     }
+    runtimeInitialized = false;
+    notifyListeners();
   }
 
   Future<void> _deleteCurrentOutput() async {
@@ -960,28 +676,6 @@ class MossTtsService extends ChangeNotifier {
       } on FileSystemException {
         continue;
       }
-    }
-  }
-
-  Future<void> _deleteLegacyKokoro() async {
-    final support = await getApplicationSupportDirectory();
-    final legacyRoot = Directory(
-      '${support.path}${Platform.pathSeparator}sherpa-speech',
-    );
-    final targets = <FileSystemEntity>[
-      Directory(
-        '${legacyRoot.path}${Platform.pathSeparator}kokoro-int8-multi-lang-v1_1',
-      ),
-      File(
-        '${legacyRoot.path}${Platform.pathSeparator}kokoro-int8-multi-lang-v1_1.tar.bz2',
-      ),
-      File(
-        '${legacyRoot.path}${Platform.pathSeparator}kokoro-int8-multi-lang-v1_1.tar.bz2.part',
-      ),
-      File('${legacyRoot.path}${Platform.pathSeparator}tts-preferences.json'),
-    ];
-    for (final target in targets) {
-      if (await target.exists()) await target.delete(recursive: true);
     }
   }
 
@@ -1049,24 +743,6 @@ Future<bool> isPlayableMossWav(File file) async {
 }
 
 @visibleForTesting
-List<List<int>> tokenizeMossTextChunks(String modelPath, List<String> chunks) {
-  final tokenizer = SentencePieceTokenizer.fromModelFileSync(
-    modelPath,
-    config: const SentencePieceConfig(),
-  );
-  return chunks
-      .map(
-        (chunk) => tokenizer
-            .encode(
-              normalizeMossSentencePieceText(chunk),
-              addSpecialTokens: false,
-            )
-            .ids
-            .toList(growable: false),
-      )
-      .toList(growable: false);
-}
-
 @visibleForTesting
 String normalizeMossSentencePieceText(String text) {
   final output = StringBuffer();
@@ -1080,14 +756,6 @@ String normalizeMossSentencePieceText(String text) {
     }
   }
   return output.toString();
-}
-
-@visibleForTesting
-Future<String> fileSha256(String path) async {
-  return Isolate.run(() async {
-    final digest = await sha256.bind(File(path).openRead()).first;
-    return digest.toString();
-  });
 }
 
 @visibleForTesting
@@ -1180,14 +848,4 @@ List<double> buildWavAmplitudeEnvelope(
   } finally {
     input.closeSync();
   }
-}
-
-String _formatBytes(int bytes) {
-  if (bytes >= 1073741824) {
-    return '${(bytes / 1073741824).toStringAsFixed(1)} GB';
-  }
-  if (bytes >= 1048576) {
-    return '${(bytes / 1048576).toStringAsFixed(0)} MB';
-  }
-  return '${(bytes / 1024).toStringAsFixed(0)} KB';
 }

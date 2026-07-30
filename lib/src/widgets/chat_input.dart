@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:talk2u/l10n/generated/app_localizations.dart';
 
 class ChatInput extends StatefulWidget {
   final bool isStreaming;
@@ -74,6 +75,7 @@ class _ChatInputState extends State<ChatInput> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final strings = AppLocalizations.of(context);
 
     return Container(
       padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
@@ -92,7 +94,9 @@ class _ChatInputState extends State<ChatInput> {
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
             IconButton(
-              tooltip: widget.voiceEnabled ? '离线语音输入' : '设备无离线识别引擎',
+              tooltip: widget.voiceEnabled
+                  ? strings.offlineVoiceInput
+                  : strings.offlineVoiceUnavailable,
               onPressed:
                   widget.voiceEnabled &&
                       (!widget.isStreaming || widget.allowVoiceDuringStreaming)
@@ -113,7 +117,9 @@ class _ChatInputState extends State<ChatInput> {
                 textInputAction: TextInputAction.newline,
                 onSubmitted: (_) => _handleSend(),
                 decoration: InputDecoration(
-                  hintText: widget.isStreaming ? 'AI 正在回复...' : '输入消息...',
+                  hintText: widget.isStreaming
+                      ? strings.aiResponding
+                      : strings.messageHint,
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(24),
                     borderSide: BorderSide.none,
@@ -131,7 +137,7 @@ class _ChatInputState extends State<ChatInput> {
             ),
             const SizedBox(width: 6),
             IconButton.filled(
-              tooltip: widget.isStreaming ? '停止生成' : '发送',
+              tooltip: widget.isStreaming ? strings.stopGenerating : strings.send,
               onPressed: widget.isStreaming
                   ? widget.onStop
                   : (_hasText ? _handleSend : null),

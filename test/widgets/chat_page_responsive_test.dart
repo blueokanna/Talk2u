@@ -1,7 +1,9 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
+import 'package:talk2u/l10n/generated/app_localizations.dart';
 import 'package:talk2u/src/pages/chat_page.dart';
 import 'package:talk2u/src/state/chat_state.dart';
 
@@ -24,6 +26,14 @@ void main() {
           ChangeNotifierProvider.value(
             value: state,
             child: MaterialApp(
+              locale: const Locale('zh'),
+              localizationsDelegates: const [
+                AppLocalizations.delegate,
+                GlobalMaterialLocalizations.delegate,
+                GlobalWidgetsLocalizations.delegate,
+                GlobalCupertinoLocalizations.delegate,
+              ],
+              supportedLocales: AppLocalizations.supportedLocales,
               home: MediaQuery(
                 data: MediaQueryData(
                   size: entry.value.size,

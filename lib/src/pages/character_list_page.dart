@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:talk2u/l10n/generated/app_localizations.dart';
 import 'package:talk2u/src/models/character.dart';
 import 'package:talk2u/src/pages/character_edit_page.dart';
 
@@ -54,22 +55,23 @@ class _CharacterListPageState extends State<CharacterListPage> {
   }
 
   Future<void> _deleteCharacter(Character character) async {
+    final strings = AppLocalizations.of(context);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('删除角色'),
-        content: Text('确定要删除"${character.name}"吗？此操作不可撤销。'),
+        title: Text(strings.deleteCharacter),
+        content: Text(strings.deleteCharacterConfirm(character.name)),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('取消'),
+            child: Text(strings.cancel),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(ctx, true),
             style: FilledButton.styleFrom(
               backgroundColor: Theme.of(ctx).colorScheme.error,
             ),
-            child: const Text('删除'),
+            child: Text(strings.delete),
           ),
         ],
       ),
@@ -81,13 +83,14 @@ class _CharacterListPageState extends State<CharacterListPage> {
   }
 
   Future<void> _importCharacter() async {
+    final strings = AppLocalizations.of(context);
     final count = await CharacterStore.instance.importFromPicker();
     if (!mounted) return;
     if (count > 0) {
       setState(() {});
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('成功导入 $count 个角色'),
+          content: Text(strings.charactersImported(count)),
           behavior: SnackBarBehavior.floating,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),
@@ -97,7 +100,7 @@ class _CharacterListPageState extends State<CharacterListPage> {
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: const Text('导入失败，请检查文件格式'),
+          content: Text(strings.characterImportFailed),
           behavior: SnackBarBehavior.floating,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),
@@ -108,15 +111,19 @@ class _CharacterListPageState extends State<CharacterListPage> {
   }
 
   Future<void> _exportCharacter(Character character) async {
+    final strings = AppLocalizations.of(context);
     try {
       final path = await CharacterStore.instance.exportCharacter(character);
       if (!mounted) return;
-      await Share.shareXFiles([XFile(path)], text: '角色配置：${character.name}');
+      await Share.shareXFiles(
+        [XFile(path)],
+        text: strings.shareCharacter(character.name),
+      );
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('导出失败: $e'),
+          content: Text(strings.exportFailed('$e')),
           behavior: SnackBarBehavior.floating,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),
@@ -128,15 +135,16 @@ class _CharacterListPageState extends State<CharacterListPage> {
 
   Future<void> _exportAllCharacters() async {
     if (CharacterStore.instance.characters.isEmpty) return;
+    final strings = AppLocalizations.of(context);
     try {
       final path = await CharacterStore.instance.exportAllCharacters();
       if (!mounted) return;
-      await Share.shareXFiles([XFile(path)], text: '全部角色配置');
+      await Share.shareXFiles([XFile(path)], text: strings.shareAllCharacters);
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('导出失败: $e'),
+          content: Text(strings.exportFailed('$e')),
           behavior: SnackBarBehavior.floating,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),
@@ -149,10 +157,11 @@ class _CharacterListPageState extends State<CharacterListPage> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final strings = AppLocalizations.of(context);
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('我的角色'),
+        title: Text(strings.charactersTitle),
         centerTitle: true,
         actions: [
           PopupMenuButton<String>(
@@ -161,23 +170,23 @@ class _CharacterListPageState extends State<CharacterListPage> {
               borderRadius: BorderRadius.circular(12),
             ),
             itemBuilder: (_) => [
-              const PopupMenuItem(
+              PopupMenuItem(
                 value: 'import',
                 child: Row(
                   children: [
                     Icon(Icons.file_download_rounded, size: 20),
                     SizedBox(width: 12),
-                    Text('导入角色'),
+                    Text(strings.importCharacters),
                   ],
                 ),
               ),
-              const PopupMenuItem(
+              PopupMenuItem(
                 value: 'export_all',
                 child: Row(
                   children: [
                     Icon(Icons.file_upload_rounded, size: 20),
                     SizedBox(width: 12),
-                    Text('导出全部'),
+                    Text(strings.exportAll),
                   ],
                 ),
               ),
@@ -189,18 +198,18 @@ class _CharacterListPageState extends State<CharacterListPage> {
           ),
           IconButton(
             icon: const Icon(Icons.add_rounded),
-            tooltip: '创建角色',
+            tooltip: strings.createCharacter,
             onPressed: _createCharacter,
           ),
         ],
       ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
-          : _buildCharacterList(theme),
+          : _buildCharacterList(theme, strings),
     );
   }
 
-  Widget _buildCharacterList(ThemeData theme) {
+  Widget _buildCharacterList(ThemeData theme, AppLocalizations strings) {
     final characters = CharacterStore.instance.characters;
     return ListView.builder(
       padding: const EdgeInsets.all(16),
@@ -214,8 +223,12 @@ class _CharacterListPageState extends State<CharacterListPage> {
                 foregroundColor: theme.colorScheme.onPrimaryContainer,
                 child: const Icon(Icons.smart_toy_outlined),
               ),
-              title: const Text('普通助手'),
-              subtitle: Text(characters.isEmpty ? '无需创建角色，直接开始对话' : '不使用角色设定'),
+              title: Text(strings.regularAssistant),
+              subtitle: Text(
+                characters.isEmpty
+                    ? strings.directChat
+                    : strings.noCharacterSettings,
+              ),
               trailing: const Icon(Icons.chevron_right_rounded),
               onTap: widget.onSelectAssistant,
             ),
@@ -252,6 +265,7 @@ class _CharacterCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final strings = AppLocalizations.of(context);
     final genderIcon = switch (character.gender) {
       CharacterGender.male => Icons.male_rounded,
       CharacterGender.female => Icons.female_rounded,
@@ -334,23 +348,23 @@ class _CharacterCard extends StatelessWidget {
                       borderRadius: BorderRadius.circular(12),
                     ),
                     itemBuilder: (_) => [
-                      const PopupMenuItem(
+                      PopupMenuItem(
                         value: 'edit',
                         child: Row(
                           children: [
                             Icon(Icons.edit_rounded, size: 20),
                             SizedBox(width: 12),
-                            Text('编辑'),
+                            Text(strings.edit),
                           ],
                         ),
                       ),
-                      const PopupMenuItem(
+                      PopupMenuItem(
                         value: 'export',
                         child: Row(
                           children: [
                             Icon(Icons.file_upload_rounded, size: 20),
                             SizedBox(width: 12),
-                            Text('导出'),
+                            Text(strings.export),
                           ],
                         ),
                       ),
@@ -365,7 +379,7 @@ class _CharacterCard extends StatelessWidget {
                             ),
                             const SizedBox(width: 12),
                             Text(
-                              '删除',
+                              strings.delete,
                               style: TextStyle(color: theme.colorScheme.error),
                             ),
                           ],

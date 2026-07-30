@@ -51,7 +51,7 @@ class Live2dModelImporter {
       }
       return modelPath;
     }
-    return 'asset:///model/mao/runtime/mao_pro.model3.json';
+    return 'asset:///model/Live2d/mao/runtime/mao_pro.model3.json';
   }
 
   @visibleForTesting

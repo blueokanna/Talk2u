@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:talk2u/l10n/generated/app_localizations.dart';
 
 class ThinkingBlock extends StatefulWidget {
   final String thinkingContent;
@@ -59,13 +60,14 @@ class _ThinkingBlockState extends State<ThinkingBlock>
     if (widget.thinkingContent.isEmpty) return const SizedBox.shrink();
 
     final theme = Theme.of(context);
+    final strings = AppLocalizations.of(context);
 
     return Padding(
       padding: const EdgeInsets.only(left: 12, right: 12, bottom: 4),
       child: Container(
         decoration: BoxDecoration(
           color: theme.colorScheme.primaryContainer.withValues(alpha: 0.3),
-          borderRadius: BorderRadius.circular(14),
+          borderRadius: BorderRadius.circular(8),
           border: Border.all(
             color: theme.colorScheme.primary.withValues(alpha: 0.2),
             width: 0.5,
@@ -92,7 +94,7 @@ class _ThinkingBlockState extends State<ThinkingBlock>
                     ),
                     const SizedBox(width: 8),
                     Text(
-                      '深度思考',
+                      strings.thinking,
                       style: theme.textTheme.labelMedium?.copyWith(
                         color: theme.colorScheme.primary,
                         fontWeight: FontWeight.w600,

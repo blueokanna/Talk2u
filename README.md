@@ -1,6 +1,6 @@
 # Talk2U
 
-Talk2U 是一个 Flutter + Rust 的本地角色聊天应用。聊天记录、角色设定、记忆和知识数据保存在本机；模型回复可以来自用户选择的联网 LLM，也可以在 Android 上由端侧 Qwen 模型生成。Android、Windows 和 Linux 默认显示 Live2D 对话界面，对话文字按需展开，文字输入始终可用。Android 支持系统端侧语音、SenseVoice STT，以及可验证加速后端并明确回退 CPU 的 MOSS-TTS；Windows/Linux 当前支持 SenseVoice STT，但尚未完成端侧 TTS。
+Talk2U 是一个 Flutter + Rust 的本地角色聊天应用。聊天记录、角色设定、记忆和知识数据保存在本机；模型回复可以来自用户选择的联网 LLM，也可以在 Android 上由端侧 Qwen 模型生成。Android、Windows 和 Linux 默认显示 Live2D 对话界面，对话文字按需展开，文字输入始终可用。Android 语音不依赖系统 TTS/STT：识别使用应用内 sherpa-onnx + SenseVoice INT8，合成使用 MOSS-TTS-Nano + Qualcomm QNN HTP。
 
 本文档既是安装说明，也是当前实现边界。请先阅读“能力状态”，再按“Windows 到 Android 真机的最短路径”操作。
 
@@ -17,22 +17,21 @@ Talk2U 是一个 Flutter + Rust 的本地角色聊天应用。聊天记录、角
 | 自定义 URL | 已实现 | OpenAI-compatible；API Key 可留空，支持 HTTP(S) 完整地址 |
 | 跨平台继续同一对话 | 已实现 | conversation 与供应商解耦，切换供应商不创建新会话 |
 | 本地记忆/知识检索 | 已实现 | Rust 本地文件存储、短期上下文、长期摘要、知识事实检索 |
-| Android 端侧 LLM | 有条件实现 | 精确支持 `Qwen/Qwen3-4B-Instruct-2507` Genie 部署包；实际加载顺序为已验证 SM8850/V81 HTP、CPU，界面显示最终成功后端 |
-| 跨平台离线 STT | 已实现 | Android/Windows/Linux 使用 sherpa-onnx SenseVoice；长期 isolate 复用识别器，模型按需下载 |
+| Android 端侧 LLM | 已实现 | `Qwen/Qwen3-4B-Instruct-2507` Q4_K_M GGUF；llama.cpp 将 36 个 transformer block 与输出矩阵卸载到 Adreno Vulkan |
+| 离线 STT | 已实现 | Android SM8850 上使用 sherpa-onnx + SenseVoice 2024-07-17 INT8 QNN context，提供 ASR/LID/SER/AED |
 | 持续语音通话 | Android 有条件实现 | 最终识别结果自动发送、回复自动朗读并恢复监听；需要同一设备上同时存在可用的端侧 STT 与 TTS |
-| Android/Windows/Linux Live2D | 有条件实现 | Android WebView、Windows WebView2、Linux CEF + Pixi；运行时必须取得 Cubism Core 5 |
+| Android/Windows/Linux Live2D | 有条件实现 | Android 使用 Cubism SDK for Native 5 R.5 + C++ + OpenGL ES；Windows 使用 WebView2，Linux 使用 CEF |
 | Cubism 5 moc3 | 已实现 | 导入时读取 `MOC3` 头并接受 moc3 版本 1-5；运行时拒绝 Core 4 |
 | `.cdi3.json` | 已实现 | 校验 Version 3，并用于发现 LipSync 参数 |
-| LipSync | 已实现 | Android 系统 TTS PCM 或 MOSS WAV 振幅包络驱动模型嘴部参数 |
+| LipSync | 已实现 | MOSS 生成 WAV 的真实 PCM 振幅包络驱动模型嘴部参数 |
 | 肢体动作/表情 | 已实现，取决于模型 | 语境与舞台指示生成 cue，只播放 `talk2u.avatar.json` 明确映射或名称可验证的动作组 |
-| 舞台指示静音 | 已实现 | `（哈哈大笑）`、`*挥手*` 等动作不送入 TTS，但会影响 Live2D cue 与系统 TTS 语气；解释性括号保留朗读 |
-| Android 离线 TTS | 有条件实现 | 系统离线 voice，或 MOSS-TTS；MOSS 依次尝试四图严格 NNAPI、NNAPI/ORT 混合执行、CPU，并如实显示最终模式 |
-| Android 离线 STT | 已实现 | 优先使用 Android on-device recognizer，不可用时回退到已下载的 sherpa SenseVoice |
+| 舞台指示静音 | 已实现 | `（哈哈大笑）`、`*挥手*` 等动作不送入 MOSS，但仍影响 Live2D cue；解释性括号保留朗读 |
+| Android 离线 TTS | 有条件实现 | 导入 SM8850/HTP v81 部署包后，prefill/decode/codec 使用 QNN HTP，sampler 使用 ORT CPU；不回退系统 TTS |
+| Android 离线 STT | 已实现 | SenseVoice INT8 支持中文、英文及自动语言识别；模型由应用下载、校验和管理 |
 | Android NNAPI 设备诊断 | 已实现 | 枚举设备名、版本、类型和 feature level；CPU 类型不会计为加速设备 |
 | 原生 Vulkan/OpenGL ES 预检 | 已实现 | NDK C++ 真实创建 Vulkan instance/device；失败时真实创建 EGL OpenGL ES 3/2 context |
-| Live2D Web 图形兼容 | 已实现 | 硬件 WebGL2 创建失败时降级 WebGL1；context lost 后恢复、重载或重建 PlatformView |
-| Live2D 实际 Vulkan/OpenGL 后端 | 可验证、不可由 WebView 强制 | 实际 Vulkan 或 OpenGL ES 后端由系统 WebView/ANGLE 决定，应用只接受真实 GPU renderer 结果 |
-| 官方 Cubism Native SDK 5 渲染器 | 未集成 | 仓库没有可再分发的 Native Core/Framework，不能宣称原生 Vulkan 已完成 |
+| Android Live2D GPU 渲染 | 已实现 | `GLSurfaceView` 托管 Native C++ Cubism renderer，实际使用硬件 OpenGL ES；首帧成功后才报告 ready |
+| 官方 Cubism Native SDK 5 渲染器 | 已集成，需外部 SDK | Gradle/CMake 从 `TALK2U_CUBISM_SDK_ROOT` 使用 Framework 与 Core；Core 不进入 Git 仓库 |
 | Discord | 已实现 | 独立 Rust 轮询桥接进程，共用对话、记忆和供应商层 |
 | iOS/macOS Live2D | 未实现 | 当前 Live2D 宿主只覆盖 Android、Windows 和 Linux |
 | Discord Gateway/Android 常驻 Bot | 未实现 | 当前是桌面或服务器前台轮询进程 |
@@ -45,11 +44,12 @@ Talk2U 是一个 Flutter + Rust 的本地角色聊天应用。聊天记录、角
 Flutter UI
   ├─ 平台/模型选择、角色、对话和记忆界面
   ├─ 默认全屏 Live2D；对话记录按需展开；文字输入常驻
-  ├─ AndroidView -> Live2D WebView；Windows -> WebView2；Linux -> CEF
-  ├─ Android Genie -> Qwen3-4B-Instruct-2507 端侧回复（HTP -> CPU）
-  ├─ sherpa-onnx -> Android/Windows/Linux 离线 STT
-  ├─ MOSS-TTS ONNX -> Android 严格 NNAPI -> NNAPI/ORT 混合 -> 显式 CPU 回退
-  └─ MethodChannel/EventChannel -> Android 系统 TTS/STT、硬件诊断与 PCM 振幅
+  ├─ AndroidView -> GLSurfaceView -> Cubism Native C++/OpenGL ES
+  ├─ Windows -> WebView2；Linux -> CEF
+  ├─ Android llama.cpp/Vulkan -> Qwen3-4B-Instruct-2507 Q4_K_M（Adreno GPU）
+  ├─ sherpa-onnx Kotlin/JNI + SenseVoice QNN -> SM8850 HTP 端侧 STT
+  ├─ MOSS-TTS Native JNI -> QNN HTP(prefill/decode/codec) + ORT CPU(sampler)
+  └─ MethodChannel -> MOSS 部署包导入、QNN 探测与 WAV 合成
              |
 flutter_rust_bridge
              |
@@ -76,12 +76,12 @@ Rust core
 android/                 Android 原生 TTS/STT、Live2D PlatformView
 assets/live2d/           Live2D HTML 宿主与可再分发 JS 依赖
 lib/                     Flutter UI、状态、角色与端侧服务
-model/mao/runtime/       内置最小 Cubism 5 运行时模型
+model/Live2d/mao/runtime/       内置最小 Cubism 5 运行时模型
 model/Custom_Suiika/     可选外部参考模型；仓库不要求存在，也不打进 APK
 rust/src/api/            聊天、供应商、记忆、知识与存储
 rust/src/connectors/     外部平台连接器
 test/                    Flutter 单元测试
-tool/                    Android、Cubism Core 和模型打包脚本
+tools/qnn/               QNN 部署状态、检查与打包工具
 ```
 
 ## Windows 到 Android 真机的最短路径
@@ -96,6 +96,7 @@ tool/                    Android、Cubism Core 和模型打包脚本
 - Visual Studio Build Tools，包含“使用 C++ 的桌面开发”。
 - JDK 17。
 - Android SDK 36、Build Tools 36、NDK `28.0.12674087` 和 CMake `3.22.1`。
+- 已接受相应许可的 Cubism SDK for Native 5 R.5；默认路径为 `D:\CubismSdkForNative-5`。
 - 一台启用 USB 调试的 ARM64 Android 设备。
 
 检查命令：
@@ -111,36 +112,7 @@ adb devices
 
 JDK 必须显示 17。设备应在 `adb devices` 中显示为 `device`，不能是 `unauthorized`。
 
-### 2. 自动准备仓库内 Android SDK（可选）
-
-脚本会下载 Google command-line tools，显示 Android 许可，并把 SDK 安装到仓库的 `.android-sdk/`。只有阅读并接受相应许可后才可传入开关。
-
-Flutter 已在 PATH：
-
-```powershell
-.\tool\bootstrap_android.ps1 -AcceptAndroidLicenses
-```
-
-Flutter 不在 PATH：
-
-```powershell
-.\tool\bootstrap_android.ps1 `
-  -FlutterRoot 'C:\dev\flutter' `
-  -AcceptAndroidLicenses
-```
-
-自定义 Android SDK 位置：
-
-```powershell
-.\tool\bootstrap_android.ps1 `
-  -SdkRoot 'C:\Android\sdk' `
-  -FlutterRoot 'C:\dev\flutter' `
-  -AcceptAndroidLicenses
-```
-
-脚本会生成 `android/local.properties`，该文件只属于本机，不要提交。
-
-### 3. 安装 Rust Android target
+### 2. 安装 Rust Android target
 
 当前 APK 只构建 `arm64-v8a`，这是为了减小包体和最小化原生组合数量：
 
@@ -156,7 +128,7 @@ rustup target add aarch64-linux-android
 
 不要只增加其中一项。APK 中每个被声明支持的 ABI 都必须同时拥有 Flutter、Rust 和插件 JNI 库，否则会在启动时加载原生库失败。仓库内的 Cargokit 补丁只构建 Flutter 命令明确请求的架构，不会再向 debug 包偷偷追加模拟器 ABI。
 
-### 4. 获取依赖并运行测试
+### 3. 获取依赖并运行测试
 
 ```powershell
 flutter pub get
@@ -171,7 +143,15 @@ flutter analyze lib test
 
 `flutter pub get` 不能在首次构建或修改 `pubspec.yaml` 后省略。它会生成被 Git 忽略的 `.flutter-plugins-dependencies`；缺少该文件时 Dart 包可能仍能被分析，但 Android Gradle 不会注册 `rust_lib_talk2u`，最终 APK 也就没有 Rust 动态库。
 
-### 5. 构建并安装 debug APK
+### 4. 构建并安装 debug APK
+
+Android 构建会直接从本机 Cubism SDK 读取 Framework 源码、OpenGL ES shader、头文件和 ARM64 Core 静态库。SDK 不复制进仓库；路径不同时设置：
+
+```powershell
+$env:TALK2U_CUBISM_SDK_ROOT='D:\CubismSdkForNative-5'
+```
+
+不得把 `Live2DCubismCore`、整个 Cubism SDK 或从中复制的受限文件提交到公开仓库。生成的 APK 会把本机 Core 静态链接进 `libtalk2u_live2d.so`，发布该 APK 前仍必须确认自己的 Live2D 许可允许对应分发方式。
 
 ```powershell
 flutter build apk --debug --target-platform android-arm64
@@ -205,7 +185,7 @@ adb install -r .\build\app\outputs\flutter-apk\app-debug.apk
 
 首次启动直接进入“普通助手”的 Live2D 对话界面，画面使用内置 Mao，但不会注入任何角色设定；不创建角色也能像普通 AI 一样聊天。需要自定义身份时，再从角色列表创建角色并选择 Live2D 模型。联网使用时配置一个 API 平台；Android/iOS 完全离线使用时在设置中下载端侧 AI 模型。
 
-### 6. 构建 Windows 和 Linux
+### 5. 构建 Windows 和 Linux
 
 Windows 必须安装 Visual Studio 的“使用 C++ 的桌面开发”工作负载和 Microsoft Edge WebView2 Evergreen Runtime（Windows 10/11 通常已安装）：
 
@@ -299,40 +279,40 @@ http://192.168.1.20:11434/v1/chat/completions
 
 ## 端侧离线 AI 与语音模型
 
-模型权重不打入 APK 或桌面安装包。MOSS/SenseVoice 按需下载并逐文件校验；Qwen3 由用户安装 `tools/qnn/prepare_qwen3_genie.ps1` 生成的部署 ZIP，应用在替换旧部署前校验清单、文件大小和 SHA-256。模型加载、解压、识别与合成放在后台任务中，不阻塞首屏。
+模型权重不打入 APK。SenseVoice 与 Qwen3-4B-Instruct-2507 由应用按需断点下载并校验；MOSS 使用经过验证的 HTP v81 目录，由 Android 目录选择器导入并逐文件校验。
 
 | 用途 | 平台 | 模型 | 下载大小 | SHA-256 |
 | --- | --- | --- | ---: | --- |
-| 离线对话 | Android ARM64 | Qwen3-4B-Instruct-2507 Genie 部署包 | 取决于 Composer 量化与可选 QNN context | 部署清单逐文件 SHA-256 |
-| 离线 STT | Android/Windows/Linux | SenseVoice 2025 INT8 | 165,783,878 B | `7305f7905bfcf77fa0b39388a313f3da35c68d971661a65475b56fb2162c8e63` |
-| 离线 TTS | Android | MOSS-TTS-Nano 100M ONNX + Audio Tokenizer | 717,414,286 B | 每个文件使用代码内固定 SHA-256 校验 |
+| 离线对话 | Android ARM64 | Qwen3-4B-Instruct-2507 Q4_K_M GGUF | 2,497,281,120 B | `3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597` |
+| 离线 STT | Android SM8850/HTP v81 | SenseVoice 2024-07-17 INT8 QNN 10 秒 context | 162,023,574 B | `ecbc1ffba39f8e23582b79a199d12e8455425a22ef7b6b18c535ce25fcff2d64` |
+| 离线 TTS | Android SM8850/HTP v81 | MOSS-TTS-Nano 100M QNN 部署包 + Audio Tokenizer | 取决于准备结果 | `moss-qnn-deployment.json` 逐文件 SHA-256 |
 
-Qwen3-4B-Instruct-2507 模型卡声明 Apache-2.0；`sherpa-onnx` 与 MOSS 模型也需分别遵守各自许可。QAIRT/Genie/QNN 二进制受 Qualcomm SDK 条款约束，不由仓库重新分发。引擎许可证不自动覆盖模型权重，发布安装包或模型镜像前仍须逐项复核权重许可、SDK 条款和署名要求。
+Qwen3-4B-Instruct-2507 模型卡声明 Apache-2.0；GGUF 固定到 `unsloth/Qwen3-4B-Instruct-2507-GGUF@a06e946b`。`sherpa-onnx` 与 MOSS 模型也需分别遵守各自许可。QAIRT/QNN 二进制受 Qualcomm SDK 条款约束，不由仓库重新分发。
 
 ### 端侧 LLM 硬件后端
 
 | 平台/芯片 | 当前推理后端 | 当前状态 |
 | --- | --- | --- |
-| Android SM8850 | Genie：有验证工件时 HTP -> CPU | 部署包必须包含对应配置与验证标记；HTP 首轮生成成功后才显示为已验证，CPU 回退会在 Flutter 明示 |
-| 其他 Android ARM64 | Genie：CPU | SM8850/V81 HTP context 不会在其他 SoC 启用；QAIRT 2.48 Genie 没有 QNN GPU dialog backend |
-| iPhone/iPad | 无端侧 LLM 后端 | Qwen3 Genie 接入当前仅覆盖 Android |
+| Android SM8850 | llama.cpp Vulkan/Adreno | 卸载 36 个 transformer block 与输出矩阵；首轮非空生成成功后才显示为已验证 |
+| 其他 Android ARM64 | llama.cpp Vulkan 或 ARM64 CPU | Vulkan 不可用时明确显示 CPU/NEON，不伪报 GPU/NPU |
+| iPhone/iPad | 无端侧 LLM 后端 | 当前接入只覆盖 Android |
 | Windows x64/ARM64 | 无端侧 LLM 后端 | 未实现 DirectML/CUDA/Vulkan/CPU 本地推理，当前只能使用联网平台 |
 | Linux x64/ARM64 | 无端侧 LLM 后端 | 未实现 CUDA/Vulkan/ROCm/CPU 本地推理，当前只能使用联网平台 |
 | macOS | 无端侧 LLM 后端 | 当前只能使用联网平台 |
 
-Android 安装并校验 Qwen3 Genie 部署包后，不填写联网 API Key 也可以对话。应用在首条端侧消息时懒加载模型，依次尝试清单中的 HTP、CPU 配置；创建成功只表示 backend 已加载，首轮真实生成成功后才把 HTP 标为已验证。Composer 2.48 能识别该 `Qwen3ForCausalLM` 架构和 `Z4`、`Q4`、`Z8`、`Q5_K` 量化，但其直接生成的 `.bin` 通过 `QnnGenAiTransformer` 在 host CPU 执行，不能仅凭“Composer 支持”宣称 HTP。HTP 必须另有可加载配置和已验证工件；Genie 2.48 schema 没有 QNN GPU dialog backend。
+Android 设置页会断点下载固定版本 GGUF，校验精确大小和 SHA-256 后原子安装到应用私有目录。运行时再次校验清单、文件大小、`general.architecture=qwen3` 和 36 层结构；输入 embedding、采样与小算子留在 CPU，transformer、矩阵乘和 attention 由 Adreno Vulkan 执行。逐 token 结果通过 JNI/MethodChannel 流式送回 Flutter。
 
-Android 会优先使用系统自身可验证的 on-device STT 和离线 TTS voice；系统 STT 缺失时可使用 SenseVoice。MOSS-TTS 先尝试让四个 ONNX 子图全部创建严格 NNAPI session；失败后尝试禁用 NNAPI CPU 设备、但允许 ORT CPU 承接不支持节点的 `NNAPI 混合加速`；仍失败才使用 ONNX CPU 并显示 `CPU/NEON 回退`。混合模式不会被标为纯 NPU 验证。生成的 WAV 仍会经过 PCM 结构与振幅校验后播放。Windows/Linux 当前只有 SenseVoice STT，没有端侧 TTS，因此持续通话按钮在这两个平台不能满足启动条件。所有平台即使未安装语音模型也始终可以文字输入。
+Android 不调用系统 on-device STT/TTS。MOSS 仅从带完整清单的 SM8850/HTP v81 包创建原生 session。SenseVoice 使用官方 SM8850 QNN context binary，通过 sherpa-onnx Kotlin/JNI API 的 `provider=qnn` 和 `QnnConfig` 加载；初始化或 HTP 执行失败会直接报错，不回退并伪报 QNN。
 
 ### Android MOSS-TTS 硬件执行
 
-默认 `onnxruntime-android 1.27.0` 原生库包含 NNAPI execution provider，不包含 QNN execution provider。因此当前 APK 的 MOSS-TTS 先尝试严格 NNAPI，再尝试 NNAPI/ORT 混合执行，最后明确回退 CPU；仅仅在 Java API 中看到 `addQnn` 不能证明 QNN 可用。
+Android 使用与参考工程一致的 ONNX Runtime `1.26.0/API 26` core 和 QNN Plugin EP `2.4.0` 同构产物。Gradle 对 ORT core、Plugin EP 和 C API 头文件执行固定 SHA-256 校验，禁止混用 ABI。QAIRT host 库和 HTP skel 来自本机合法安装的 SDK；只有经过验证的部署才会创建 QNN session。prefill/decode 使用 QNN HTP，sampler/codec 使用 ORT CPU 多线程且不会伪报为 NPU。APK 中存在 QNN 库或 provider 可枚举，都不单独构成硬件执行证据；必须完成真机图执行验证。
 
-MOSS-TTS 会长期复用 prefill、decode-step、local-frame 和 codec 四个 session。严格 NNAPI 候选要求 Android 10 或更高版本，同时启用 `NNAPIFlags.CPU_DISABLED` 和 `session.disable_cpu_ep_fallback=1`。任一子图不能完整分配给非 CPU NNAPI 设备时，整组严格 session 被放弃；随后创建保留 `CPU_DISABLED` 但允许 ORT CPU fallback 的混合 session，尽可能卸载受支持的子图，最后才创建纯 CPU session。设备诊断中 NNAPI 类型 `1` 是 CPU，只有 `0`（OTHER）、`2`（GPU）和 `3`（ACCELERATOR）计为非 CPU 设备；混合 session 因包含 CPU 节点，不计为纯硬件验证。
+MOSS 初始化会生成或复用 QNN context cache，合成时依次加载 prefill、decode/sampler、codec 并及时释放，以控制移动设备峰值内存。界面只有在真实合成返回有效 WAV 和 provider 计划后才显示已执行验证。
 
-QAIRT 2.48 已用于解析和静态固化四图，结果记录在 `tools/qnn/moss_v81_profile.json` 与 `moss_v81_status.json`。当前 V81 context 在 `QnnGraph_finalize` 的 `q::QNN_CumulativeSum` 失败，而且 decode KV 从 768 增长到 769，不能安全循环 375 步。因此 `androidQnnEnabled` 保持 `false`，原始动态 ONNX 绝不会直接送入 QNN 或宣称 HTP 可用。
+QAIRT 2.48 的静态化流程固定 recurrent KV 容量。V81 无法接受 sampler 的 `QNN_CumulativeSum`，因此 sampler 明确使用 ORT CPU；streaming codec 使用部署包中的固定形状 QNN HTP 图。原始动态 ONNX 不会直接送入 Android QNN runtime。
 
-为后续验证可通过 `TALK2U_QNN_SDK_ROOT` 打包合法取得的 QAIRT 运行库；仅在另有 QNN EP AAR 时才设置 `TALK2U_QNN_ORT_AAR`：
+通过 `TALK2U_QNN_SDK_ROOT` 打包合法取得的 QAIRT 运行库；`TALK2U_QNN_ORT_AAR` 仅用于覆盖默认 ORT core AAR，QNN Plugin EP 仍由 Qualcomm Maven 包提供：
 
 ```powershell
 $env:TALK2U_QNN_SDK_ROOT='D:\Qualcomm AI Engine Direct SDK'
@@ -340,59 +320,47 @@ $env:TALK2U_QNN_HTP_ARCH='v81'
 flutter build apk --debug --target-platform android-arm64
 ```
 
-MOSS HTP 启用仍必须同时满足：四个静态图全部在 SM8850/V81 finalize；decode 改为固定容量 KV 并能消费自身输出循环 375 步；真机生成并播放有效 WAV；部署哈希和设备验证标记齐全。任何一项未满足都只能显示 NNAPI 或 CPU 的实际执行结果。
+应用设置页选择包含 `moss-qnn-deployment.json` 的目录后，先在 staging 目录复制并验证全部文件，再原子替换旧部署。首次初始化可能因 QNN context 生成耗时较长；后续会复用与模型哈希绑定的私有缓存。
 
-华为 Mate 10 Pro 当前不接入许可受限的 HiAI DDK 二进制，使用严格 NNAPI 路径。只有设备运行 Android 10+、ROM 提供非 CPU NNAPI 驱动并且四个 MOSS 子图全部被该驱动接受时才能运行；否则明确失败。仓库没有在一加 15 或 Mate 10 Pro 上完成实机验收，不能把可构建路径写成真机已通过。
+华为 Mate 10 Pro 当前不接入许可受限的 HiAI DDK 二进制，也不使用通用 NNAPI 代替 Qualcomm QNN，因此 MOSS 在该设备上不可用。仓库没有在一加 15 或 Mate 10 Pro 上完成 MOSS 真机验收，不能把可构建路径写成真机已通过。
 
-端侧 Qwen LLM 是独立的 Genie 推理链路，不会因为 MOSS-TTS 使用某个 provider 就继承其加速状态。Windows/Linux 尚未接入 DirectML、CUDA、ROCm、Vulkan 或桌面 ONNX TTS execution provider。
+端侧 Qwen LLM 是独立的 llama.cpp Vulkan 推理链路，不会因为 MOSS-TTS 使用 QNN HTP 就继承其 NPU 状态。Windows/Linux 尚未接入本项目的端侧 LLM 后端。
 
 ## Live2D Cubism 5 模型与 Core
 
-### 必须先理解的兼容边界
+### SDK、平台链路与许可
 
-当前运行链路是 Android `WebView`、Windows `WebView2` 或 Linux `CEF` -> PixiJS 6.5.10 -> pixi-live2d-display 0.4.0 -> Cubism Core 5。它会在加载前检查 Core 主版本至少为 5，仓库中的两个 moc 文件也都真实读取为 MOC3 version 5。`pixi-live2d-display` 本身仍把这条运行时注册为 Cubism 4 API 层，因此本项目不能把它描述为“官方 Cubism SDK for Native 5 已集成”。
+本项目明确使用 Live2D Cubism SDK。Android 运行链路是 `AndroidView` -> `GLSurfaceView` -> `libtalk2u_live2d.so` -> Cubism SDK for Native 5 R.5 Framework/Core -> OpenGL ES。模型更新、动作、表情、物理、姿势、呼吸、眨眼、口型、纹理上传和绘制均在 Native C++ 中执行；首个无 GL 错误的真实绘制帧完成后才报告 ready。Windows/Linux 仍使用现有 WebView2/CEF + Pixi Web 链路，两类实现不能混为一谈。
 
-这一区别很重要：MOC3 v5、CDI3、物理、姿势、动作和表情的当前路径可以运行；若模型依赖未来新增、且第三方 Web 框架尚未实现的 SDK 5 Framework 行为，必须换成已接受许可的官方 Cubism SDK for Web/Native 5 实现并重新做真机验收。仓库不会用版本字符串掩盖这个边界。
+Android Gradle/CMake 只从 `TALK2U_CUBISM_SDK_ROOT` 指向的本机 SDK 读取所需文件。仓库不包含、不 vendoring、也不允许提交 `Live2DCubismCore` 二进制、Core 头文件或完整 Cubism SDK。Core 会在本机构建时静态链接进 APK 的 `libtalk2u_live2d.so`；公开发布二进制前必须自行确认许可范围。
 
-### 为什么仓库没有 Cubism Core
+官方入口与协议：
 
-`live2dcubismcore.min.js` 受 Live2D 许可约束，不能作为普通开源依赖随意再分发。因此仓库包含 Pixi 和 `pixi-live2d-display` 的可再分发文件，但不包含 Cubism Core。
+- Live2D 官网：<https://www.live2d.com/en/>
+- Live2D Proprietary Software License Agreement：<https://www.live2d.com/eula/live2d-proprietary-software-license-agreement_en.html>
+- Live2D Open Software License Agreement：<https://www.live2d.com/eula/live2d-open-software-license-agreement_en.html>
 
-运行时加载顺序：
+Windows/Linux Web 宿主需要合法取得的 Cubism Core for Web。仓库保留 Web host 与可再分发的 Pixi 依赖，但不包含 `live2dcubismcore.min.js`；离线桌面发布时需按许可自行提供。
 
-1. `assets/live2d/vendor/live2dcubismcore.min.js`。
-2. 如果本地文件不存在，尝试 Live2D 官方 CDN。
-3. 两者都失败时显示真实错误，不用静态图片冒充 Live2D。
-
-联网运行可使用官方 CDN。需要完全离线显示时，必须自己获取 Cubism SDK for Web 5 并接受 Live2D 许可。
-
-### 安装 Cubism Core 5 供离线使用
+### 安装 Cubism Core 5 供 Windows/Linux Web 宿主离线使用
 
 1. 从 <https://www.live2d.com/en/sdk/download/web/> 下载 Cubism SDK for Web 5。
 2. 阅读 SDK 和 Cubism Core 的许可条款。
 3. 解压 SDK。
-4. 执行：
-
-```powershell
-.\tool\install_live2d_core.ps1 `
-  -SdkRoot 'C:\SDK\CubismSdkForWeb-5-r.x' `
-  -AcceptLive2DLicense
-```
-
-脚本会寻找 `live2dcubismcore.min.js`，复制到：
+4. 将 SDK 中对应的 Core 文件放到：
 
 ```text
 assets/live2d/vendor/live2dcubismcore.min.js
 ```
 
-然后重新构建 APK。脚本会打印 SHA-256，便于确认最终打包的是哪个 Core。不要把该文件提交或公开分发，除非你的许可明确允许。
+然后重新构建桌面应用。不要把该文件提交或公开分发，除非你的许可明确允许。Android Native 构建不使用这个 JavaScript 文件。
 
 ### 最小可运行模型：虹色 Mao
 
 仓库已包含 Live2D 官方示例模型“虹色 Mao”的 runtime 文件：
 
 ```text
-model/mao/runtime/
+model/Live2d/mao/runtime/
   mao_pro.model3.json
   mao_pro.moc3              # MOC3 version 5
   mao_pro.cdi3.json         # DisplayInfo version 3
@@ -414,7 +382,7 @@ model/mao/runtime/
 
 安装操作把 APK asset 复制到应用私有目录并再次校验。它不依赖外部文件管理权限。
 
-示例模型许可原文摘要和官方链接在 `model/mao/ReadMe.txt`。商业使用前必须自行确认当前许可。
+示例模型许可原文摘要和官方链接在 `model/Live2d/mao/ReadMe.txt`。商业使用前必须自行确认当前许可。
 
 ### 导入自己的模型
 
@@ -446,21 +414,13 @@ ZIP 中必须只有一个 `.model3.json`。导入器会：
 - 拒绝超过 4096x4096 的单张纹理。
 - 按设备总内存、当前可用内存和纹理/moc 展开体积计算保守预算，超预算时阻止加载。
 
-电脑端先验证并打包：
-
-```powershell
-.\tool\package_live2d_model.ps1 `
-  -ModelDirectory 'C:\models\my-avatar' `
-  -OutputPath 'C:\models\my-avatar-talk2u.zip'
-```
-
-脚本会在创建 ZIP 前检查资源、moc3 版本、`.cdi3.json` 和 LipSync 参数。
+导入器会在应用内完成上述结构、资源、moc3、`.cdi3.json` 与 LipSync 校验；无效 ZIP 不会进入运行时目录。
 
 ### `model/` 中的两个模型
 
 | 目录 | MOC/CDI | LipSync | 运行时资源 | Android 默认打包 |
 | --- | --- | --- | --- | --- |
-| `model/mao/runtime` | MOC3 v5 / CDI3 v3 | `ParamA` | 1 张 4K 纹理、7 动作、8 表情 | 是 |
+| `model/Live2d/mao/runtime` | MOC3 v5 / CDI3 v3 | `ParamA` | 1 张 4K 纹理、7 动作、8 表情 | 是 |
 | 可选 `model/Custom_Suiika` | MOC3 v5 / CDI3 v3 | CDI3 中的 `ParamMouthOpenY` | 外部模型包，内容取决于用户提供的版本 | 否 |
 
 `Custom_Suiika` 不随仓库分发。若自行放入大型版本，其多张 2K 纹理在解码后的 GPU/CPU 内存会远大于压缩文件体积；默认打进 APK 会显著增大安装包，并可能在中低端 Android 设备上触发内存回收。因此它只能作为可选导入参考，必须先用打包脚本生成 ZIP，再由目标设备的内存校验决定能否加载。
@@ -469,9 +429,9 @@ ZIP 中必须只有一个 `.model3.json`。导入器会：
 
 ### Vulkan、OpenGL 与真机诊断
 
-本项目现在有两条必须分开理解的图形检查路径。
+Android Live2D 的实际 renderer 是 Cubism Native OpenGL ES，不经过 WebView、WebGL 或 ANGLE。`GLSurfaceView` 请求 RGBA8888、16-bit depth 的 OpenGL ES 2 context；Native 层读取 `GL_RENDERER`/`GL_VENDOR`/`GL_VERSION`，拒绝 SwiftShader、llvmpipe、softpipe、lavapipe 和标记为 software 的实现。Cubism shader 从外部 SDK 的 `StandardES` 目录打包为只读 asset，并由 R.5 file loader 加载。每帧执行 Framework 的 begin/end frame 生命周期并检查 GL error，首帧成功前不会把模型标为 ready。
 
-第一条是 NDK C++ 原生 GPU 预检。`libtalk2u_gpu_probe.so` 会在目标设备上：
+独立的 NDK C++ GPU 预检 `libtalk2u_gpu_probe.so` 会在目标设备上：
 
 1. 动态加载系统 `libvulkan.so`，创建 Vulkan instance。
 2. 检查 `VK_KHR_surface`、`VK_KHR_android_surface`、图形队列和 `VK_KHR_swapchain`。
@@ -479,35 +439,23 @@ ZIP 中必须只有一个 `.model3.json`。导入器会：
 4. 无论 Vulkan 是否通过，都独立创建 EGL pbuffer，按 OpenGL ES 3、OpenGL ES 2 顺序验证 fallback；SwiftShader/软件 renderer 不算通过。
 5. 每条成功或失败路径都会释放 Vulkan device/instance、EGL context/surface/display。
 
-诊断中的“原生候选”来自这项预检。它证明设备原生 API 可以初始化，但**不证明当前 Live2D 画面由该 API 绘制**，因为预检没有加载 Cubism 模型。
+诊断中的 Vulkan/OpenGL 预检只说明设备 API 能否初始化。当前 Live2D 画面的证据来自同一 Native renderer 报告的 `Cubism Native OpenGL ES`、实际 GL renderer 字符串和递增的 `frameCount`。设备即使通过 Vulkan 预检，Live2D 也仍是 OpenGL ES；当前没有 Cubism Vulkan renderer，不能把预检结果写成实际 Vulkan 渲染。
 
-第二条才是当前 Live2D 实际画面：
-
-1. `AndroidView` 和 WebView 都启用硬件加速，并把 renderer priority 设为 `IMPORTANT`。
-2. 先请求 `high-performance` 硬件 WebGL2；创建失败时改用硬件 WebGL1。
-3. 拒绝 SwiftShader、llvmpipe 等软件 renderer，不把软件画面标成 Vulkan/OpenGL ES 成功。
-4. WebGL context lost 时等待驱动恢复；WebGL2 恢复后使用 WebGL1 兼容模式重载。恢复超时或 WebView render process 消失时，Flutter 自动重建一次 PlatformView，并提供手动重试。
-5. 模型就绪后，聊天页人物右上角出现信息图标。点开可查看 Core 版本、WebGL 版本、实际 GPU/backend、两个原生 API 的预检结果、LipSync 参数、自然动作能力和 cue 覆盖。
-
-诊断中的 `vulkan-via-angle` 才能证明该设备这一次实际走 Vulkan；`opengl-es-via-webgl` 表示已回退 OpenGL ES；`software: true` 表示软件渲染，不应作为发布验收结果。设备声明支持 Vulkan 但诊断显示 OpenGL 并不矛盾，因为最终选择属于系统 WebView/驱动。
-
-如果实际后端显示 `angle-backend-unspecified` 或 `webgl-driver-unspecified`，只能判定硬件 WebGL 已创建，不能判定底层是 Vulkan 还是 OpenGL ES。不要根据 Android feature、C++ 原生候选或 WebGL 版本字符串猜测后端。WebGL 版本字符串描述的是 WebGL 语义层，即使 ANGLE 底层使用 Vulkan，也可能包含 `OpenGL ES` 字样。
-
-若产品验收条件是“应用自己控制原生 Vulkan，并在初始化失败时创建原生 OpenGL renderer”，则必须接入有合法许可的 Cubism SDK for Native 5 C++ renderer。当前仓库没有对应 Core/Framework 二进制，所以该项明确仍未完成，不能用 WebGL 后端检测冒充。
+本次真机验收设备为 PLK110、SM8850、Android API 36、Adreno 840。Mao 已实际显示并持续动画；两张采样截图的舞台像素有 18.113% 变化，图形统计为 653 帧、0.46% jank、GPU median 3 ms。该结果只证明这台设备和当前构建，不自动覆盖其他 ROM、GPU 驱动或第三方模型。
 
 ### LipSync 是怎样工作的
 
 ```text
-Android 离线 TTS
-  -> UtteranceProgressListener.onAudioAvailable(PCM)
-  -> 按 PCM_8BIT / PCM_16BIT / PCM_FLOAT 计算 RMS
-  -> Flutter EventChannel 传递 0..1 振幅
+MOSS QNN/ORT 合成
+  -> 48 kHz PCM16 WAV
+  -> Flutter isolate 按 20 ms 窗口计算 RMS
+  -> 播放进度同步 0..1 振幅
   -> Live2D PlatformView MethodChannel
-  -> Cubism `beforeModelUpdate`（动作、表情、物理之后，实际绘制之前）
+  -> Native C++ Cubism model update（动作、表情、物理之后，实际绘制之前）
   -> Cubism parameterIds，例如 ParamA / ParamMouthOpenY
 ```
 
-这不是随机张嘴，也没有读取麦克风来伪造朗读振幅。某些厂商 TTS 引擎虽然能朗读，却不实现 `onAudioAvailable`；这种设备上会有声音但没有 PCM 口型。请更换支持音频回调的离线 TTS 引擎或语音包。
+这不是随机张嘴，也没有读取麦克风来伪造朗读振幅。振幅直接来自当前 MOSS 输出 WAV，因此不受厂商系统 TTS 回调能力影响。
 
 ### 动作和表情映射
 
@@ -547,7 +495,7 @@ Android 离线 TTS
 neutral, greeting, wave, hug, nod, happy, sad, angry, shy, surprise
 ```
 
-应用会按 Android TTS 的 `onRangeStart` 从当前朗读位置触发明确动作词和常见情绪词。只有配置存在，或模型本身有可验证的同名 motion/expression，才播放对应资源。未知名称不会按序号随机猜测。
+应用会按 MOSS WAV 的播放进度映射到当前文本位置，触发明确动作词和常见情绪词。只有配置存在，或模型本身有可验证的同名 motion/expression，才播放对应资源。
 
 Mao 的项目配置根据 CDI3 参数名和 motion 曲线做了显式映射：`exp_02/04/05/06/08` 分别用于开心、惊讶、难过、害羞和生气；`mtn_02` 用于点头，右臂运动明显的 `mtn_04` 用于招手/问候。这些是 Talk2U 的项目映射，不是模型作者提供的语义元数据，发布前仍应在目标设备逐项观看验收。三个 `special_*` 魔法动作没有被自动解释为情绪。
 
@@ -557,49 +505,28 @@ Mao 的项目配置根据 CDI3 参数名和 motion 曲线做了显式映射：`e
 - 加载前按 RGBA 解码大小估算模型内存。
 - 限制单张纹理不超过 4096x4096。
 - 只构建 ARM64，减少未测试 ABI 组合。
-- Android WebView 开启硬件加速，并请求重要渲染进程优先级。
+- Android Native renderer 拒绝已知软件 OpenGL 实现，并在首帧检查 GL error。
 - C++ 分别预检 Vulkan logical device 与 EGL OpenGL ES context，不依赖功能声明猜测。
-- WebGL2 创建失败时降级 WebGL1，context lost 后最多自动恢复两次。
+- `GLSurfaceView` 生命周期与 Activity 绑定，surface/context 重建时重新创建 Cubism 图形资源。
 - PCM 口型事件限制在约 30 FPS，避免高频平台通道调用拖慢 UI。
-- 处理 WebView renderer 被系统回收或崩溃的回调，自动重建一次并保留手动重试。
 - Flutter 对已停止的 Live2D channel 调用会被吸收，不产生未处理 Future 错误。
 - 缺少 Core、模型损坏、Core 版本过低时显示真实错误。
 
 这些措施可以消除已知的资源和生命周期崩溃路径，但任何项目都不能诚实保证在所有厂商 ROM、驱动和任意第三方模型上“绝不闪退”。真机验收仍然必须执行。
 
-## Android 系统离线语音
+## Android 应用内离线语音
 
-### 离线 TTS
+### SenseVoice STT
 
-设置页的“Android 端侧语音”会显示当前选择的离线 voice 和语言。若未检测到：
+设置页下载并校验官方 `sherpa-onnx-qnn-SM8850-binary-10-seconds-sense-voice-zh-en-ja-ko-yue-2024-07-17-int8` 后，应用通过 sherpa-onnx Kotlin/JNI 在 QNN HTP 上识别。录音固定为 16 kHz、PCM16、单声道并限制为 10 秒；结果完整保留转写文本、语种、情感和音频事件字段。
 
-1. 点击离线 TTS 右侧的语音设置图标。
-2. 系统将打开 TTS 数据安装页；如果 ROM 没有该页面，则打开系统设置。
-3. 在系统 TTS 引擎中安装中文离线语音包。
-4. 返回应用；应用恢复前台时会重新枚举 voice，无需强制重启。
-5. 设置页必须显示具体 voice 名称，聊天页朗读按钮才会启用。
+识别完全由应用管理，不依赖 `SpeechRecognizer`、Google 语音服务或厂商 ROM 的离线语言包。首次录音仍需授予 `RECORD_AUDIO`。
 
-代码明确排除 `isNetworkConnectionRequired == true` 的 voice，不会在“离线 TTS”名义下静默使用云端语音。
+### MOSS-TTS
 
-### 离线语音识别
+设置页的文件夹按钮用于导入准备好的 `moss-qnn-v81` 目录。目录必须包含 `moss-qnn-deployment.json`、MOSS TTS/codec 元数据、tokenizer、共享权重和 `.qnn.onnx` 图。导入器拒绝目录穿越、版本不匹配、错误 SoC/HTP 架构、缺失文件、大小或 SHA-256 不匹配。
 
-离线 STT 的启用条件：
-
-- Android 12 / API 31 或更高。
-- `SpeechRecognizer.isOnDeviceRecognitionAvailable(context)` 返回 true。
-- 已授予 `RECORD_AUDIO`。
-- 系统识别服务已安装 `zh-CN` 端侧语言数据。
-
-步骤：
-
-1. Android 13+ 且系统声明支持模型下载时，点击离线语音识别右侧的下载图标。应用调用 `SpeechRecognizer.triggerModelDownload` 请求 `zh-CN` 模型；Android 14+ 会显示真实进度/排队/成功/错误回调。
-2. Android 12 或不支持下载 API 的 ROM 会显示设置图标；进入系统语音输入设置手动安装中文离线包。
-3. 回到应用后能力状态会自动刷新。
-4. 首次点击麦克风按钮时允许录音权限。
-
-应用使用 `createOnDeviceSpeechRecognizer`，并设置 `EXTRA_PREFER_OFFLINE=true`。当系统不能证明端侧识别可用时，不会回退到云端识别；若已下载 SenseVoice，则自动改用 sherpa-onnx。
-
-厂商 ROM 的 on-device recognizer 差异很大。`triggerModelDownload` 是向系统识别服务提交请求，并不允许应用绕过厂商/Google 的模型许可自行抓取文件。若设备根本不提供 on-device 服务，可在设置页下载 SenseVoice；当前仓库不会把在线识别包装成离线能力。
+成功导入后可选择 MOSS 内置中英文音色并试听。系统 TTS 不再作为后备路径；QNN 初始化或合成失败会直接显示错误。
 
 ## 角色、详细知识和长期对话
 
@@ -690,22 +617,21 @@ Rust 测试覆盖供应商鉴权/请求转换、Anthropic 和 OpenAI-compatible 
 
 ### Android 真机验收清单
 
-先执行仓库级静态诊断：
+先执行仓库级检查和 Android 构建：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File .\tool\verify_runtime.ps1
+dart format --output=none --set-exit-if-changed lib test
+flutter analyze --no-pub
+flutter test --no-pub
+Push-Location android
+.\gradlew.bat :app:assembleDebug -Ptarget-platform=android-arm64 --no-daemon
+Pop-Location
+git diff --check
+git ls-files | Select-String -Pattern 'Live2DCubismCore|live2dcubismcore'
+tar -tf .\build\app\outputs\apk\debug\app-debug.apk
 ```
 
-完全离线发布包必须把“缺少本地 Cubism Core”从警告提升为失败：
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File .\tool\verify_runtime.ps1 `
-  -RequireOfflineCubismCore
-```
-
-该脚本读取内置 Mao 的真实 MOC3 头、CDI3、LipSync 和纹理引用；若可选 `Custom_Suiika` 存在也会一并校验。它还检查现有 APK 是否同时包含 ARM64 Flutter、Rust 和 C++ GPU probe 动态库，但不能替代 GPU、TTS 和麦克风真机检查。
+`git ls-files` 不应返回 Cubism Core。APK 应包含 `libtalk2u_live2d.so` 和 Cubism `StandardES` shader，但不应包含独立的 `libLive2DCubismCore.so`。静态检查不能替代 GPU、TTS、LLM 和麦克风真机检查。
 
 - [ ] 冷启动不崩溃。
 - [ ] 设置页能保存并重新读取平台配置。
@@ -714,16 +640,17 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 - [ ] 安装内置 Mao 后角色页能保存模型路径。
 - [ ] Live2D 状态不显示 Core/模型错误，画布持续有动画。
 - [ ] 诊断中 Vulkan 和 OpenGL ES 至少一个原生预检通过。
-- [ ] “实际后端”是 `vulkan-via-angle` 或 `opengl-es-via-webgl`；`unspecified` 不能作为后端验收通过。
+- [ ] “实际后端”是 `Cubism Native OpenGL ES`，`frameCount` 持续递增。
 - [ ] “GPU”不是 SwiftShader、llvmpipe 或 software renderer。
 - [ ] 朗读时有声音，嘴部随实际声音变化，停止后闭合。
 - [ ] `女生：（哈哈大笑）你说的太好了！` 只朗读“你说的太好了！”，同时触发 happy cue。
 - [ ] 持续通话能完成“监听 -> 最终识别 -> 生成 -> 朗读 -> 恢复监听”至少 20 轮，结束后麦克风和播报均停止。
-- [ ] MOSS 实际合成后显示 `QNN_HTP` 或 `NNAPI_ACCELERATOR`；“候选”不能作为硬件验收通过。
+- [ ] Qwen 首轮真实生成后显示 `Qualcomm QNN HTP/NPU`，未验证时不能进入端侧对话。
+- [ ] MOSS 实际合成后只显示 `QNN_HTP`；“候选”、NNAPI 名称或库存在不能作为硬件验收通过。
 - [ ] NNAPI 诊断不把类型为 CPU 的设备列为非 CPU 加速设备。
 - [ ] 明确配置的 motion/expression 能被触发。
 - [ ] 开启飞行模式后，已安装的 TTS 仍能朗读。
-- [ ] 开启飞行模式后，系统声明可用的 on-device STT 仍能识别。
+- [ ] 开启飞行模式后，已安装的 SenseVoice 仍能识别中文和英文。
 - [ ] 导入超大模型时被明确拒绝，而不是应用闪退。
 - [ ] 切后台再返回，Live2D 和语音按钮仍可用。
 
@@ -731,7 +658,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 
 ```powershell
 adb logcat -c
-adb logcat | Select-String -Pattern 'talk2u|chromium|AndroidRuntime|libc|flutter'
+adb logcat | Select-String -Pattern 'Talk2U|Cubism|QNN|AndroidRuntime|libc|flutter'
 ```
 
 ## 常见问题
@@ -752,13 +679,13 @@ URL 可能漏了 `/v1/chat/completions` 或 `/v1/messages`，也可能模型 ID 
 
 不要写电脑的 `127.0.0.1`。使用电脑局域网 IP，确认服务监听 `0.0.0.0`，允许防火墙端口，并从手机浏览器或网络工具确认地址可达。
 
-### Live2D 显示“运行库加载失败”
+### Android 构建提示缺少 Cubism SDK
 
-设备无法访问官方 CDN，并且 APK 没有本地 Cubism Core。按“安装 Cubism Core 5 供离线使用”操作后重新构建 APK。
+确认 `TALK2U_CUBISM_SDK_ROOT` 指向完整的 Cubism SDK for Native 5 R.5，且其中存在 `Core/include`、`Core/lib/android/arm64-v8a`、`Framework` 和 OpenGL sample 的 `stb_image.h`。默认检查 `D:\CubismSdkForNative-5`。
 
 ### Live2D 显示 Core 版本低于 5
 
-你放入的是旧 `live2dcubismcore.min.js`。从 Cubism SDK for Web 5 重新安装 Core，并清理后重建：
+Android 使用的外部 Native SDK Core 过旧或与 Framework 不匹配。使用同一套 Cubism SDK for Native 5 R.5 的 Core 与 Framework，清理后重建：
 
 ```powershell
 flutter clean
@@ -773,8 +700,8 @@ flutter build apk --debug --target-platform android-arm64
 1. 模型 `Groups` 是否包含 `LipSync`。
 2. `.cdi3.json` 是否有 `ParamMouthOpenY`、`ParamA` 或明确嘴部参数。
 3. `talk2u.avatar.json` 的 `parameterIds` 是否与模型一致。
-4. 设置页的离线 TTS 是否显示具体 voice。
-5. 厂商 TTS 是否真的回调 `onAudioAvailable`。
+4. 设置页是否显示 MOSS voice 与实际 provider。
+5. 生成的 WAV 是否有效且振幅包络非空。
 
 ### 模型没有对应动作
 
@@ -782,11 +709,11 @@ flutter build apk --debug --target-platform android-arm64
 
 ### 离线 STT 按钮不可用
 
-设备不满足 Android 12+、端侧 recognizer 或离线中文包条件。Android 13+ 在设置页点击模型下载图标；更低版本或不支持下载 API 的 ROM 点击语音输入设置入口安装语言数据。如果系统仍报告不可用，当前版本会保持禁用而不会调用云识别。
+在设置页安装 SenseVoice QNN 包，并授予麦克风权限。模型文件必须完整包含 `model.bin`、`tokens.txt` 与 Talk2U 安装清单；该 context 仅适用于 SM8850/HTP v81。
 
 ### APK 太大
 
-只把 `model/mao/runtime` 打进 APK。不要把 `.cmo3`、`.can3` 或大型参考模型源文件加入 `pubspec.yaml`。用户模型通过 ZIP 导入。
+只把 `model/Live2d/mao/runtime` 打进 APK。不要把 `.cmo3`、`.can3` 或大型参考模型源文件加入 `pubspec.yaml`。用户模型通过 ZIP 导入。
 
 ### PowerShell 提示“禁止运行脚本”
 
@@ -812,15 +739,14 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 ## 当前不能宣称的事项
 
-- 不能宣称 Cubism Core 已随仓库合法分发；默认仓库没有该文件。
-- 不能把 C++ Vulkan/OpenGL ES 预检结果宣称为 Live2D 模型的实际渲染后端。
-- 不能宣称 WebView 路径由应用强制 Vulkan 优先，或等同于官方 Cubism Native SDK 5 渲染器。
+- 不能宣称 Cubism Core 已随公开仓库合法分发；Android Core 只来自构建者本机接受许可后的外部 SDK。
+- 不能把 C++ Vulkan 预检结果宣称为 Live2D 模型的实际渲染后端；Android 当前实际使用 Cubism Native OpenGL ES。
 - 不能宣称所有 Android ROM 都提供离线中文 TTS/STT。
 - 不能宣称未配置 `talk2u.avatar.json` 的编号动作具有某个语义。
 - 不能宣称没有 API Key 时已经验证第三方真实联网回复。
 - 不能宣称大型 `Custom_Suiika` 一定能在任意 Android 设备加载。
 - 不能宣称 Windows WebView2 或 Linux CEF Web 宿主等同于 Live2D 原生宿主；iOS/macOS 当前没有 Live2D 宿主。
-- 不能仅凭库存在、provider 枚举或 NNAPI 设备枚举宣称 MOSS 已使用 NPU；必须有严格 session 的实际合成结果 `QNN_HTP` 或 `NNAPI_ACCELERATOR`。
+- 不能仅凭库存在、provider 枚举或 NNAPI 设备枚举宣称 MOSS 已使用 NPU；必须有禁用 CPU EP 回退的真实合成结果 `QNN_HTP`。
 - 不能宣称仓库默认 ONNX Runtime AAR 已包含 QNN EP，不能宣称已直接接入华为 HiAI DDK，也不能宣称一加 15 或 Mate 10 Pro 已实机通过。
 - 不能宣称 Windows/Linux 已完成端侧 TTS、持续离线通话或端侧 LLM 硬件加速。
 - 不能宣称当前文件存储支持多进程或多设备并发写入。

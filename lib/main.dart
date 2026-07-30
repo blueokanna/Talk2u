@@ -1,56 +1,65 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/cupertino.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
+import 'package:talk2u/l10n/generated/app_localizations.dart';
 import 'package:talk2u/src/rust/api/chat_api.dart' as rust_api;
 import 'package:talk2u/src/rust/frb_generated.dart';
 import 'package:talk2u/src/state/chat_state.dart';
+import 'package:talk2u/src/theme/app_theme.dart';
 import 'package:talk2u/src/pages/chat_page.dart';
 import 'package:talk2u/src/services/offline_llm_service.dart';
 import 'package:talk2u/src/services/offline_speech_service.dart';
-import 'package:talk2u/src/widgets/live2d_avatar.dart';
+import 'package:talk2u/src/services/accelerator_telemetry_service.dart';
+import 'package:talk2u/src/settings/ui_preferences.dart';
 
-void main() {
+enum _StartupFailure { rustCoreTimeout, localDataTimeout }
+
+final class _StartupException implements Exception {
+  const _StartupException(this.failure);
+
+  final _StartupFailure failure;
+}
+
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const Talk2UApp());
+  final preferences = await UiPreferences.load();
+  runApp(Talk2UApp(preferences: preferences));
 }
 
 class Talk2UApp extends StatelessWidget {
-  const Talk2UApp({super.key});
+  const Talk2UApp({required this.preferences, super.key});
+
+  final UiPreferences preferences;
 
   @override
   Widget build(BuildContext context) {
-    return ChangeNotifierProvider(
-      create: (_) => ChatState(),
-      child: MaterialApp(
-        title: 'Talk2U',
-        debugShowCheckedModeBanner: false,
-        theme: ThemeData(
-          colorSchemeSeed: const Color(0xFF6750A4),
-          useMaterial3: true,
-          brightness: Brightness.light,
-          pageTransitionsTheme: const PageTransitionsTheme(
-            builders: {
-              TargetPlatform.android: CupertinoPageTransitionsBuilder(),
-              TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
-            },
-          ),
+    return MultiProvider(
+      providers: [
+        ChangeNotifierProvider.value(value: preferences),
+        ChangeNotifierProvider(create: (_) => ChatState()),
+      ],
+      child: Consumer<UiPreferences>(
+        builder: (context, preferences, _) => MaterialApp(
+          onGenerateTitle: (context) => AppLocalizations.of(context).appTitle,
+          debugShowCheckedModeBanner: false,
+          localizationsDelegates: const [
+            AppLocalizations.delegate,
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+          ],
+          supportedLocales: AppLocalizations.supportedLocales,
+          locale: preferences.locale,
+          theme: AppTheme.build(Brightness.light, preferences.colorTheme),
+          darkTheme: AppTheme.build(Brightness.dark, preferences.colorTheme),
+          themeMode: preferences.themeMode,
+          themeAnimationDuration: const Duration(milliseconds: 300),
+          themeAnimationCurve: Curves.easeInOutCubicEmphasized,
+          home: const _StartupGate(),
         ),
-        darkTheme: ThemeData(
-          colorSchemeSeed: const Color(0xFF6750A4),
-          useMaterial3: true,
-          brightness: Brightness.dark,
-          pageTransitionsTheme: const PageTransitionsTheme(
-            builders: {
-              TargetPlatform.android: CupertinoPageTransitionsBuilder(),
-              TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
-            },
-          ),
-        ),
-        themeMode: ThemeMode.system,
-        home: const _StartupGate(),
       ),
     );
   }
@@ -75,7 +84,8 @@ class _StartupGateState extends State<_StartupGate> {
   Future<void> _initialize() async {
     await RustLib.init().timeout(
       const Duration(seconds: 20),
-      onTimeout: () => throw TimeoutException('Rust 核心加载超时'),
+      onTimeout: () =>
+          throw const _StartupException(_StartupFailure.rustCoreTimeout),
     );
     final appDir = await getApplicationDocumentsDirectory().timeout(
       const Duration(seconds: 10),
@@ -84,7 +94,8 @@ class _StartupGateState extends State<_StartupGate> {
         .initApp(dataPath: appDir.path)
         .timeout(
           const Duration(seconds: 20),
-          onTimeout: () => throw TimeoutException('本地数据初始化超时'),
+          onTimeout: () =>
+              throw const _StartupException(_StartupFailure.localDataTimeout),
         );
 
     unawaited(
@@ -94,6 +105,7 @@ class _StartupGateState extends State<_StartupGate> {
       ),
     );
     unawaited(OfflineLlmService.instance.initialize());
+    AcceleratorTelemetryService.instance.start();
   }
 
   void _retry() {
@@ -110,11 +122,24 @@ class _StartupGateState extends State<_StartupGate> {
       }
 
       final theme = Theme.of(context);
+      final strings = AppLocalizations.of(context);
+      final errorDescription = switch (snapshot.error) {
+        _StartupException(:final failure) => switch (failure) {
+          _StartupFailure.rustCoreTimeout => strings.rustCoreTimeout,
+          _StartupFailure.localDataTimeout => strings.localDataTimeout,
+        },
+        final error => '$error',
+      };
       return Scaffold(
         body: Stack(
           fit: StackFit.expand,
           children: [
-            const Live2dAvatar(modelPath: Live2dModelPaths.bundledMao),
+            ColoredBox(
+              color: theme.colorScheme.surface,
+              child: snapshot.hasError
+                  ? const SizedBox.shrink()
+                  : const Center(child: CircularProgressIndicator()),
+            ),
             Align(
               alignment: Alignment.bottomCenter,
               child: SafeArea(
@@ -131,26 +156,26 @@ class _StartupGateState extends State<_StartupGate> {
                           children: [
                             Expanded(
                               child: Text(
-                                '启动失败：${snapshot.error}',
+                                strings.startupFailed(errorDescription),
                                 maxLines: 2,
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
                             IconButton(
-                              tooltip: '重试启动',
+                              tooltip: strings.retry,
                               onPressed: _retry,
                               icon: const Icon(Icons.refresh),
                             ),
                           ],
                         )
-                      : const Row(
+                      : Row(
                           children: [
-                            SizedBox.square(
+                            const SizedBox.square(
                               dimension: 20,
                               child: CircularProgressIndicator(strokeWidth: 2),
                             ),
-                            SizedBox(width: 12),
-                            Text('正在准备本地对话...'),
+                            const SizedBox(width: 12),
+                            Text(strings.startupPreparing),
                           ],
                         ),
                 ),

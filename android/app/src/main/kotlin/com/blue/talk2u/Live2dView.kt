@@ -1,40 +1,36 @@
 package com.blue.talk2u
 
-import android.annotation.SuppressLint
-import android.app.ActivityManager
 import android.content.Context
-import android.content.pm.ApplicationInfo
-import android.content.pm.PackageManager
+import android.content.res.AssetManager
+import android.graphics.SurfaceTexture
 import android.net.Uri
-import android.os.Build
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
+import android.os.SystemClock
+import android.system.Os
+import android.system.OsConstants
 import android.util.Log
+import android.view.Choreographer
+import android.view.Surface
+import android.view.TextureView
 import android.view.View
-import android.webkit.ConsoleMessage
-import android.webkit.JavascriptInterface
-import android.webkit.WebChromeClient
-import android.webkit.WebResourceError
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.RenderProcessGoneDetail
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import androidx.webkit.WebViewAssetLoader
+import android.view.ViewGroup
+import android.widget.FrameLayout
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import io.flutter.plugin.common.StandardMessageCodec
 import io.flutter.plugin.platform.PlatformView
 import io.flutter.plugin.platform.PlatformViewFactory
-import io.flutter.plugin.common.StandardMessageCodec
 import org.json.JSONObject
-import java.io.ByteArrayInputStream
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
-
-private const val LIVE2D_CORE_URL =
-    "https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 internal object GpuBackendProbe {
     private val loadError: String?
@@ -72,6 +68,35 @@ internal object GpuBackendProbe {
     fun diagnostics(): JSONObject = JSONObject(cachedResult.toString())
 }
 
+internal object Live2dNativeBridge {
+    init {
+        System.loadLibrary("talk2u_live2d")
+    }
+
+    external fun nativeCreate(
+        assets: AssetManager,
+        modelPath: String,
+        backgroundColor: Int,
+    ): Long
+    external fun nativePrepare(handle: Long)
+    external fun nativeSurfaceCreated(
+        handle: Long,
+        surface: Surface,
+        width: Int,
+        height: Int,
+    )
+    external fun nativeSurfaceChanged(handle: Long, width: Int, height: Int)
+    external fun nativeSurfaceDestroyed(handle: Long)
+    external fun nativeDrawFrame(handle: Long): Boolean
+    external fun nativeSetMouth(handle: Long, value: Float)
+    external fun nativeSetSpeaking(handle: Long, value: Boolean)
+    external fun nativeMotion(handle: Long, group: String, index: Int)
+    external fun nativeExpression(handle: Long, name: String)
+    external fun nativeResetExpression(handle: Long)
+    external fun nativeDiagnostics(handle: Long): String
+    external fun nativeDestroy(handle: Long)
+}
+
 class Live2dViewFactory(
     private val context: Context,
     private val messenger: BinaryMessenger,
@@ -82,336 +107,630 @@ class Live2dViewFactory(
     }
 }
 
-@SuppressLint("SetJavaScriptEnabled")
-@Suppress("DEPRECATION")
-private class Live2dView(
+private data class Live2dCue(
+    val group: String?,
+    val index: Int,
+    val expression: String?,
+)
+
+private object Live2dViewCoordinator {
+    private var active: Live2dView? = null
+
+    @Synchronized
+    fun activate(view: Live2dView) {
+        if (active === view) return
+        active?.retireForReplacement()
+        active = view
+    }
+
+    @Synchronized
+    fun release(view: Live2dView) {
+        if (active === view) active = null
+    }
+}
+
+private class ManagedLive2dVulkanTextureView(
     context: Context,
+    private val callbacks: Callbacks,
+) : TextureView(context), TextureView.SurfaceTextureListener {
+    interface Callbacks {
+        fun onSurfaceCreated(surface: Surface, width: Int, height: Int)
+        fun onSurfaceChanged(width: Int, height: Int)
+        fun onSurfaceDestroyed()
+        fun onDrawFrame()
+        fun onDetached()
+    }
+
+    private val renderThread = HandlerThread("talk2u-live2d-vulkan").apply { start() }
+    private val renderHandler = Handler(renderThread.looper)
+    @Volatile private var resumed = true
+    @Volatile private var attached = false
+    @Volatile private var stopped = false
+    private var frameScheduled = false
+    @Volatile private var nativeSurfaceCreated = false
+    private var activeSurfaceTexture: SurfaceTexture? = null
+    private var activeSurface: Surface? = null
+    private lateinit var choreographer: Choreographer
+    private val frameCallback = Choreographer.FrameCallback {
+        frameScheduled = false
+        if (!stopped && resumed && nativeSurfaceCreated) callbacks.onDrawFrame()
+        scheduleFrame()
+    }
+
+    init {
+        isOpaque = true
+        surfaceTextureListener = this
+        renderHandler.post {
+            choreographer = Choreographer.getInstance()
+            scheduleFrame()
+        }
+    }
+
+    fun queueEvent(action: () -> Unit) {
+        if (!stopped) renderHandler.post(action)
+    }
+
+    fun onResume() {
+        resumed = true
+        renderHandler.post(::scheduleFrame)
+    }
+
+    fun hasNativeSurface(): Boolean = nativeSurfaceCreated
+
+    fun onPause() {
+        resumed = false
+        renderHandler.post {
+            if (::choreographer.isInitialized && frameScheduled) {
+                choreographer.removeFrameCallback(frameCallback)
+                frameScheduled = false
+            }
+        }
+    }
+
+    private fun scheduleFrame() {
+        if (stopped || !resumed || !attached || !nativeSurfaceCreated || frameScheduled ||
+            !::choreographer.isInitialized
+        ) return
+        frameScheduled = true
+        choreographer.postFrameCallback(frameCallback)
+    }
+
+    override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
+        val surface = Surface(texture)
+        renderHandler.post {
+            if (stopped || !surface.isValid) {
+                surface.release()
+                return@post
+            }
+            releaseActiveSurface()
+            activeSurfaceTexture = texture
+            activeSurface = surface
+            callbacks.onSurfaceCreated(surface, width.coerceAtLeast(1), height.coerceAtLeast(1))
+            nativeSurfaceCreated = true
+            scheduleFrame()
+        }
+    }
+
+    override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
+        renderHandler.post {
+            if (!stopped && nativeSurfaceCreated && activeSurfaceTexture === texture) {
+                callbacks.onSurfaceChanged(width.coerceAtLeast(1), height.coerceAtLeast(1))
+                scheduleFrame()
+            }
+        }
+    }
+
+    override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
+        renderHandler.post {
+            if (activeSurfaceTexture === texture) {
+                releaseActiveSurface()
+            }
+        }
+        return true
+    }
+
+    override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = Unit
+
+    private fun releaseActiveSurface() {
+        if (nativeSurfaceCreated) callbacks.onSurfaceDestroyed()
+        nativeSurfaceCreated = false
+        activeSurfaceTexture = null
+        activeSurface?.release()
+        activeSurface = null
+        if (::choreographer.isInitialized && frameScheduled) {
+            choreographer.removeFrameCallback(frameCallback)
+            frameScheduled = false
+        }
+    }
+
+    fun shutdown() {
+        if (stopped) return
+        stopped = true
+        resumed = false
+        renderHandler.post {
+            releaseActiveSurface()
+            renderThread.quitSafely()
+        }
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        attached = true
+        renderHandler.post(::scheduleFrame)
+    }
+
+    override fun onDetachedFromWindow() {
+        attached = false
+        renderHandler.post {
+            if (::choreographer.isInitialized && frameScheduled) {
+                choreographer.removeFrameCallback(frameCallback)
+                frameScheduled = false
+            }
+        }
+        callbacks.onDetached()
+        super.onDetachedFromWindow()
+    }
+}
+
+private class ResourceUsageSampler {
+    private var previousCpuTicks: Long? = null
+    private var previousElapsedNanos: Long? = null
+    private val clockTicksPerSecond = runCatching {
+        Os.sysconf(OsConstants._SC_CLK_TCK).coerceAtLeast(1L)
+    }.getOrDefault(100L)
+
+    fun sample(): JSONObject {
+        val result = JSONObject()
+        result.put("cpu", sampleCpu())
+        result.put("gpu", sampleGpu())
+        result.put(
+            "npu",
+            JSONObject()
+                .put("available", false)
+                .put("scope", "device")
+                .put("reason", "Android and QNN do not expose global NPU utilization to applications"),
+        )
+        result.put("sampledAtElapsedMs", SystemClock.elapsedRealtime())
+        return result
+    }
+
+    private fun sampleCpu(): JSONObject {
+        val now = SystemClock.elapsedRealtimeNanos()
+        val ticks = runCatching {
+            val stat = File("/proc/self/stat").readText(Charsets.US_ASCII)
+            val fields = stat.substring(stat.lastIndexOf(')') + 2).split(' ')
+            fields[11].toLong() + fields[12].toLong()
+        }.getOrNull()
+        val previousTicks = previousCpuTicks
+        val previousTime = previousElapsedNanos
+        previousCpuTicks = ticks
+        previousElapsedNanos = now
+        val output = JSONObject().put("scope", "process").put("source", "/proc/self/stat")
+        if (ticks == null || previousTicks == null || previousTime == null || now <= previousTime) {
+            return output.put("available", false)
+        }
+        val elapsedSeconds = (now - previousTime).toDouble() / 1_000_000_000.0
+        val cpuSeconds = (ticks - previousTicks).coerceAtLeast(0L).toDouble() / clockTicksPerSecond
+        val capacity = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+        val percent = (cpuSeconds / elapsedSeconds * 100.0 / capacity).coerceIn(0.0, 100.0)
+        return output.put("available", true).put("percent", percent)
+    }
+
+    private fun sampleGpu(): JSONObject {
+        val candidates = listOf(
+            "/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage",
+            "/sys/devices/platform/soc/3d00000.qcom,kgsl-3d0/kgsl/kgsl-3d0/gpu_busy_percentage",
+        )
+        for (path in candidates) {
+            val value = runCatching {
+                Regex("[0-9]+(?:\\.[0-9]+)?")
+                    .find(File(path).readText(Charsets.US_ASCII))
+                    ?.value
+                    ?.toDouble()
+            }.getOrNull() ?: continue
+            return JSONObject()
+                .put("available", true)
+                .put("scope", "device")
+                .put("source", path)
+                .put("percent", value.coerceIn(0.0, 100.0))
+        }
+        return JSONObject()
+            .put("available", false)
+            .put("scope", "device")
+            .put("reason", "GPU utilization sysfs is not readable by this application")
+    }
+}
+
+private class Live2dView(
+    private val context: Context,
     messenger: BinaryMessenger,
     viewId: Int,
     creationParams: Map<*, *>,
-) : PlatformView, MethodChannel.MethodCallHandler {
-    private val webView = WebView(context)
-    private val userAgent = webView.settings.userAgentString
-    private val coreCacheFile = File(context.filesDir, "live2d_runtime/live2dcubismcore.min.js")
+) : PlatformView, MethodChannel.MethodCallHandler, DefaultLifecycleObserver {
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val channel = MethodChannel(messenger, "talk2u/live2d_$viewId")
-    private val assetLoader = WebViewAssetLoader.Builder()
-        .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context))
-        .addPathHandler("/files/", WebViewAssetLoader.InternalStoragePathHandler(context, context.filesDir))
-        .build()
-    private var lastStatus: String? = null
-    private var disposed = false
+    private val modelPath = validateModelPath(creationParams["modelPath"] as? String)
+    private val backgroundColor =
+        (creationParams["backgroundColor"] as? Number)?.toInt() ?: 0xffffffff.toInt()
+    private val cues = loadCues(modelPath)
+    private val resourceUsageSampler = ResourceUsageSampler().also { it.sample() }
+    private val container = FrameLayout(context)
+    private val preparationExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "talk2u-live2d-prepare").apply {
+            priority = Thread.NORM_PRIORITY - 1
+        }
+    }
+    private val lifecycleOwner = context as? LifecycleOwner
+    @Volatile private var renderView: ManagedLive2dVulkanTextureView? = null
+    @Volatile private var nativeHandle = 0L
+    @Volatile private var disposed = false
+    @Volatile private var retired = false
+    @Volatile private var failed = false
+    @Volatile private var lastStatus: String? = null
+    @Volatile private var surfaceReady = false
 
     init {
-        webView.setBackgroundColor(android.graphics.Color.TRANSPARENT)
-        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
-        }
-        webView.settings.javaScriptEnabled = true
-        webView.settings.allowFileAccess = true
-        webView.settings.allowContentAccess = true
-        webView.settings.domStorageEnabled = true
-        webView.settings.mediaPlaybackRequiresUserGesture = false
-        webView.settings.allowFileAccessFromFileURLs = true
-        webView.settings.allowUniversalAccessFromFileURLs = true
-        webView.webViewClient = object : WebViewClient() {
-            override fun shouldInterceptRequest(
-                view: WebView?,
-                request: WebResourceRequest,
-            ): WebResourceResponse? {
-                if (request.url.toString() == LIVE2D_CORE_URL) {
-                    return fetchLive2dCore()
-                }
-                return assetLoader.shouldInterceptRequest(request.url)
-            }
-
-            override fun onReceivedError(
-                view: WebView?,
-                request: WebResourceRequest?,
-                error: WebResourceError?,
-            ) {
-                Log.e(
-                    "Talk2U.Live2D",
-                    "Resource failed: ${request?.url} (${error?.errorCode}) ${error?.description}",
-                )
-            }
-
-            override fun onReceivedHttpError(
-                view: WebView?,
-                request: WebResourceRequest?,
-                errorResponse: WebResourceResponse?,
-            ) {
-                Log.e(
-                    "Talk2U.Live2D",
-                    "HTTP failed: ${request?.url} (${errorResponse?.statusCode}) ${errorResponse?.reasonPhrase}",
-                )
-            }
-
-            override fun onRenderProcessGone(
-                view: WebView?,
-                detail: RenderProcessGoneDetail?,
-            ): Boolean {
-                val reason = if (detail?.didCrash() == true) {
-                    "Live2D 渲染进程异常退出"
-                } else {
-                    "设备内存不足，Live2D 渲染进程已被系统回收"
-                }
-                reportError(
-                    message = reason,
-                    failureCode = "webview-render-process-gone",
-                    recoverable = true,
-                )
-                disposed = true
-                view?.destroy()
-                return true
-            }
-        }
-        webView.webChromeClient = object : WebChromeClient() {
-            override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
-                Log.i(
-                    "Talk2U.Live2D",
-                    "${consoleMessage?.messageLevel()} ${consoleMessage?.sourceId()}:" +
-                        "${consoleMessage?.lineNumber()} ${consoleMessage?.message()}",
-                )
-                return true
-            }
-        }
-        webView.addJavascriptInterface(
-            StatusBridge(
-                onStatus = { message ->
-                    lastStatus = message
-                    channel.invokeMethod("status", message)
-                },
-                rendererCapabilities = { rendererCapabilities(context).toString() },
-            ),
-            "Talk2uNative",
-        )
         channel.setMethodCallHandler(this)
-
-        val modelPath = creationParams["modelPath"] as? String ?: ""
-        val modelUri = when {
-            modelPath.startsWith("asset:///") ->
-                "https://${WebViewAssetLoader.DEFAULT_DOMAIN}/assets/flutter_assets/" +
-                    modelPath.removePrefix("asset:///")
-            modelPath.startsWith("http://") ||
-                modelPath.startsWith("https://") ||
-                modelPath.startsWith("file://") -> modelPath
-            else -> {
-                val modelFile = java.io.File(modelPath).canonicalFile
-                val filesRoot = context.filesDir.canonicalFile
-                if (modelFile.path.startsWith(filesRoot.path + java.io.File.separator)) {
-                    val relative = modelFile.relativeTo(filesRoot).invariantSeparatorsPath
-                    "https://${WebViewAssetLoader.DEFAULT_DOMAIN}/files/$relative"
-                } else {
-                    Uri.fromFile(modelFile).toString()
-                }
-            }
-        }
-        val hasLocalCore = runCatching {
-            context.assets.open(
-                "flutter_assets/assets/live2d/vendor/live2dcubismcore.min.js",
-            ).use { }
-            true
-        }.getOrDefault(false)
-        val page = "https://${WebViewAssetLoader.DEFAULT_DOMAIN}/assets/flutter_assets/" +
-            "assets/live2d/index.html" +
-            "?model=${Uri.encode(modelUri)}&localCore=${if (hasLocalCore) 1 else 0}"
-        webView.loadUrl(page)
+        lifecycleOwner?.lifecycle?.addObserver(this)
+        Live2dViewCoordinator.activate(this)
+        preparationExecutor.execute(::prepareNativeRenderer)
     }
 
-    override fun getView(): View = webView
+    override fun getView(): View = container
+
+    override fun onResume(owner: LifecycleOwner) {
+        if (!disposed && !retired) {
+            renderView?.onResume()
+            surfaceReady = !failed && nativeHandle > 0 && renderView?.hasNativeSurface() == true
+        }
+    }
+
+    override fun onPause(owner: LifecycleOwner) {
+        surfaceReady = false
+        renderView?.onPause()
+    }
+
+    override fun onDestroy(owner: LifecycleOwner) {
+        dispose()
+    }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
-            "setMouth" -> evaluate("Talk2UAvatar.setMouth(${call.argument<Double>("value") ?: 0.0})", result)
-            "setSpeaking" -> {
-                val value = call.argument<Boolean>("value") == true
-                evaluate("Talk2UAvatar.setSpeaking($value)", result)
+            "setMouth" -> enqueue(result) { handle ->
+                Live2dNativeBridge.nativeSetMouth(
+                    handle,
+                    (call.argument<Double>("value") ?: 0.0).toFloat(),
+                )
             }
-            "motion" -> {
-                val group = JSONObject.quote(call.argument<String>("group") ?: "TapBody")
-                val index = call.argument<Int>("index") ?: 0
-                evaluate("Talk2UAvatar.motion($group,$index)", result)
+            "setSpeaking" -> enqueue(result) { handle ->
+                Live2dNativeBridge.nativeSetSpeaking(
+                    handle,
+                    call.argument<Boolean>("value") == true,
+                )
             }
-            "expression" -> {
-                val name = JSONObject.quote(call.argument<String>("name") ?: "")
-                evaluate("Talk2UAvatar.expression($name)", result)
+            "motion" -> enqueue(result) { handle ->
+                Live2dNativeBridge.nativeMotion(
+                    handle,
+                    call.argument<String>("group").orEmpty(),
+                    call.argument<Int>("index") ?: 0,
+                )
             }
-            "perform" -> {
-                val cue = JSONObject.quote(call.argument<String>("cue") ?: "neutral")
-                evaluate("Talk2UAvatar.perform($cue)", result)
+            "expression" -> enqueue(result) { handle ->
+                Live2dNativeBridge.nativeExpression(
+                    handle,
+                    call.argument<String>("name").orEmpty(),
+                )
             }
-            "resetExpression" -> evaluate("Talk2UAvatar.resetExpression()", result)
-            "diagnostics" -> evaluate("Talk2UAvatar.diagnostics()", result)
+            "perform" -> perform(call.argument<String>("cue").orEmpty(), result)
+            "resetExpression" -> enqueue(result) { handle ->
+                Live2dNativeBridge.nativeResetExpression(handle)
+            }
+            "diagnostics" -> diagnostics(result)
             "getStatus" -> result.success(lastStatus)
             else -> result.notImplemented()
         }
     }
 
-    private fun evaluate(script: String, result: MethodChannel.Result) {
-        if (disposed) {
-            result.error("live2d_unavailable", "Live2D 视图已经停止", null)
+    private fun perform(name: String, result: MethodChannel.Result) {
+        val cue = cues[name]
+        if (cue == null) {
+            result.success(null)
             return
         }
-        try {
-            webView.evaluateJavascript(script) { value -> result.success(value) }
-        } catch (error: RuntimeException) {
-            reportError(error.message ?: "Live2D 脚本执行失败")
-            result.error("live2d_javascript_failed", error.message, null)
+        enqueue(result) { handle ->
+            cue.group?.let { Live2dNativeBridge.nativeMotion(handle, it, cue.index) }
+            cue.expression?.let { Live2dNativeBridge.nativeExpression(handle, it) }
         }
     }
 
-    private fun fetchLive2dCore(): WebResourceResponse {
-        readCoreCache()?.let {
-            Log.i("Talk2U.Live2D", "Cubism Core served from app-private cache")
-            return coreResponse(it, "app-private-cache")
+    private fun enqueue(result: MethodChannel.Result, action: (Long) -> Unit) {
+        val handle = nativeHandle
+        val view = renderView
+        if (disposed || retired || failed || handle <= 0 || view == null) {
+            result.error("live2d_unavailable", "Cubism Native renderer is unavailable", null)
+            return
         }
-        var lastFailure = "unknown error"
-        repeat(2) { attempt ->
-            var connection: HttpURLConnection? = null
-            try {
-                connection = URL(LIVE2D_CORE_URL).openConnection() as HttpURLConnection
-                connection.connectTimeout = 7000
-                connection.readTimeout = 12000
-                connection.instanceFollowRedirects = true
-                connection.useCaches = false
-                connection.setRequestProperty("Accept", "application/javascript,text/javascript,*/*;q=0.8")
-                connection.setRequestProperty("User-Agent", userAgent)
-                val statusCode = connection.responseCode
-                val response = if (statusCode in 200..299) {
-                    connection.inputStream
-                } else {
-                    connection.errorStream
-                }
-                val bytes = response?.use { it.readBytes() } ?: ByteArray(0)
-                if (statusCode in 200..299 && isValidCore(bytes)) {
-                    writeCoreCache(bytes)
-                    Log.i("Talk2U.Live2D", "Cubism Core fetched and cached on attempt ${attempt + 1}")
-                    return coreResponse(bytes, "official-live2d-cdn")
-                }
-                lastFailure = "HTTP $statusCode ${connection.responseMessage.orEmpty()}"
-            } catch (error: Exception) {
-                lastFailure = error.message ?: error.javaClass.simpleName
-                Log.w("Talk2U.Live2D", "Cubism Core fetch attempt ${attempt + 1} failed", error)
-            } finally {
-                connection?.disconnect()
-            }
+        view.queueEvent {
+            runCatching { action(handle) }.fold(
+                onSuccess = { mainHandler.post { result.success(null) } },
+                onFailure = { error ->
+                    reportError(error, true)
+                    mainHandler.post {
+                        result.error(
+                            "live2d_native_operation_failed",
+                            error.message ?: error.javaClass.simpleName,
+                            null,
+                        )
+                    }
+                },
+            )
         }
-        val message = "Android HTTPS fallback failed after retry: $lastFailure"
-        Log.e("Talk2U.Live2D", message)
-        return WebResourceResponse(
-            "text/plain",
-            "UTF-8",
-            502,
-            "Bad Gateway",
-            emptyMap(),
-            ByteArrayInputStream(message.toByteArray(Charsets.UTF_8)),
+    }
+
+    private fun diagnostics(result: MethodChannel.Result) {
+        val handle = nativeHandle
+        if (disposed || handle <= 0) {
+            result.error("live2d_unavailable", "Cubism Native renderer is unavailable", null)
+            return
+        }
+        runCatching { mergedDiagnostics(handle).toString() }.fold(
+            onSuccess = result::success,
+            onFailure = {
+                result.error(
+                    "live2d_diagnostics_failed",
+                    it.message ?: it.javaClass.simpleName,
+                    null,
+                )
+            },
         )
     }
 
-    private fun readCoreCache(): ByteArray? = runCatching {
-        if (!coreCacheFile.isFile) return@runCatching null
-        coreCacheFile.readBytes().takeIf(::isValidCore)
-    }.getOrNull()
-
-    private fun writeCoreCache(bytes: ByteArray) {
-        runCatching {
-            coreCacheFile.parentFile?.mkdirs()
-            val temporary = File(coreCacheFile.parentFile, "${coreCacheFile.name}.tmp")
-            temporary.writeBytes(bytes)
-            if (!temporary.renameTo(coreCacheFile)) {
-                temporary.copyTo(coreCacheFile, overwrite = true)
-                temporary.delete()
-            }
-        }.onFailure { Log.w("Talk2U.Live2D", "Unable to persist Cubism Core cache", it) }
+    private fun mergedDiagnostics(handle: Long): JSONObject {
+        val details = JSONObject(Live2dNativeBridge.nativeDiagnostics(handle))
+        val rendererDetails = details.getJSONObject("renderer")
+        val platform = rendererDetails.optJSONObject("platform") ?: JSONObject().also {
+            rendererDetails.put("platform", it)
+        }
+        platform.put("nativeProbe", GpuBackendProbe.diagnostics())
+        val resourceUsage = resourceUsageSampler.sample()
+        val systemGpu = resourceUsage.getJSONObject("gpu")
+        val glGpu = rendererDetails.optJSONObject("gpuTiming")
+        val vulkanGpu = platform
+            .optJSONObject("vulkanInterop")
+            ?.optJSONObject("gpuTiming")
+        val rendererGpu = when {
+            glGpu?.optBoolean("available") == true -> glGpu
+            vulkanGpu?.optBoolean("available") == true -> vulkanGpu
+            else -> null
+        }
+        if (!systemGpu.optBoolean("available") && rendererGpu?.optBoolean("available") == true) {
+            resourceUsage.put("gpu", rendererGpu)
+        }
+        details.put("resourceUsage", resourceUsage)
+        return details
     }
 
-    private fun isValidCore(bytes: ByteArray): Boolean =
-        bytes.size > 1024 && bytes.toString(Charsets.UTF_8).contains("Live2DCubismCore")
-
-    private fun coreResponse(bytes: ByteArray, source: String): WebResourceResponse =
-        WebResourceResponse(
-            "application/javascript",
-            "UTF-8",
-            200,
-            "OK",
-            mapOf(
-                "Access-Control-Allow-Origin" to "*",
-                "Cache-Control" to "private, max-age=31536000, immutable",
-                "X-Talk2U-Core-Source" to source,
-            ),
-            ByteArrayInputStream(bytes),
+    private fun reportReady(handle: Long) {
+        runCatching { mergedDiagnostics(handle).toString() }.fold(
+            onSuccess = { status ->
+                lastStatus = status
+                mainHandler.post {
+                    if (!disposed && !retired) {
+                        renderView?.alpha = 1f
+                        channel.invokeMethod("status", status)
+                    }
+                }
+            },
+            onFailure = { reportError(it, true) },
         )
+    }
 
-    private fun reportError(
-        message: String,
-        failureCode: String? = null,
-        recoverable: Boolean = false,
-    ) {
+    private fun reportError(error: Throwable, recoverable: Boolean) {
+        Log.e("Talk2U.Live2D", "Cubism Native renderer failed", error)
+        failed = true
         val status = JSONObject()
             .put("type", "error")
-            .put("message", message)
+            .put("message", error.message ?: error.javaClass.simpleName)
+            .put("failureCode", "cubism-native-renderer-failed")
             .put("recoverable", recoverable)
-        if (failureCode != null) status.put("failureCode", failureCode)
-        val payload = status
             .toString()
-        lastStatus = payload
-        channel.invokeMethod("status", payload)
-    }
-
-    private fun rendererCapabilities(context: Context): JSONObject {
-        val packageManager = context.packageManager
-        val features = packageManager.systemAvailableFeatures.orEmpty()
-        val vulkanLevel = features.firstOrNull {
-            it.name == PackageManager.FEATURE_VULKAN_HARDWARE_LEVEL
-        }?.version ?: 0
-        val vulkanVersion = features.firstOrNull {
-            it.name == PackageManager.FEATURE_VULKAN_HARDWARE_VERSION
-        }?.version ?: 0
-        val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
-        val webViewVersion = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            WebView.getCurrentWebViewPackage()?.versionName.orEmpty()
-        } else {
-            ""
+        lastStatus = status
+        mainHandler.post {
+            if (!disposed && !retired) channel.invokeMethod("status", status)
         }
-        return JSONObject()
-            .put("viewHardwareAccelerated", webView.isHardwareAccelerated)
-            .put(
-                "applicationHardwareAccelerationRequested",
-                context.applicationInfo.flags and ApplicationInfo.FLAG_HARDWARE_ACCELERATED != 0,
-            )
-            .put("vulkanAdvertised", vulkanLevel > 0 || vulkanVersion > 0)
-            .put("vulkanLevel", vulkanLevel)
-            .put("vulkanVersion", vulkanVersion)
-            .put("requiredGlEsVersion", activityManager?.deviceConfigurationInfo?.reqGlEsVersion ?: 0)
-            .put("webViewVersion", webViewVersion)
-            .put("nativeProbe", GpuBackendProbe.diagnostics())
     }
 
     override fun dispose() {
+        if (disposed) return
+        disposed = true
+        Live2dViewCoordinator.release(this)
+        lifecycleOwner?.lifecycle?.removeObserver(this)
         channel.setMethodCallHandler(null)
-        webView.removeJavascriptInterface("Talk2uNative")
-        if (!disposed) {
-            disposed = true
-            webView.onPause()
-            webView.stopLoading()
-            webView.loadUrl("about:blank")
-            webView.destroy()
+        destroyNativeRenderer(renderView)
+        preparationExecutor.shutdownNow()
+        renderView = null
+        container.removeAllViews()
+    }
+
+    fun retireForReplacement() {
+        if (disposed || retired) return
+        retired = true
+        channel.setMethodCallHandler(null)
+        destroyNativeRenderer(renderView)
+        preparationExecutor.shutdownNow()
+        renderView = null
+        container.removeAllViews()
+    }
+
+    private fun destroyNativeRenderer(view: ManagedLive2dVulkanTextureView?) {
+        val handle = nativeHandle
+        if (handle <= 0) return
+        nativeHandle = 0
+        surfaceReady = false
+        if (view == null) {
+            runCatching { Live2dNativeBridge.nativeDestroy(handle) }
+                .onFailure { Log.w("Talk2U.Live2D", "Cubism session release failed", it) }
+            return
+        }
+        val released = CountDownLatch(1)
+        runCatching {
+            view.queueEvent {
+                try {
+                    runCatching {
+                        Live2dNativeBridge.nativeSurfaceDestroyed(handle)
+                        Live2dNativeBridge.nativeDestroy(handle)
+                    }.onFailure {
+                        Log.w("Talk2U.Live2D", "Cubism session release failed", it)
+                    }
+                } finally {
+                    released.countDown()
+                }
+            }
+            check(released.await(3, TimeUnit.SECONDS)) {
+                "Timed out while releasing the Cubism Vulkan resources"
+            }
+            view.onPause()
+            view.shutdown()
+        }.onFailure {
+            Log.e("Talk2U.Live2D", "Cubism Vulkan-thread release failed", it)
         }
     }
-}
 
-private class StatusBridge(
-    private val onStatus: (String) -> Unit,
-    private val rendererCapabilities: () -> String,
-) {
-    private val mainHandler = Handler(Looper.getMainLooper())
-
-    @JavascriptInterface
-    fun postMessage(message: String) {
-        mainHandler.post { onStatus(message) }
+    private fun prepareNativeRenderer() {
+        var handle = 0L
+        runCatching {
+            handle = Live2dNativeBridge.nativeCreate(
+                context.assets,
+                modelPath,
+                backgroundColor,
+            )
+            check(handle > 0) { "Cubism Native session creation failed" }
+            Live2dNativeBridge.nativePrepare(handle)
+        }.fold(
+            onSuccess = {
+                mainHandler.post {
+                    if (disposed || retired) {
+                        Live2dNativeBridge.nativeDestroy(handle)
+                    } else {
+                        nativeHandle = handle
+                        attachGlView()
+                    }
+                }
+            },
+            onFailure = { error ->
+                if (handle > 0) Live2dNativeBridge.nativeDestroy(handle)
+                reportError(error, false)
+            },
+        )
     }
 
-    @JavascriptInterface
-    fun getRendererCapabilities(): String = rendererCapabilities()
+    private fun attachGlView() {
+        val view = ManagedLive2dVulkanTextureView(
+            context,
+            object : ManagedLive2dVulkanTextureView.Callbacks {
+            override fun onSurfaceCreated(surface: Surface, width: Int, height: Int) {
+                val handle = nativeHandle
+                if (disposed || handle <= 0) return
+                runCatching {
+                    Live2dNativeBridge.nativeSurfaceCreated(handle, surface, width, height)
+                }
+                    .onSuccess {
+                        surfaceReady = true
+                        failed = false
+                    }
+                    .onFailure { reportError(it, true) }
+            }
+
+            override fun onSurfaceChanged(width: Int, height: Int) {
+                val handle = nativeHandle
+                if (disposed || failed || handle <= 0) return
+                runCatching { Live2dNativeBridge.nativeSurfaceChanged(handle, width, height) }
+                    .onFailure { reportError(it, true) }
+            }
+
+            override fun onSurfaceDestroyed() {
+                surfaceReady = false
+                val handle = nativeHandle
+                if (handle <= 0) return
+                runCatching { Live2dNativeBridge.nativeSurfaceDestroyed(handle) }
+                    .onFailure { reportError(it, true) }
+            }
+
+            override fun onDrawFrame() {
+                val handle = nativeHandle
+                if (disposed || failed || !surfaceReady || handle <= 0) return
+                runCatching {
+                    if (Live2dNativeBridge.nativeDrawFrame(handle)) reportReady(handle)
+                }.onFailure { reportError(it, true) }
+            }
+
+            override fun onDetached() {
+                // Detaching a hybrid PlatformView does not necessarily destroy
+                // its SurfaceTexture. onSurfaceDestroyed is the only event
+                // that invalidates the native EGL/Vulkan target.
+            }
+            },
+        ).apply { alpha = 0f }
+        renderView = view
+        container.addView(
+            view,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            ),
+        )
+    }
+
+    private fun validateModelPath(value: String?): String {
+        require(!value.isNullOrBlank()) { "Live2D model path is empty" }
+        if (value.startsWith("asset:///")) {
+            val relative = value.removePrefix("asset:///").replace('\\', '/')
+            require(relative.endsWith(".model3.json", true)) {
+                "Live2D asset must be a model3.json file"
+            }
+            require(relative.split('/').none { it == ".." }) {
+                "Live2D asset path is unsafe"
+            }
+            return "asset:///$relative"
+        }
+        val uri = Uri.parse(value)
+        val rawPath = if (uri.scheme.equals("file", true)) uri.path else value
+        val modelFile = File(requireNotNull(rawPath)).canonicalFile
+        val dataRoot = File(context.applicationInfo.dataDir).canonicalFile
+        require(modelFile.isFile && modelFile.name.endsWith(".model3.json", true)) {
+            "Live2D model3.json file is missing"
+        }
+        require(modelFile.path.startsWith(dataRoot.path + File.separator)) {
+            "Live2D model must be stored in the application private directory"
+        }
+        return modelFile.path
+    }
+
+    private fun loadCues(path: String): Map<String, Live2dCue> {
+        val raw = runCatching {
+            if (path.startsWith("asset:///")) {
+                val relative = path.removePrefix("asset:///")
+                val directory = relative.substringBeforeLast('/', "")
+                context.assets.open("flutter_assets/$directory/talk2u.avatar.json")
+                    .bufferedReader(Charsets.UTF_8)
+                    .use { it.readText() }
+            } else {
+                File(File(path).parentFile, "talk2u.avatar.json").readText(Charsets.UTF_8)
+            }
+        }.getOrNull() ?: return mapOf("neutral" to Live2dCue("Idle", 0, null))
+        val root = runCatching { JSONObject(raw) }.getOrNull() ?: return emptyMap()
+        val definitions = root.optJSONObject("cues") ?: return emptyMap()
+        val output = LinkedHashMap<String, Live2dCue>()
+        for (name in definitions.keys()) {
+            val cue = definitions.optJSONObject(name) ?: continue
+            val motion = cue.optJSONObject("motion")
+            val group = motion?.optString("group")?.takeIf { it.isNotEmpty() || motion.has("group") }
+            val index = motion?.optInt("index", 0) ?: 0
+            val expression = cue.optString("expression").takeIf(String::isNotBlank)
+            if (group != null || expression != null) {
+                output[name] = Live2dCue(group, index, expression)
+            }
+        }
+        return output
+    }
 }

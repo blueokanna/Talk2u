@@ -5,11 +5,11 @@
     <uses-feature
         android:name="android.hardware.vulkan.level"
         android:version="1"
-        android:required="false" />
+        android:required="true" />
     <uses-feature
         android:name="android.hardware.vulkan.version"
         android:version="0x00400000"
-        android:required="false" />
+        android:required="true" />
     <application
         android:label="Talk2U"
         android:name="${applicationName}"
@@ -19,6 +19,9 @@
         <uses-native-library
             android:name="libcdsprpc.so"
             android:required="false" />
+        <uses-native-library
+            android:name="libOpenCL.so"
+            android:required="false" />
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -27,7 +30,7 @@
             android:theme="@style/LaunchTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
-            android:windowSoftInputMode="adjustResize">
+            android:windowSoftInputMode="adjustNothing">
             <meta-data
               android:name="io.flutter.embedding.android.NormalTheme"
               android:resource="@style/NormalTheme"
@@ -45,12 +48,6 @@
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
-        </intent>
-        <intent>
-            <action android:name="android.intent.action.TTS_SERVICE"/>
-        </intent>
-        <intent>
-            <action android:name="android.speech.RecognitionService"/>
         </intent>
     </queries>
 </manifest>
