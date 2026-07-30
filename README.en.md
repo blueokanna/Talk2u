@@ -4,6 +4,9 @@ Talk2U is a Flutter and Rust character chat application. Conversations, characte
 
 This document describes the implemented behavior and its verification boundary. It does not claim that proprietary accelerators or third-party services work without their licensed runtime, device driver, model support, credentials, and real-device validation. See [README.md](README.md) for the full Chinese guide.
 
+## Download link for the open-source model with built-in folder in the Model folder
+[Download](https://1drv.ms/f/c/716401d0cdd5bd0e/IgDdaEU7EX-mRqR-h47_q-UUAftK4GNb5I9nDv1JGAVG0ik?e=VTbi0P)
+
 ## Capability Matrix
 
 | Capability | Status | Implementation |
