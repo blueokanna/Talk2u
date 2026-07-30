@@ -284,11 +284,11 @@ http://192.168.1.20:11434/v1/chat/completions
 
 模型权重不打入 APK。SenseVoice 与 Qwen3-4B-Instruct-2507 由应用按需断点下载并校验；MOSS 使用经过验证的 HTP v81 目录，由 Android 目录选择器导入并逐文件校验。
 
-| 用途 | 平台 | 模型 | 下载大小 | SHA-256 |
-| --- | --- | --- | ---: | --- |
-| 离线对话 | Android ARM64 | Qwen3-4B-Instruct-2507 Q4_K_M GGUF | 2,497,281,120 B | `3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597` |
-| 离线 STT | Android SM8850/HTP v81 | SenseVoice 2024-07-17 INT8 QNN 10 秒 context | 162,023,574 B | `ecbc1ffba39f8e23582b79a199d12e8455425a22ef7b6b18c535ce25fcff2d64` |
-| 离线 TTS | Android SM8850/HTP v81 | MOSS-TTS-Nano 100M QNN 部署包 + Audio Tokenizer | 取决于准备结果 | `moss-qnn-deployment.json` 逐文件 SHA-256 |
+| 用途 | 平台 | 模型 | 下载大小 |
+| --- | --- | --- | ---: |
+| 离线对话 | Android ARM64 | Qwen3-4B-Instruct-2507 Q4_K_M GGUF | 2,497,281,120 B |
+| 离线 STT | Android SM8850/HTP v81 | SenseVoice 2024-07-17 INT8 QNN 10 秒 context | 162,023,574 B |
+| 离线 TTS | Android SM8850/HTP v81 | MOSS-TTS-Nano 100M QNN 部署包 + Audio Tokenizer | 取决于准备结果 |
 
 Qwen3-4B-Instruct-2507 模型卡声明 Apache-2.0；GGUF 固定到 `unsloth/Qwen3-4B-Instruct-2507-GGUF@a06e946b`。`sherpa-onnx` 与 MOSS 模型也需分别遵守各自许可。QAIRT/QNN 二进制受 Qualcomm SDK 条款约束，不由仓库重新分发。
 

@@ -151,8 +151,8 @@ The call requires both an available offline STT and offline TTS on the same devi
 Speech preparation distinguishes stage directions from explanatory parentheses. For example:
 
 ```text
-Input:  女生：（哈哈大笑）你说的太好了！
-Spoken: 你说的太好了！
+Input:  Girl: (laughs) You said it so well!
+Spoken: You said it so well!
 Cue:    happy at spoken offset 0
 ```
 
