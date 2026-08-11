@@ -302,6 +302,42 @@ class MossTtsService extends ChangeNotifier {
     }
   }
 
+  /// Import MOSS model from a ZIP archive (moss-qnn-v81-streaming.zip).
+  Future<void> importModelFromZip() async {
+    await initialize();
+    if (!supported) throw UnsupportedError('MOSS QNN ZIP 导入仅支持 Android');
+    if (!runtimeReady) throw StateError('Qualcomm QNN HTP 运行时不可用');
+    if (downloading) return;
+    downloading = true;
+    operationLabel = '请选择 moss-qnn-v81-streaming.zip 文件';
+    lastError = null;
+    notifyListeners();
+    try {
+      final model = await _channel.invokeMapMethod<dynamic, dynamic>(
+        'importModelZip',
+      );
+      ready = model != null;
+      runtimeInitialized = model?['initialized'] == true;
+      if (model?['bytes'] is num) {
+        downloadedBytes = (model!['bytes'] as num).toInt();
+        totalDownloadBytes = downloadedBytes;
+      }
+      operationLabel = runtimeInitialized
+          ? 'MOSS QNN HTP 模型已导入并初始化'
+          : ready
+          ? 'MOSS QNN HTP 模型已导入'
+          : '';
+    } on PlatformException catch (error) {
+      if (error.code != 'moss_import_cancelled') {
+        lastError = error.message ?? error.code;
+        rethrow;
+      }
+    } finally {
+      downloading = false;
+      notifyListeners();
+    }
+  }
+
   Future<void> downloadModel() => importModel();
 
   void pauseDownload() {

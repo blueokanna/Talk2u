@@ -512,6 +512,30 @@ abstract class AppLocalizations {
   /// **'Import MOSS QNN HTP deployment'**
   String get importMoss;
 
+  /// No description provided for @importMossZip.
+  ///
+  /// In en, this message translates to:
+  /// **'Import from ZIP file'**
+  String get importMossZip;
+
+  /// No description provided for @importMossDir.
+  ///
+  /// In en, this message translates to:
+  /// **'Import from extracted directory'**
+  String get importMossDir;
+
+  /// No description provided for @importSherpaZip.
+  ///
+  /// In en, this message translates to:
+  /// **'Import from local ZIP file'**
+  String get importSherpaZip;
+
+  /// No description provided for @downloadFromInternet.
+  ///
+  /// In en, this message translates to:
+  /// **'Download from internet'**
+  String get downloadFromInternet;
+
   /// No description provided for @mossVoice.
   ///
   /// In en, this message translates to:

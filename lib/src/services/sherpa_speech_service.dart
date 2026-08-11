@@ -215,14 +215,26 @@ class SherpaSpeechService extends ChangeNotifier {
       return false;
     }
     final value = jsonDecode(await manifest.readAsString());
-    return value is Map<String, dynamic> &&
-        value['schemaVersion'] == 1 &&
-        value['packageId'] == package.directoryName &&
-        value['archiveSha256'] == package.asset.sha256 &&
-        value['targetSoc'] == package.soc &&
-        value['htpArchitecture'] == 'v81' &&
-        value['modelBytes'] == await model.length() &&
-        value['tokensBytes'] == await tokens.length();
+    if (value is! Map<String, dynamic>) return false;
+    final modelDigest = value['modelSha256'];
+    final tokensDigest = value['tokensSha256'];
+    if (value['schemaVersion'] != 1 ||
+        value['packageId'] != package.directoryName ||
+        value['archiveSha256'] != package.asset.sha256 ||
+        value['targetSoc'] != package.soc ||
+        value['htpArchitecture'] != 'v81' ||
+        value['modelBytes'] != await model.length() ||
+        value['tokensBytes'] != await tokens.length() ||
+        modelDigest is! String ||
+        tokensDigest is! String ||
+        !RegExp(r'^[0-9a-f]{64}$').hasMatch(modelDigest) ||
+        !RegExp(r'^[0-9a-f]{64}$').hasMatch(tokensDigest)) {
+      return false;
+    }
+    final actualModelDigest = await sha256.bind(model.openRead()).first;
+    if (actualModelDigest.toString() != modelDigest) return false;
+    final actualTokensDigest = await sha256.bind(tokens.openRead()).first;
+    return actualTokensDigest.toString() == tokensDigest;
   }
 
   Future<void> _deleteRemovedTtsAssets() async {
@@ -259,6 +271,34 @@ class SherpaSpeechService extends ChangeNotifier {
     asrReady = await _validateAsr();
     if (!asrReady) throw const FormatException('SenseVoice 模型文件不完整');
     notifyListeners();
+  }
+
+  /// Import SenseVoice model from a local ZIP file
+  /// (e.g., sherpa-onnx-qnn-SM8850.zip placed on the device).
+  Future<void> importAsrFromZip() async {
+    if (!supported) throw UnsupportedError('当前平台不支持 sherpa-onnx 语音识别');
+    if (downloading || extracting) return;
+    downloading = true;
+    operationLabel = '请选择 sherpa-onnx-qnn-SM8850.zip 文件';
+    lastError = null;
+    notifyListeners();
+    try {
+      final result = await _runtimeChannel.invokeMethod<bool>('importZip');
+      if (result != true) {
+        throw const FormatException('SenseVoice 模型导入未完成');
+      }
+      await initialize();
+      asrReady = await _validateAsr();
+      if (!asrReady) throw const FormatException('SenseVoice 模型文件不完整');
+    } on PlatformException catch (error) {
+      if (error.code != 'sherpa_import_cancelled') {
+        lastError = error.message ?? error.code;
+        rethrow;
+      }
+    } finally {
+      downloading = false;
+      notifyListeners();
+    }
   }
 
   Future<File> _downloadAsset(
@@ -437,6 +477,8 @@ class SherpaSpeechService extends ChangeNotifier {
         if (!await model.exists() || !await tokens.exists()) {
           throw const FormatException('SenseVoice QNN context 文件不完整');
         }
+        final modelDigest = await sha256.bind(model.openRead()).first;
+        final tokensDigest = await sha256.bind(tokens.openRead()).first;
         final package = _asrPackage;
         await File(
           '${extracted.path}${Platform.pathSeparator}$_manifestName',
@@ -450,6 +492,8 @@ class SherpaSpeechService extends ChangeNotifier {
             'maxAudioSeconds': 10,
             'modelBytes': await model.length(),
             'tokensBytes': await tokens.length(),
+            'modelSha256': modelDigest.toString(),
+            'tokensSha256': tokensDigest.toString(),
           }),
           flush: true,
         );

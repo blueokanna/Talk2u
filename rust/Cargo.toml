@@ -23,7 +23,7 @@ hmac = "0.13.0"
 sha2 = "0.11.0"
 base64url = "0.1"
 uuid = { version = "1.24.0", features = ["v4"] }
-futures = { version = "0.3", default-features = false }
+futures = { version = "0.3.33", default-features = false }
 rmp-serde = "1"
 bincode-next = "3.1.1"
 rustglm = { version = "=1.0.0", default-features = false }
@@ -33,10 +33,14 @@ jni = "=0.22.4"
 rustls-platform-verifier = "=0.7.0"
 
 [profile.release]
-opt-level = "z"
-lto = "thin"
-codegen-units = 16
-strip = true
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+[profile.dev]
+opt-level = 1
 
 [dev-dependencies]
 proptest = "1.11.0"

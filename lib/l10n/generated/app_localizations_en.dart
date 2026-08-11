@@ -228,6 +228,18 @@ class AppLocalizationsEn extends AppLocalizations {
   String get importMoss => 'Import MOSS QNN HTP deployment';
 
   @override
+  String get importMossZip => 'Import from ZIP file';
+
+  @override
+  String get importMossDir => 'Import from extracted directory';
+
+  @override
+  String get importSherpaZip => 'Import from local ZIP file';
+
+  @override
+  String get downloadFromInternet => 'Download from internet';
+
+  @override
   String get mossVoice => 'MOSS built-in cloned voice';
 
   @override

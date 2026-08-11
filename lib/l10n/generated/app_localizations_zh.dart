@@ -224,6 +224,18 @@ class AppLocalizationsZh extends AppLocalizations {
   String get importMoss => '导入 MOSS QNN HTP 部署包';
 
   @override
+  String get importMossZip => '从 ZIP 文件导入';
+
+  @override
+  String get importMossDir => '从解压目录导入';
+
+  @override
+  String get importSherpaZip => '从本地 ZIP 文件导入';
+
+  @override
+  String get downloadFromInternet => '从网络下载';
+
+  @override
   String get mossVoice => 'MOSS 内置克隆音色';
 
   @override

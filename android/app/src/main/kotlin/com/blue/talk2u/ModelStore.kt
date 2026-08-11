@@ -5,11 +5,13 @@ import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
 import org.json.JSONObject
+import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.security.MessageDigest
+import java.util.zip.ZipInputStream
 
 class ModelStore(private val context: Context) {
     data class Voice(val id: String, val label: String)
@@ -38,6 +40,127 @@ class ModelStore(private val context: Context) {
 
     fun deleteInstalled() {
         deletePrivateTree(installedRoot)
+    }
+
+    fun importFromZip(zipUri: Uri, progress: (ImportProgress) -> Unit): ModelInfo {
+        val resolver = context.contentResolver
+
+        modelParent.mkdirs()
+        check(modelParent.isDirectory) { "Cannot create the private model directory" }
+        val staging = File(modelParent, ".moss-qnn-v81-import")
+        val backup = File(modelParent, ".moss-qnn-v81-backup")
+        deletePrivateTree(staging)
+        check(staging.mkdirs()) { "Cannot create model import staging directory" }
+
+        try {
+            var extracted = 0L
+            var extractedFiles = 0
+            val extractedPaths = HashSet<String>()
+            resolver.openInputStream(zipUri)?.use { input ->
+                ZipInputStream(BufferedInputStream(input)).use { zip ->
+                    while (true) {
+                        if (Thread.currentThread().isInterrupted)
+                            throw InterruptedException("Model import cancelled")
+                        val entry = zip.nextEntry ?: break
+                        if (entry.isDirectory) continue
+
+                        val name = entry.name.trimStart('/').replace('\\', '/')
+                        require(name.isNotBlank()) { "ZIP contains empty file name" }
+                        val normalizedName = normalizeRelativePath(name)
+                        require(extractedPaths.add(normalizedName)) {
+                            "ZIP contains a duplicate file: $normalizedName"
+                        }
+                        extractedFiles += 1
+                        require(extractedFiles <= MAX_FILE_COUNT + 1) {
+                            "ZIP contains too many files"
+                        }
+                        require(entry.size < 0L || entry.size <= MAX_FILE_BYTES) {
+                            "ZIP entry is too large: $normalizedName"
+                        }
+
+                        val dest = resolveSafe(staging, normalizedName)
+                        dest.parentFile?.let { parent ->
+                            check(parent.mkdirs() || parent.isDirectory) {
+                                "Cannot create directory for $normalizedName"
+                            }
+                        }
+
+                        FileOutputStream(dest).use { output ->
+                            val buffer = ByteArray(COPY_BUFFER_BYTES)
+                            var fileBytes = 0L
+                            while (true) {
+                                if (Thread.currentThread().isInterrupted) {
+                                    throw InterruptedException("Model import cancelled")
+                                }
+                                val count = zip.read(buffer)
+                                if (count < 0) break
+                                output.write(buffer, 0, count)
+                                fileBytes += count
+                                extracted += count
+                                require(fileBytes <= MAX_FILE_BYTES) {
+                                    "ZIP entry is too large: $normalizedName"
+                                }
+                                require(extracted <= MAX_PACKAGE_BYTES + MAX_MANIFEST_BYTES) {
+                                    "ZIP expands beyond the model package limit"
+                                }
+                            }
+                            output.fd.sync()
+                        }
+                        progress(ImportProgress(normalizedName, extracted, 0L))
+                    }
+                }
+            } ?: error("Cannot open the ZIP archive")
+
+            // Locate the deployment manifest inside the extracted tree. It may live at the
+            // archive root, inside a single top-level wrapper directory, or be named with
+            // the common "qqn" typo (moss-qqn-deployment.json) instead of "qnn".
+            val manifestFile = findDeploymentManifest(staging)
+                ?: error(
+                    "The ZIP archive does not contain $DEPLOYMENT_MANIFEST. " +
+                        "请确认选择的 ZIP 是 moss-qnn-v81-streaming 部署包。"
+                )
+            val effectiveRoot = manifestFile.parentFile
+                ?: error("Cannot resolve the deployment manifest directory")
+            require(effectiveRoot.isDirectory) { "Deployment manifest directory is missing" }
+            val canonicalManifest = File(effectiveRoot, DEPLOYMENT_MANIFEST)
+            if (manifestFile.name != DEPLOYMENT_MANIFEST) {
+                require(!canonicalManifest.exists() && manifestFile.renameTo(canonicalManifest)) {
+                    "Cannot normalize the deployment manifest name"
+                }
+            }
+
+            // Do not trust ZIP CRCs. Validate every declared file against the signed
+            // deployment manifest before replacing a working installation.
+            val stagedInfo = inspectPackage(effectiveRoot, verifyHashes = true)
+            progress(ImportProgress(DEPLOYMENT_MANIFEST, stagedInfo.totalBytes, stagedInfo.totalBytes))
+            activateImportedRoot(staging, effectiveRoot, backup)
+            return stagedInfo.copy(root = installedRoot)
+        } catch (error: Throwable) {
+            runCatching { deletePrivateTree(staging) }
+            throw error
+        }
+    }
+
+    private fun findDeploymentManifest(root: File): File? {
+        val queue = ArrayDeque<File>()
+        queue.add(root)
+        while (queue.isNotEmpty()) {
+            val dir = queue.removeFirst()
+            val children = dir.listFiles() ?: continue
+            for (child in children) {
+                if (child.isDirectory) {
+                    queue.add(child)
+                } else if (isDeploymentManifestName(child.name)) {
+                    return child
+                }
+            }
+        }
+        return null
+    }
+
+    private fun isDeploymentManifestName(name: String): Boolean {
+        val lower = name.lowercase()
+        return lower == DEPLOYMENT_MANIFEST || lower == "moss-qqn-deployment.json"
     }
 
     fun importFromTree(treeUri: Uri, progress: (ImportProgress) -> Unit): ModelInfo {
@@ -117,26 +240,51 @@ class ModelStore(private val context: Context) {
                 require(digest.hexDigest() == entry.sha256) { "SHA-256 mismatch for ${entry.path}" }
                 copied += fileBytes
             }
-            val stagedInfo = inspectPackage(staging, verifyHashes = false)
-            deletePrivateTree(backup)
-            if (installedRoot.exists()) {
-                check(installedRoot.renameTo(backup)) { "Cannot preserve the installed model" }
-            }
-            if (!staging.renameTo(installedRoot)) {
-                if (backup.exists()) backup.renameTo(installedRoot)
-                error("Cannot activate the imported model")
-            }
-            deletePrivateTree(backup)
+            val stagedInfo = inspectPackage(staging, verifyHashes = true)
+            activateImportedRoot(staging, staging, backup)
             return stagedInfo.copy(root = installedRoot)
         } catch (error: Throwable) {
-            deletePrivateTree(staging)
+            runCatching { deletePrivateTree(staging) }
+            throw error
+        }
+    }
+
+    private fun activateImportedRoot(staging: File, sourceRoot: File, backup: File) {
+        val canonicalStaging = staging.canonicalFile
+        val canonicalSource = sourceRoot.canonicalFile
+        require(
+            canonicalSource == canonicalStaging ||
+                canonicalSource.path.startsWith(canonicalStaging.path + File.separator),
+        ) { "Imported model root is outside staging" }
+
+        deletePrivateTree(backup)
+        val hadInstalledModel = installedRoot.exists()
+        if (hadInstalledModel) {
+            check(installedRoot.renameTo(backup)) { "Cannot preserve the installed model" }
+        }
+
+        try {
+            check(sourceRoot.renameTo(installedRoot)) { "Cannot activate the imported model" }
+            if (staging.exists()) deletePrivateTree(staging)
+            if (backup.exists()) deletePrivateTree(backup)
+        } catch (error: Throwable) {
+            runCatching {
+                if (installedRoot.exists()) deletePrivateTree(installedRoot)
+            }
+            if (hadInstalledModel && backup.exists()) {
+                check(backup.renameTo(installedRoot)) {
+                    "Model activation failed and the previous installation could not be restored"
+                }
+            }
             throw error
         }
     }
 
     private fun inspectPackage(root: File, verifyHashes: Boolean): ModelInfo {
-        val manifestFile = File(root, DEPLOYMENT_MANIFEST)
-        require(manifestFile.isFile && manifestFile.length() <= MAX_MANIFEST_BYTES) {
+        val manifestFile = File(root, DEPLOYMENT_MANIFEST).let { canonical ->
+            if (canonical.isFile) canonical else findDeploymentManifest(root)
+        }
+        require(manifestFile != null && manifestFile.isFile && manifestFile.length() <= MAX_MANIFEST_BYTES) {
             "Installed deployment manifest is missing"
         }
         val manifest = JSONObject(manifestFile.readText(Charsets.UTF_8))

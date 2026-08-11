@@ -2,6 +2,7 @@ package com.blue.talk2u
 
 import android.content.Context
 import android.os.Build
+import android.util.Log
 import com.geniex.sdk.GenieXSdk
 import com.geniex.sdk.LlmWrapper
 import com.geniex.sdk.ModelManagerWrapper
@@ -30,7 +31,14 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
     data class DownloadProgress(val downloadedBytes: Long, val totalBytes: Long)
 
     private val appContext = context.applicationContext
-    private val sdk = GenieXSdk.Companion.getInstance()
+    private val sdk: GenieXSdk by lazy {
+        runCatching { GenieXSdk.Companion.getInstance() }
+            .getOrElse { error ->
+                val message = "GenieX SDK is unavailable: ${error.message ?: error.javaClass.simpleName}"
+                Log.e("Talk2U/GenieX", message, error)
+                throw IllegalStateException(message, error)
+            }
+    }
     private val modelManager = ModelManagerWrapper
     private val qairtRuntimeId = requireNotNull(RuntimeIdValue.QAIRT.value)
     private val stateLock = Any()
@@ -75,28 +83,33 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
     }
 
     fun downloadModel(onProgress: (DownloadProgress) -> Unit): Map<String, Any?> {
-        ensureInitialized()
-        if (findInstalledKey() != null) return modelStatus()
-        downloadCancelled.set(false)
-        runBlocking {
-            modelManager.pullFlow(modelPullInput()).collect { event ->
-                check(!downloadCancelled.get()) { "GenieX model download was cancelled" }
-                when (event) {
-                    is ModelManagerWrapper.PullEvent.Progress -> {
-                        val progress = aggregateProgress(event.files)
-                        lastKnownModelBytes = progress.totalBytes
-                        onProgress(progress)
+        try {
+            ensureInitialized()
+            if (findInstalledKey() != null) return modelStatus()
+            downloadCancelled.set(false)
+            runBlocking {
+                modelManager.pullFlow(modelPullInput()).collect { event ->
+                    check(!downloadCancelled.get()) { "GenieX model download was cancelled" }
+                    when (event) {
+                        is ModelManagerWrapper.PullEvent.Progress -> {
+                            val progress = aggregateProgress(event.files)
+                            lastKnownModelBytes = progress.totalBytes
+                            onProgress(progress)
+                        }
+                        is ModelManagerWrapper.PullEvent.Error -> error(
+                            event.message.ifBlank { "GenieX model pull failed with code ${event.code}" },
+                        )
+                        ModelManagerWrapper.PullEvent.Completed -> Unit
                     }
-                    is ModelManagerWrapper.PullEvent.Error -> error(
-                        event.message.ifBlank { "GenieX model pull failed with code ${event.code}" },
-                    )
-                    ModelManagerWrapper.PullEvent.Completed -> Unit
                 }
             }
+            val installed = findInstalledKey()
+            checkNotNull(installed) { "GenieX completed the download but did not install the model" }
+            return modelStatus()
+        } catch (error: Throwable) {
+            Log.e("Talk2U/GenieX", "Qwen3 model download failed", error)
+            throw error
         }
-        val installed = findInstalledKey()
-        checkNotNull(installed) { "GenieX completed the download but did not install the model" }
-        return modelStatus()
     }
 
     fun cancelDownload() {
@@ -234,22 +247,48 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
 
     private fun ensureInitialized() = synchronized(stateLock) {
         if (initialized) return@synchronized
-        var initError: String? = null
-        sdk.init(
-            appContext,
-            object : GenieXSdk.InitCallback {
-                override fun onSuccess() = Unit
-                override fun onFailure(reason: String) {
-                    initError = reason
-                }
-            },
-        )
-        check(initError.isNullOrBlank()) { "GenieX initialization failed: $initError" }
-        chipset = runBlocking { modelManager.detectChipset() }.orEmpty().trim().ifBlank {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) Build.SOC_MODEL.trim() else ""
+        // Fail fast (with a clean error, not a native crash) if this device is not a
+        // supported Qualcomm Snapdragon HTP v81 target.
+        val socModel = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            Build.SOC_MODEL.trim().uppercase()
+        } else {
+            ""
         }
+        if (socModel.isNotBlank() && !SUPPORTED_SOCS.contains(socModel)) {
+            throw IllegalStateException(
+                "GenieX Qwen3 需要 ${SUPPORTED_SOCS.joinToString("/")} HTP v81；" +
+                    "当前设备芯片: ${socModel.ifEmpty { "未知" }}",
+            )
+        }
+
+        var initError: String? = null
+        try {
+            sdk.init(
+                appContext,
+                object : GenieXSdk.InitCallback {
+                    override fun onSuccess() = Unit
+                    override fun onFailure(reason: String) {
+                        initError = reason
+                    }
+                },
+            )
+        } catch (error: Throwable) {
+            Log.e("Talk2U/GenieX", "GenieX SDK init threw", error)
+            throw IllegalStateException(
+                "GenieX SDK 初始化失败: ${error.message ?: error.javaClass.simpleName}",
+                error,
+            )
+        }
+        check(initError.isNullOrBlank()) { "GenieX initialization failed: $initError" }
+        chipset = runCatching { runBlocking { modelManager.detectChipset() } }
+            .getOrNull()
+            .orEmpty()
+            .trim()
+            .ifBlank { socModel }
         check(chipset.isNotBlank()) { "GenieX could not detect the Qualcomm chipset" }
-        val pluginVersion = sdk.getPluginVersion(qairtRuntimeId).orEmpty()
+        val pluginVersion = runCatching { sdk.getPluginVersion(qairtRuntimeId).orEmpty() }
+            .getOrNull()
+            .orEmpty()
         check(pluginVersion.isNotBlank()) { "GenieX QAIRT plugin is not registered" }
         initialized = true
     }
@@ -450,5 +489,6 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
         private const val QAIRT_BACKEND_TYPE = "QnnHtp"
         private const val QAIRT_PRECISION = "w4a16"
         private const val GENIEX_SUCCESS = 0
+        private val SUPPORTED_SOCS = setOf("SM8750", "SM8850")
     }
 }

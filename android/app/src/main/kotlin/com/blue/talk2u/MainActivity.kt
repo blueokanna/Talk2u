@@ -39,6 +39,8 @@ class MainActivity : FlutterActivity() {
     private val mossTtsChannelName = "talk2u/moss_tts"
     private val acceleratorTelemetryChannelName = "talk2u/accelerator_telemetry"
     private val mossImportRequest = 4203
+    private val mossZipImportRequest = 4204
+    private val sherpaZipImportRequest = 4205
     private val modelStore by lazy { ModelStore(applicationContext) }
     private val mossExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "talk2u-moss-tts").apply { priority = Thread.NORM_PRIORITY - 1 }
@@ -59,6 +61,8 @@ class MainActivity : FlutterActivity() {
     @Volatile private var mossEngine: NativeMossRuntime? = null
     @Volatile private var mossEngineRoot: String? = null
     private var pendingMossImportResult: MethodChannel.Result? = null
+    private var pendingMossZipImportResult: MethodChannel.Result? = null
+    private var pendingSherpaZipImportResult: MethodChannel.Result? = null
     private val acceleratorTelemetrySampler = AcceleratorTelemetry.Sampler()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -299,6 +303,7 @@ class MainActivity : FlutterActivity() {
                     senseVoiceRuntime.close()
                     deliverLlmResult(result) { result.success(null) }
                 }
+                "importZip" -> beginSherpaZipImport(result)
                 else -> result.notImplemented()
             }
         }
@@ -356,6 +361,7 @@ class MainActivity : FlutterActivity() {
                     "initialize" -> initializeMoss(result)
                     "modelInfo" -> result.success(modelStore.inspectInstalled()?.asMap())
                     "importModel" -> beginMossModelImport(result)
+                    "importModelZip" -> beginMossZipImport(result)
                     "deleteModel" -> mossExecutor.execute {
                         runCatching {
                             closeMossEngine()
@@ -998,10 +1004,66 @@ class MainActivity : FlutterActivity() {
             }
     }
 
+    private fun beginMossZipImport(result: MethodChannel.Result) {
+        if (pendingMossZipImportResult != null) {
+            result.error("moss_import_busy", "已有 MOSS 模型导入请求正在进行", null)
+            return
+        }
+        pendingMossZipImportResult = result
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "application/zip"
+            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/zip", "application/octet-stream"))
+        }
+        runCatching { startActivityForResult(intent, mossZipImportRequest) }
+            .onFailure { error ->
+                pendingMossZipImportResult = null
+                result.error(
+                    "moss_import_picker_failed",
+                    error.message ?: "无法打开 ZIP 文件选择器",
+                    null,
+                )
+            }
+    }
+
+    private fun beginSherpaZipImport(result: MethodChannel.Result) {
+        if (pendingSherpaZipImportResult != null) {
+            result.error("sherpa_import_busy", "已有 SenseVoice 模型导入请求正在进行", null)
+            return
+        }
+        pendingSherpaZipImportResult = result
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf(
+                "application/zip",
+                "application/x-tar",
+                "application/octet-stream",
+                "application/x-bzip2",
+            ))
+        }
+        runCatching { startActivityForResult(intent, sherpaZipImportRequest) }
+            .onFailure { error ->
+                pendingSherpaZipImportResult = null
+                result.error(
+                    "sherpa_import_picker_failed",
+                    error.message ?: "无法打开文件选择器",
+                    null,
+                )
+            }
+    }
+
     @Deprecated("Kept for Android document-tree result delivery")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != mossImportRequest) return
+        when (requestCode) {
+            mossImportRequest -> handleMossTreeResult(resultCode, data)
+            mossZipImportRequest -> handleMossZipResult(resultCode, data)
+            sherpaZipImportRequest -> handleSherpaZipResult(resultCode, data)
+        }
+    }
+
+    private fun handleMossTreeResult(resultCode: Int, data: Intent?) {
         val pending = pendingMossImportResult ?: return
         pendingMossImportResult = null
         val uri = data?.data
@@ -1036,6 +1098,76 @@ class MainActivity : FlutterActivity() {
                     deliverMossResult(pending) {
                         pending.error(
                             "moss_import_failed",
+                            error.message ?: error.javaClass.simpleName,
+                            null,
+                        )
+                    }
+                },
+            )
+        }
+    }
+
+    private fun handleMossZipResult(resultCode: Int, data: Intent?) {
+        val pending = pendingMossZipImportResult ?: return
+        pendingMossZipImportResult = null
+        val uri = data?.data
+        if (resultCode != RESULT_OK || uri == null) {
+            pending.error("moss_import_cancelled", "未选择 MOSS QNN 部署 ZIP 文件", null)
+            return
+        }
+        mossExecutor.execute {
+            runCatching {
+                closeMossEngine()
+                Log.i("Talk2U/MOSS", "Importing MOSS from ZIP: $uri")
+                val info = modelStore.importFromZip(uri) { progress ->
+                    if (progress.copiedBytes == progress.totalBytes) {
+                        Log.i("Talk2U/MOSS", "imported ${progress.fileName}")
+                    }
+                }
+                mossEngine(info.root)
+                info
+            }.fold(
+                onSuccess = { info ->
+                    deliverMossResult(pending) {
+                        pending.success(info.asMap() + mossRuntimeState())
+                    }
+                },
+                onFailure = { error ->
+                    Log.e("Talk2U/MOSS", "MOSS ZIP import failed", error)
+                    deliverMossResult(pending) {
+                        pending.error(
+                            "moss_import_failed",
+                            error.message ?: error.javaClass.simpleName,
+                            null,
+                        )
+                    }
+                },
+            )
+        }
+    }
+
+    private fun handleSherpaZipResult(resultCode: Int, data: Intent?) {
+        val pending = pendingSherpaZipImportResult ?: return
+        pendingSherpaZipImportResult = null
+        val uri = data?.data
+        if (resultCode != RESULT_OK || uri == null) {
+            pending.error("sherpa_import_cancelled", "未选择 SenseVoice 模型 ZIP 文件", null)
+            return
+        }
+        asrExecutor.execute {
+            runCatching {
+                senseVoiceRuntime.importFromZip(uri, contentResolver) { msg ->
+                    Log.i("Talk2U/SenseVoice", msg)
+                }
+            }.fold(
+                onSuccess = {
+                    deliverAsrResult(pending) { pending.success(true) }
+                },
+                onFailure = { error ->
+                    Log.e("Talk2U/SenseVoice", "ZIP import failed", error)
+                    deliverAsrResult(pending) {
+                        pending.error(
+                            "sherpa_import_failed",
                             error.message ?: error.javaClass.simpleName,
                             null,
                         )
@@ -1224,6 +1356,13 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun deliverMossResult(result: MethodChannel.Result, action: () -> Unit) {
+        if (activityDestroyed) return
+        runOnUiThread {
+            if (!activityDestroyed) runCatching(action)
+        }
+    }
+
+    private fun deliverAsrResult(result: MethodChannel.Result, action: () -> Unit) {
         if (activityDestroyed) return
         runOnUiThread {
             if (!activityDestroyed) runCatching(action)

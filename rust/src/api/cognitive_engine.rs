@@ -114,20 +114,13 @@ impl CognitiveEngine {
         let total = messages.len();
         if total == 0 {
             return EmotionVector {
-                joy: 0.0,
-                sadness: 0.0,
-                anger: 0.0,
-                fear: 0.0,
-                surprise: 0.0,
-                intimacy: 0.0,
-                trust: 0.0,
-                anticipation: 0.0,
-                valence: 0.0,
-                arousal: 0.0,
+                joy: 0.0, sadness: 0.0, anger: 0.0, fear: 0.0,
+                surprise: 0.0, intimacy: 0.0, trust: 0.0, anticipation: 0.0,
+                valence: 0.0, arousal: 0.0,
             };
         }
 
-        let emotion_lexicon: &[EmotionLexiconEntry] = &[
+        static EMOTION_LEXICON: &[EmotionLexiconEntry] = &[
             (
                 "joy",
                 0,
@@ -415,7 +408,7 @@ impl CognitiveEngine {
                 "不", "没", "别", "非", "未", "无", "莫", "勿", "才没", "又不", "并不", "才不",
             ];
 
-            for (_name, dim_idx, keywords) in emotion_lexicon.iter() {
+            for (_name, dim_idx, keywords) in EMOTION_LEXICON.iter() {
                 let mut dim_score = 0.0f64;
                 for &(kw, intensity) in *keywords {
                     if let Some(pos) = text.find(kw) {

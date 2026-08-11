@@ -7,6 +7,7 @@ use super::memory_engine::MemoryEngine;
 use super::provider::ProviderRuntime;
 use super::saydo_detector::SayDoDetector;
 use super::streaming_handler::StreamingHandler;
+use crate::is_cjk_char;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -199,13 +200,20 @@ impl ChatEngine {
     }
 
     fn extract_reasoning_brief(thinking: &str) -> String {
-        let chars: Vec<char> = thinking.chars().collect();
-        if chars.len() <= 500 {
-            thinking.to_string()
-        } else {
-            let start = chars.len() - 500;
-            format!("...{}", chars[start..].iter().collect::<String>())
+        let char_count = thinking.chars().count();
+        if char_count <= 500 {
+            return thinking.to_string();
         }
+        let skip = char_count - 500;
+        let start_byte = thinking
+            .char_indices()
+            .nth(skip)
+            .map(|(idx, _)| idx)
+            .unwrap_or(0);
+        let mut result = String::with_capacity(3 + thinking.len() - start_byte);
+        result.push_str("...");
+        result.push_str(&thinking[start_byte..]);
+        result
     }
 
     pub fn new(provider: ProviderRuntime, auxiliary_model: String, data_path: &str) -> Self {
@@ -247,11 +255,7 @@ impl ChatEngine {
         let mut total_tokens: usize = 0;
         for msg in messages {
             let char_count = msg.content.chars().count();
-            let cjk_chars = msg
-                .content
-                .chars()
-                .filter(|c| *c > '\u{4e00}' && *c < '\u{9fff}')
-                .count();
+            let cjk_chars = msg.content.chars().filter(|c| is_cjk_char(*c)).count();
             let ascii_words = msg
                 .content
                 .split_whitespace()

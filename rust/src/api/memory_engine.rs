@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::data_models::*;
 use super::error_handler::ChatError;
+use crate::is_cjk_char;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShortTermContext {
@@ -468,13 +469,13 @@ impl MemoryEngine {
     fn text_to_hybrid_features(text: &str) -> Vec<String> {
         let chars: Vec<char> = text
             .chars()
-            .filter(|c| c.is_alphanumeric() || (*c > '\u{4e00}' && *c < '\u{9fff}'))
+            .filter(|c| c.is_alphanumeric() || is_cjk_char(*c))
             .collect();
 
         let mut features = Vec::new();
 
         for c in &chars {
-            if *c > '\u{4e00}' && *c < '\u{9fff}' {
+            if is_cjk_char(*c) {
                 features.push(c.to_string());
             }
         }
@@ -523,7 +524,7 @@ impl MemoryEngine {
             if chars.len() >= window_size {
                 for window in chars.windows(window_size) {
                     let phrase: String = window.iter().collect();
-                    if phrase.chars().any(|c| c > '\u{4e00}' && c < '\u{9fff}')
+                    if phrase.chars().any(is_cjk_char)
                         && !is_stop_word(&phrase)
                     {
                         topics.push(phrase);

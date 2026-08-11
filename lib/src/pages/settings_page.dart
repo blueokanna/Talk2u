@@ -245,9 +245,41 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
+  Future<void> _importSherpaZip() async {
+    try {
+      await SherpaSpeechService.instance.importAsrFromZip();
+      await OfflineSpeechService.instance.initialize();
+      if (mounted) {
+        _showMessage(AppLocalizations.of(context).senseVoiceInstalled);
+      }
+    } catch (error) {
+      if (mounted) {
+        _showMessage(
+          AppLocalizations.of(context).senseVoiceInstallFailed('$error'),
+          isError: true,
+        );
+      }
+    }
+  }
+
   Future<void> _downloadMossTts() async {
     try {
       await MossTtsService.instance.importModel();
+      await OfflineSpeechService.instance.initialize();
+      if (mounted) _showMessage(AppLocalizations.of(context).mossImported);
+    } catch (error) {
+      if (mounted) {
+        _showMessage(
+          AppLocalizations.of(context).mossImportFailed('$error'),
+          isError: true,
+        );
+      }
+    }
+  }
+
+  Future<void> _importMossZip() async {
+    try {
+      await MossTtsService.instance.importModelFromZip();
       await OfflineSpeechService.instance.initialize();
       if (mounted) _showMessage(AppLocalizations.of(context).mossImported);
     } catch (error) {
@@ -729,10 +761,26 @@ class _SettingsPageState extends State<SettingsPage> {
                                 onPressed: sherpa.deleteAsr,
                                 icon: const Icon(Icons.delete_outline),
                               )
-                            : IconButton(
+                            : PopupMenuButton<String>(
                                 tooltip: strings.downloadSenseVoice,
-                                onPressed: _downloadSherpaAsr,
+                                onSelected: (value) {
+                                  if (value == 'zip') {
+                                    _importSherpaZip();
+                                  } else if (value == 'download') {
+                                    _downloadSherpaAsr();
+                                  }
+                                },
                                 icon: const Icon(Icons.download_outlined),
+                                itemBuilder: (context) => [
+                                  PopupMenuItem(
+                                    value: 'zip',
+                                    child: Text(strings.importSherpaZip),
+                                  ),
+                                  PopupMenuItem(
+                                    value: 'download',
+                                    child: Text(strings.downloadFromInternet),
+                                  ),
+                                ],
                               ),
                       ),
                       if (sherpa.downloading)
@@ -818,11 +866,27 @@ class _SettingsPageState extends State<SettingsPage> {
                                   onPressed: _deleteMossTts,
                                   icon: const Icon(Icons.delete_outline),
                                 )
-                              : IconButton(
+                              : PopupMenuButton<String>(
                                   key: const ValueKey('moss-import'),
                                   tooltip: strings.importMoss,
-                                  onPressed: _downloadMossTts,
+                                  onSelected: (value) {
+                                    if (value == 'zip') {
+                                      _importMossZip();
+                                    } else if (value == 'dir') {
+                                      _downloadMossTts();
+                                    }
+                                  },
                                   icon: const Icon(Icons.folder_open_outlined),
+                                  itemBuilder: (context) => [
+                                    PopupMenuItem(
+                                      value: 'zip',
+                                      child: Text(strings.importMossZip),
+                                    ),
+                                    PopupMenuItem(
+                                      value: 'dir',
+                                      child: Text(strings.importMossDir),
+                                    ),
+                                  ],
                                 ),
                         ),
                       ),
