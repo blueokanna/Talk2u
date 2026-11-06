@@ -48,7 +48,7 @@ internal class SenseVoiceQnnRuntime(private val context: Context) : AutoCloseabl
                 require(manifest.getString("htpArchitecture").equals(HTP_ARCHITECTURE, true)) {
                     "The SenseVoice QNN context does not target HTP $HTP_ARCHITECTURE"
                 }
-                val model = File(root, "model.bin").canonicalFile
+                val model = File(root, CONTEXT_FILE).canonicalFile
                 val tokens = File(root, "tokens.txt").canonicalFile
                 require(model.parentFile == root && model.isFile && model.length() > 0) {
                     "SenseVoice model.bin is missing"
@@ -118,36 +118,101 @@ internal class SenseVoiceQnnRuntime(private val context: Context) : AutoCloseabl
                 diagnostics()
             }
 
+    /**
+     * Transcribes 16 kHz mono PCM16.
+     *
+     * The QNN context is exported for a ten-second window, so anything longer is
+     * split instead of cut: the old code passed `minOf(size, MAX_PCM_BYTES)` and
+     * silently threw the tail away, which is why long utterances came back as a
+     * fragment of what was said. Each window starts at the last quiet sample of
+     * the previous one so a word is not sliced in half, and the window texts are
+     * joined in order.
+     */
     fun recognize(pcm16le: ByteArray): Map<String, Any?> =
             synchronized(this) {
-                val active = checkNotNull(recognizer) { "SenseVoice QNN runtime is not loaded" }
+                val active = checkNotNull(recognizer) { "SenseVoice runtime is not loaded" }
                 require(pcm16le.isNotEmpty() && pcm16le.size % 2 == 0) { "PCM16 audio is invalid" }
-                val pcmBytes = minOf(pcm16le.size, MAX_PCM_BYTES)
-                val samples = FloatArray(pcmBytes / 2)
-                for (index in samples.indices) {
-                    val offset = index * 2
-                    val value =
-                            (pcm16le[offset].toInt() and 0xff) or
-                                    (pcm16le[offset + 1].toInt() shl 8)
-                    samples[index] = value.toShort() / 32768.0f
+
+                val texts = ArrayList<String>()
+                var language = ""
+                var emotion = ""
+                var event = ""
+                var windows = 0
+                var offset = 0
+                while (offset < pcm16le.size) {
+                    val end = boundaryFor(pcm16le, offset)
+                    val samples = toSamples(pcm16le, offset, end)
+                    val stream = active.createStream()
+                    try {
+                        stream.acceptWaveform(samples, SAMPLE_RATE)
+                        active.decode(stream)
+                        val result = active.getResult(stream)
+                        val text = result.text.trim()
+                        if (text.isNotEmpty()) texts.add(text)
+                        if (language.isEmpty()) language = result.lang
+                        if (emotion.isEmpty()) emotion = result.emotion
+                        if (event.isEmpty()) event = result.event
+                    } finally {
+                        stream.release()
+                    }
+                    windows += 1
+                    offset = end
                 }
-                val stream = active.createStream()
-                try {
-                    stream.acceptWaveform(samples, SAMPLE_RATE)
-                    active.decode(stream)
-                    val result = active.getResult(stream)
-                    mapOf(
-                            "text" to result.text.trim(),
-                            "language" to result.lang,
-                            "emotion" to result.emotion,
-                            "event" to result.event,
-                            "provider" to "QNN_HTP",
-                            "hardwareAccelerated" to true,
-                    )
-                } finally {
-                    stream.release()
-                }
+
+                mapOf(
+                        "text" to texts.joinToString(" "),
+                        "language" to language,
+                        "emotion" to emotion,
+                        "event" to event,
+                        // What was actually done, not what was hoped for: the
+                        // window count and the audio length are measured here.
+                        "windows" to windows,
+                        "audioSeconds" to (pcm16le.size / 2).toFloat() / SAMPLE_RATE,
+                        "windowSeconds" to MAX_AUDIO_SECONDS,
+                        "qnnContextFile" to CONTEXT_FILE,
+                )
             }
+
+    /**
+     * End offset (bytes) of the window that starts at [start].
+     *
+     * Prefers the last quiet sample inside the final quarter second of the
+     * window, so a split lands between words rather than inside one. Falls back
+     * to the hard window edge when the speech never pauses.
+     */
+    private fun boundaryFor(pcm16le: ByteArray, start: Int): Int {
+        val hardEnd = minOf(start + MAX_PCM_BYTES, pcm16le.size)
+        if (hardEnd - start < MAX_PCM_BYTES) return hardEnd
+        val searchBytes = minOf(SILENCE_SEARCH_BYTES, MAX_PCM_BYTES / 4)
+        val searchStart = hardEnd - searchBytes
+        var best = hardEnd
+        var bestLevel = Int.MAX_VALUE
+        var index = searchStart - (searchStart % 2)
+        while (index + 1 < hardEnd) {
+            val sample =
+                    (pcm16le[index].toInt() and 0xff) or (pcm16le[index + 1].toInt() shl 8)
+            val level = kotlin.math.abs(sample.toShort().toInt())
+            if (level < bestLevel) {
+                bestLevel = level
+                best = index
+            }
+            index += 2
+        }
+        // Only accept the cut when it is genuinely quiet; otherwise split at the
+        // window edge and keep the audio contiguous.
+        return if (bestLevel <= SILENCE_LEVEL) maxOf(best, start + 2) else hardEnd
+    }
+
+    private fun toSamples(pcm16le: ByteArray, start: Int, end: Int): FloatArray {
+        val samples = FloatArray((end - start) / 2)
+        for (index in samples.indices) {
+            val offset = start + index * 2
+            val value =
+                    (pcm16le[offset].toInt() and 0xff) or (pcm16le[offset + 1].toInt() shl 8)
+            samples[index] = value.toShort() / 32768.0f
+        }
+        return samples
+    }
 
     fun diagnostics(): Map<String, Any?> =
             mapOf(
@@ -319,6 +384,7 @@ internal class SenseVoiceQnnRuntime(private val context: Context) : AutoCloseabl
 
         const val CHANNEL = "talk2u/sensevoice_qnn"
         const val MANIFEST_FILE = "talk2u-sensevoice-manifest.json"
+        private const val CONTEXT_FILE = "model.bin"
         private const val HTP_ARCHITECTURE = "v81"
         private val MODEL_SPECS =
                 listOf(
@@ -348,6 +414,8 @@ internal class SenseVoiceQnnRuntime(private val context: Context) : AutoCloseabl
         private const val SAMPLE_RATE = 16_000
         private const val MAX_AUDIO_SECONDS = 10
         private const val MAX_PCM_BYTES = SAMPLE_RATE * MAX_AUDIO_SECONDS * 2
+        private const val SILENCE_SEARCH_BYTES = SAMPLE_RATE / 4 * 2
+        private const val SILENCE_LEVEL = 1200
         private const val MAX_MODEL_FILE_BYTES = 512L * 1024 * 1024
         private const val MAX_IMPORT_BYTES = 512L * 1024 * 1024
         private val SHA256_PATTERN = Regex("[0-9a-f]{64}")

@@ -64,3 +64,8 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+# Streamed TTS weights are hundreds of megabytes; they ship with the model
+# download, never with the source tree.
+/model/TTS/**/*.data
+/model/TTS/**/*.onnx
+/model/TTS/**/*.bin

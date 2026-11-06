@@ -1,4 +1,3 @@
-import groovy.json.JsonSlurper
 import java.security.MessageDigest
 import java.util.zip.ZipFile
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
@@ -8,8 +7,6 @@ plugins {
     id("kotlin-android")
     id("dev.flutter.flutter-gradle-plugin")
 }
-
-data class RustlsAndroidArtifact(val repository: File, val version: String)
 
 val ortVersion = "1.26.0"
 val qnnPluginVersion = "2.4.0"
@@ -269,44 +266,10 @@ val prepareGenieXRuntimeAar by tasks.registering(Zip::class) {
 val genieXRuntimeAar = files(prepareGenieXRuntimeAar.flatMap { it.archiveFile })
     .builtBy(prepareGenieXRuntimeAar)
 
-val rustlsAndroidArtifact = run {
-    val metadataJson = providers.exec {
-        workingDir = rootProject.projectDir
-        commandLine(
-            "cargo",
-            "metadata",
-            "--format-version",
-            "1",
-            "--filter-platform",
-            "aarch64-linux-android",
-            "--manifest-path",
-            file("../../rust/Cargo.toml").absolutePath,
-        )
-    }.standardOutput.asText.get()
-    val metadata = JsonSlurper().parseText(metadataJson) as Map<*, *>
-    val rustlsPackage = (metadata["packages"] as List<*>)
-        .map { it as Map<*, *> }
-        .first { it["name"] == "rustls-platform-verifier-android" }
-    val manifest = file(rustlsPackage["manifest_path"].toString())
-    RustlsAndroidArtifact(
-        repository = File(manifest.parentFile, "maven"),
-        version = rustlsPackage["version"].toString(),
-    )
-}
-
-repositories {
-    maven {
-        url = uri(rustlsAndroidArtifact.repository)
-    }
-}
-
 dependencies {
     implementation(genieXRuntimeAar)
     implementation(files(sherpaQnnAar))
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
-    implementation(
-        "rustls:rustls-platform-verifier:${rustlsAndroidArtifact.version}",
-    )
 }
 
 val qnnSdkJniDirectory = layout.buildDirectory.dir("generated/qnn/jniLibs")

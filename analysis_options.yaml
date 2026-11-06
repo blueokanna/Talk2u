@@ -6,6 +6,13 @@ analyzer:
     - lib/src/rust/frb_generated.dart
     - rust_builder/**
     - third_party/**
+    - build/**
+    - android/**
+    - ios/**
+    - web/**
+    - windows/**
+    - macos/**
+    - linux/**
 
 linter:
   rules:
