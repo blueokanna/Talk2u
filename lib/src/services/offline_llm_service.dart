@@ -42,7 +42,7 @@ class OfflineLlmService extends ChangeNotifier {
   static const modelId = 'ai-hub-models/Qwen3-4B-Instruct-2507';
   static const modelLicense = 'Apache-2.0';
   static const contextSize = 4096;
-  static const maxOutputTokens = 256;
+  static const maxOutputTokens = 1024;
   static const _runtimeChannel = MethodChannel('talk2u/llm_runtime');
 
   bool initialized = false;

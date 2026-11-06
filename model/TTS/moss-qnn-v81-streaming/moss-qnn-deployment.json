@@ -1,0 +1,86 @@
+{
+    "schemaVersion":  1,
+    "runtime":  "onnxruntime-qnn-plugin-ep",
+    "ortVersion":  "1.26.0",
+    "onnxruntimeQnnVersion":  "2.4.0",
+    "qnnSdkVersion":  "2.48.0",
+    "target":  {
+                   "soc":  "SM8850",
+                   "socId":  660,
+                   "htpArchitecture":  "v81"
+               },
+    "providerPlan":  {
+                         "prefill":  "QNN_HTP",
+                         "decode":  "QNN_HTP",
+                         "sampler":  "ORT_CPU",
+                         "codec":  "ORT_CPU"
+                     },
+    "preparationStatus":  "host-prepared-not-device-validated",
+    "files":  [
+                  {
+                      "path":  "MOSS-Audio-Tokenizer-Nano-ONNX/codec_browser_onnx_meta.json",
+                      "size":  17036,
+                      "sha256":  "3e291c883bb7d11ff2fe8e964e3e495519760358859f35c951254c7741592731"
+                  },
+                  {
+                      "path":  "MOSS-Audio-Tokenizer-Nano-ONNX/moss_audio_tokenizer_decode_shared.data",
+                      "size":  44198912,
+                      "sha256":  "e69d52e0f4e84ca27850557ee54face46632d3a5a16c89bd246c7c408466dcad"
+                  },
+                  {
+                      "path":  "MOSS-Audio-Tokenizer-Nano-ONNX/moss_audio_tokenizer_decode_step.qnn.onnx",
+                      "size":  350118,
+                      "sha256":  "aa0d6450b1605b24c5972f8c2c5021b6663dd03f355af8af93a22506d68403a4"
+                  },
+                  {
+                      "path":  "MOSS-TTS-Nano-100M-ONNX/browser_poc_manifest.json",
+                      "size":  503359,
+                      "sha256":  "cab93e5a5776c36aa550f0de8aa5da4b4a60f67b8f5dff929624794d1198c47c"
+                  },
+                  {
+                      "path":  "MOSS-TTS-Nano-100M-ONNX/moss_tts_decode_step.onnx",
+                      "size":  291483,
+                      "sha256":  "698cbc2fc1c2feca16e5895614ed52bbb32ded10f236c076f477b2e69abf32d8"
+                  },
+                  {
+                      "path":  "MOSS-TTS-Nano-100M-ONNX/moss_tts_decode_step.qnn.onnx",
+                      "size":  297196,
+                      "sha256":  "ced0b676e1c40cc25bb3087618ca6c51424630a216c43826d65257e83a72312c"
+                  },
+                  {
+                      "path":  "MOSS-TTS-Nano-100M-ONNX/moss_tts_global_shared.data",
+                      "size":  440813568,
+                      "sha256":  "bce8312c3df6a44545302cae229b61054fe0672e0b252ba59cba47adeed831dc"
+                  },
+                  {
+                      "path":  "MOSS-TTS-Nano-100M-ONNX/moss_tts_local_fixed_sampled_frame.onnx",
+                      "size":  471262,
+                      "sha256":  "40cdb00efc171c450cf91468e01429caa41b0252222cd308e978f58fe354afa8"
+                  },
+                  {
+                      "path":  "MOSS-TTS-Nano-100M-ONNX/moss_tts_local_shared.data",
+                      "size":  229678080,
+                      "sha256":  "bae7782032c0fb12490ab42afe009f87ae6c75a0f0596fc7b5c08e4d5ee93916"
+                  },
+                  {
+                      "path":  "MOSS-TTS-Nano-100M-ONNX/moss_tts_prefill.onnx",
+                      "size":  283305,
+                      "sha256":  "d56126dcd0574c2f15d98fc6b35eda68d0386b5bd9c5e38e28548d6f2ea8f3db"
+                  },
+                  {
+                      "path":  "MOSS-TTS-Nano-100M-ONNX/moss_tts_prefill.qnn.onnx",
+                      "size":  284483,
+                      "sha256":  "a15afb3fc51fe6266bb8498e2e2d535c9e70a35a68fbb89a75342706d6e9689f"
+                  },
+                  {
+                      "path":  "MOSS-TTS-Nano-100M-ONNX/tokenizer.model",
+                      "size":  470897,
+                      "sha256":  "c353ee1479b536bf414c1b247f5542b6607fb8ae91320e5af1781fee200fddff"
+                  },
+                  {
+                      "path":  "MOSS-TTS-Nano-100M-ONNX/tts_browser_onnx_meta.json",
+                      "size":  4487,
+                      "sha256":  "3edf25232dcd0af3d061c837e9a968a39e2f8592e06777d740503c4f2244f95c"
+                  }
+              ]
+}

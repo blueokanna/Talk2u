@@ -11,6 +11,7 @@ import 'package:talk2u/src/widgets/chat_input.dart';
 import 'package:talk2u/src/pages/conversation_list_page.dart';
 import 'package:talk2u/src/pages/character_list_page.dart';
 import 'package:talk2u/src/pages/settings_page.dart';
+import 'package:talk2u/src/services/call_session.dart';
 import 'package:talk2u/src/services/offline_speech_service.dart';
 import 'package:talk2u/src/services/live2d_model_importer.dart';
 import 'package:talk2u/src/services/moss_tts_service.dart';
@@ -34,14 +35,12 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   String? _modelOverrideCharacterId;
   ChatState? _chatState;
   int _handledResponseRevision = 0;
-  StreamSubscription<String>? _callRecognitionSubscription;
-  bool _callMode = false;
-  bool _callAwaitingResponse = false;
-  bool _callWaitingForSpeech = false;
-  bool _callSpeechStarted = false;
-  bool _callTransitioning = false;
-  bool _callRestartScheduled = false;
-  int _callGeneration = 0;
+  CallSession? _callSession;
+  bool _lastStreamingState = false;
+  bool _autoFollow = true;
+  bool _autoScrollScheduled = false;
+  final _avatarController = Live2dAvatarController();
+
   @override
   void initState() {
     super.initState();
@@ -50,11 +49,6 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       duration: const Duration(milliseconds: 200),
     );
     _scrollController.addListener(_onScroll);
-    final speech = OfflineSpeechService.instance;
-    speech.addListener(_handleCallSpeechState);
-    _callRecognitionSubscription = speech.recognitionResults.listen(
-      _handleCallRecognition,
-    );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<ChatState>().initialize();
     });
@@ -69,17 +63,58 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     _chatState = chatState;
     _handledResponseRevision = chatState.completedResponseRevision;
     chatState.addListener(_handleChatStateChanged);
+    _callSession ??= CallSession(
+      port: OfflineSpeechService.instance,
+      onSend: chatState.sendMessage,
+      onStopGeneration: chatState.stopGeneration,
+    )..addListener(_handleCallPhaseChanged);
+  }
+
+  void _handleCallPhaseChanged() {
+    final session = _callSession;
+    if (session == null) return;
+    _avatarController.perform(switch (session.phase) {
+      CallPhase.listening => 'listening',
+      CallPhase.thinking => 'thinking',
+      CallPhase.speaking => 'talking',
+      CallPhase.idle || CallPhase.halted => 'calm',
+    });
+    if (!mounted) return;
+    setState(() {});
+    final error = session.lastError;
+    if (session.phase == CallPhase.halted && error != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            AppLocalizations.of(context).continuousCallStopped(error),
+          ),
+        ),
+      );
+    }
   }
 
   void _handleChatStateChanged() {
     final chatState = _chatState;
     if (chatState == null) return;
-    if (_callMode &&
-        _callAwaitingResponse &&
+
+    if (chatState.isStreaming != _lastStreamingState) {
+      _lastStreamingState = chatState.isStreaming;
+      if (chatState.isStreaming) {
+        _avatarController.perform('thinking');
+      } else if (!OfflineSpeechService.instance.speaking &&
+          !OfflineSpeechService.instance.generating) {
+        _avatarController.perform('calm');
+      }
+    }
+    if (chatState.isStreaming && _autoFollow) {
+      _scheduleAutoScroll();
+    }
+    final session = _callSession;
+    if (session == null || !session.active) return;
+    if (chatState.errorMessage != null &&
         !chatState.isStreaming &&
-        chatState.errorMessage != null) {
-      _callAwaitingResponse = false;
-      unawaited(_resumeCallListening(_callGeneration));
+        session.phase == CallPhase.thinking) {
+      session.onResponseFailed();
     }
     if (chatState.completedResponseRevision <= _handledResponseRevision) {
       return;
@@ -88,27 +123,27 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     for (final message in chatState.messages.reversed) {
       if (message.role == MessageRole.assistant &&
           message.content.trim().isNotEmpty) {
-        if (_callMode) {
-          _callAwaitingResponse = false;
-          _callWaitingForSpeech = true;
-          _callSpeechStarted = false;
-          final generation = _callGeneration;
-          unawaited(
-            _speakReply(
-              message.content,
-            ).whenComplete(() => _handleCallSpeechInvocation(generation)),
-          );
-        } else {
-          unawaited(_speakReply(message.content));
-        }
+        unawaited(session.onResponseCompleted(message.content));
         return;
       }
     }
+    session.onResponseFailed();
+  }
+
+  void _scheduleAutoScroll() {
+    if (_autoScrollScheduled) return;
+    _autoScrollScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _autoScrollScheduled = false;
+      if (!mounted || !_scrollController.hasClients) return;
+      _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+    });
   }
 
   void _onScroll() {
     if (!_scrollController.hasClients) return;
     final isNearBottom = _isUserNearBottom();
+    _autoFollow = isNearBottom;
     if (!isNearBottom && !_showScrollToBottom) {
       setState(() => _showScrollToBottom = true);
       _fabController.forward();
@@ -127,22 +162,22 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
 
   @override
   void dispose() {
-    _callMode = false;
-    _callGeneration++;
-    final speech = OfflineSpeechService.instance;
-    if (speech.listening) unawaited(speech.stopListening());
-    if (speech.speaking || speech.generating) {
-      unawaited(speech.stopSpeaking());
+    final session = _callSession;
+    _callSession = null;
+    if (session != null) {
+      session.removeListener(_handleCallPhaseChanged);
+      unawaited(session.stop());
+      session.dispose();
     }
-    OfflineSpeechService.instance.removeListener(_handleCallSpeechState);
-    unawaited(_callRecognitionSubscription?.cancel());
     _chatState?.removeListener(_handleChatStateChanged);
     _scrollController.dispose();
     _fabController.dispose();
+    _avatarController.dispose();
     super.dispose();
   }
 
   void _scrollToBottom({bool animate = true}) {
+    _autoFollow = true;
     if (!_scrollController.hasClients) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scrollController.hasClients) return;
@@ -160,177 +195,97 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
 
   void _handleSend(String content) {
     unawaited(OfflineSpeechService.instance.stopSpeaking());
-    final chatState = context.read<ChatState>();
-    chatState.sendMessage(content);
+    context.read<ChatState>().sendMessage(content);
+    _autoFollow = true;
     _scrollToBottom();
   }
 
   void _handleRetry() {
     unawaited(OfflineSpeechService.instance.stopSpeaking());
-    final chatState = context.read<ChatState>();
-    chatState.retryLastMessage();
+    context.read<ChatState>().retryLastMessage();
+    _autoFollow = true;
     _scrollToBottom();
   }
 
   Future<void> _toggleListening() async {
     final strings = AppLocalizations.of(context);
     final speech = OfflineSpeechService.instance;
+    final session = _callSession;
+    if (session != null && session.active) {
+      await session.toggleMicrophone();
+      return;
+    }
     try {
       if (speech.listening) {
         await speech.stopListening();
-      } else {
-        if (_callMode) {
-          final chatState = _chatState;
-          if (chatState?.isStreaming == true) await chatState!.stopGeneration();
-          if (speech.speaking || speech.generating) {
-            _callWaitingForSpeech = false;
-            _callSpeechStarted = false;
-            await speech.stopSpeaking();
-          }
-        }
-        await speech.startListening();
+        _avatarController.perform('calm');
+        return;
       }
+      if (speech.speaking || speech.generating) await speech.stopSpeaking();
+      await speech.startListening();
+      _avatarController.perform('listening');
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(
+      ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(strings.offlineSttUnavailable('$error'))),
       );
     }
   }
 
-  Future<void> _toggleCallMode() async {
-    if (_callTransitioning) return;
+  Future<void> _toggleCall() async {
     final strings = AppLocalizations.of(context);
-    _callTransitioning = true;
+    final session = _callSession;
+    if (session == null) return;
+    if (session.active) {
+      await session.stop();
+      return;
+    }
+    final speech = OfflineSpeechService.instance;
     try {
-      if (_callMode) {
-        await _stopCallMode();
-        return;
-      }
-      final speech = OfflineSpeechService.instance;
       await speech.initialize();
       if (!speech.capabilities.offlineStt || !speech.capabilities.offlineTts) {
         throw StateError(strings.continuousCallRequiresSpeech);
       }
-      await speech.stopSpeaking();
+      if (speech.speaking || speech.generating) await speech.stopSpeaking();
       if (speech.listening) await speech.stopListening();
-      _callGeneration++;
-      _callAwaitingResponse = false;
-      _callWaitingForSpeech = false;
-      _callSpeechStarted = false;
-      if (mounted) setState(() => _callMode = true);
-      await _resumeCallListening(_callGeneration);
+      await _chatState?.stopGeneration();
+      await session.start();
+      if (session.phase == CallPhase.halted) {
+        throw StateError(session.lastError ?? 'call session failed');
+      }
     } catch (error) {
       if (!mounted) return;
-      setState(() => _callMode = false);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(
+      ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(strings.continuousCallStartFailed('$error'))),
       );
-    } finally {
-      _callTransitioning = false;
     }
   }
 
-  Future<void> _stopCallMode() async {
-    _callGeneration++;
-    _callAwaitingResponse = false;
-    _callWaitingForSpeech = false;
-    _callSpeechStarted = false;
-    if (mounted) setState(() => _callMode = false);
+  Future<void> _interruptAssistant() async {
+    final session = _callSession;
+    if (session != null && session.active) {
+      await session.interrupt();
+      return;
+    }
     final speech = OfflineSpeechService.instance;
-    if (speech.listening) await speech.stopListening();
     if (speech.speaking || speech.generating) await speech.stopSpeaking();
+    if (_chatState?.isStreaming == true) await _chatState!.stopGeneration();
+    _avatarController.perform('calm');
   }
 
-  void _handleCallRecognition(String text) {
-    if (!_callMode || _callAwaitingResponse || text.trim().isEmpty) return;
-    final generation = _callGeneration;
-    _callAwaitingResponse = true;
-    _callWaitingForSpeech = false;
-    _callSpeechStarted = false;
-    unawaited(_sendCallTurn(text.trim(), generation));
-  }
-
-  Future<void> _sendCallTurn(String text, int generation) async {
-    try {
-      final chatState = _chatState;
-      if (chatState == null || !_callMode || generation != _callGeneration) {
-        _callAwaitingResponse = false;
-        return;
-      }
-      if (chatState.isStreaming) await chatState.stopGeneration();
-      await chatState.sendMessage(text);
-      if (!_callMode || generation != _callGeneration) return;
-      if (!chatState.isStreaming && chatState.errorMessage != null) {
-        _callAwaitingResponse = false;
-        await _resumeCallListening(generation);
-      }
-    } catch (error) {
-      _callAwaitingResponse = false;
-      if (!_callMode || generation != _callGeneration) return;
-      await _resumeCallListening(generation);
-    }
-  }
-
-  void _handleCallSpeechState() {
-    if (!_callMode || !_callWaitingForSpeech) return;
+  void _handleAvatarTap() {
     final speech = OfflineSpeechService.instance;
-    if (speech.speaking) _callSpeechStarted = true;
-    if (_callSpeechStarted && !speech.speaking && !speech.generating) {
-      _callWaitingForSpeech = false;
-      _callSpeechStarted = false;
-      unawaited(_resumeCallListening(_callGeneration));
+    if (speech.speaking ||
+        speech.generating ||
+        _chatState?.isStreaming == true) {
+      unawaited(_interruptAssistant());
       return;
     }
-    if (!_callAwaitingResponse &&
-        !_callWaitingForSpeech &&
-        !speech.listening &&
-        !_callRestartScheduled) {
-      _callRestartScheduled = true;
-      final generation = _callGeneration;
-      Future<void>.delayed(const Duration(milliseconds: 900), () async {
-        _callRestartScheduled = false;
-        await _resumeCallListening(generation);
-      });
-    }
-  }
-
-  void _handleCallSpeechInvocation(int generation) {
-    if (!_callMode || generation != _callGeneration || !_callWaitingForSpeech) {
-      return;
-    }
-    final speech = OfflineSpeechService.instance;
-    if (!speech.speaking && !speech.generating && !_callSpeechStarted) {
-      _callWaitingForSpeech = false;
-      unawaited(_resumeCallListening(generation));
-    }
-  }
-
-  Future<void> _resumeCallListening(int generation) async {
-    if (!_callMode ||
-        generation != _callGeneration ||
-        _callAwaitingResponse ||
-        _callWaitingForSpeech) {
-      return;
-    }
-    final speech = OfflineSpeechService.instance;
-    if (speech.listening) return;
-    final strings = AppLocalizations.of(context);
-    try {
-      await speech.startListening();
-    } catch (error) {
-      if (!_callMode || generation != _callGeneration || !mounted) return;
-      setState(() => _callMode = false);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(
-        SnackBar(content: Text(strings.continuousCallStopped('$error'))),
-      );
-    }
+    _avatarController.perform('listening');
+    Future<void>.delayed(const Duration(milliseconds: 1200), () {
+      if (!mounted || speech.speaking || speech.listening) return;
+      _avatarController.perform('calm');
+    });
   }
 
   Future<void> _speakLastReply(ChatState state) async {
@@ -362,9 +317,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       await speech.speak(reply);
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(
+      ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(strings.offlineTtsUnavailable('$error'))),
       );
     }
@@ -395,13 +348,13 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
         _modelOverrideCharacterId = characterId;
       });
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(strings.live2dModelsImported(modelPaths.length))),
+        SnackBar(
+          content: Text(strings.live2dModelsImported(modelPaths.length)),
+        ),
       );
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(
+      ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(strings.live2dModelImportFailed('$error'))),
       );
     } finally {
@@ -455,10 +408,12 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
         builder: (_) => CharacterListPage(
           onSelectAssistant: () {
             Navigator.pop(context);
+            unawaited(OfflineSpeechService.instance.stopSpeaking());
             context.read<ChatState>().createNewConversation();
           },
           onSelectCharacter: (character) {
             Navigator.pop(context);
+            unawaited(OfflineSpeechService.instance.stopSpeaking());
             context.read<ChatState>().startCharacterChat(character);
           },
         ),
@@ -811,9 +766,6 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     final strings = AppLocalizations.of(context);
 
     return Scaffold(
-      // The IME belongs to the Flutter control layer. Keeping the window and
-      // Scaffold body stable prevents the Live2D AHardwareBuffer/Vulkan
-      // swapchain underneath it from being resized and recreated.
       resizeToAvoidBottomInset: false,
       onDrawerChanged: (isOpened) {
         if (isOpened) FocusManager.instance.primaryFocus?.unfocus();
@@ -934,10 +886,12 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                       currentConversationId: chatState.currentConversationId,
                       onNewConversation: () {
                         Navigator.pop(context);
+                        unawaited(OfflineSpeechService.instance.stopSpeaking());
                         chatState.createNewConversation();
                       },
                       onSelectConversation: (id) {
                         Navigator.pop(context);
+                        unawaited(OfflineSpeechService.instance.stopSpeaking());
                         chatState.clearError();
                         chatState.loadConversation(id);
                       },
@@ -959,9 +913,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                       FocusManager.instance.primaryFocus?.unfocus();
                       await Navigator.push(
                         context,
-                        MaterialPageRoute(
-                          builder: (_) => const SettingsPage(),
-                        ),
+                        MaterialPageRoute(builder: (_) => const SettingsPage()),
                       );
                       if (mounted) await chatState.reloadProviderSettings();
                     },
@@ -974,10 +926,8 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       ),
       body: Consumer<ChatState>(
         builder: (context, chatState, _) {
-          if (chatState.isStreaming && _isUserNearBottom()) {
-            _scrollToBottom();
-          }
-
+          final session = _callSession;
+          final callActive = session?.active ?? false;
           final characterId = chatState.currentCharacter?.id;
           final overridePath = _modelOverrideCharacterId == characterId
               ? _modelOverridePath
@@ -997,6 +947,8 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
               Live2dAvatar(
                 key: ValueKey(modelPath),
                 modelPath: modelPath,
+                controller: _avatarController,
+                onTap: _handleAvatarTap,
               ),
               AnimatedPadding(
                 duration: const Duration(milliseconds: 160),
@@ -1006,99 +958,102 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                   children: [
                     Expanded(
                       child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    Positioned(
-                      left: 12,
-                      top: 12,
-                      child: SafeArea(
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            IconButton.filledTonal(
-                              tooltip: _showTranscript
-                                  ? strings.hideConversation
-                                  : strings.showConversation,
-                              onPressed: () => setState(
-                                () => _showTranscript = !_showTranscript,
-                              ),
-                              icon: Icon(
-                                _showTranscript
-                                    ? Icons.visibility_off_outlined
-                                    : Icons.forum_outlined,
+                        fit: StackFit.expand,
+                        children: [
+                          Positioned(
+                            left: 12,
+                            top: 12,
+                            child: SafeArea(
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton.filledTonal(
+                                    tooltip: _showTranscript
+                                        ? strings.hideConversation
+                                        : strings.showConversation,
+                                    onPressed: () => setState(
+                                      () => _showTranscript = !_showTranscript,
+                                    ),
+                                    icon: Icon(
+                                      _showTranscript
+                                          ? Icons.visibility_off_outlined
+                                          : Icons.forum_outlined,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  IconButton.filledTonal(
+                                    tooltip: strings.importLive2dModel,
+                                    onPressed: _isImportingLive2d
+                                        ? null
+                                        : _importLive2dModel,
+                                    icon: _isImportingLive2d
+                                        ? const SizedBox.square(
+                                            dimension: 18,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                            ),
+                                          )
+                                        : const Icon(
+                                            Icons.folder_open_outlined,
+                                          ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  IconButton.filled(
+                                    tooltip: callActive
+                                        ? strings.endContinuousCall
+                                        : strings.startContinuousCall,
+                                    onPressed: _toggleCall,
+                                    icon: Icon(
+                                      callActive
+                                          ? Icons.call_end_outlined
+                                          : Icons.call_outlined,
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
-                            const SizedBox(width: 8),
-                            IconButton.filledTonal(
-                              tooltip: strings.importLive2dModel,
-                              onPressed: _isImportingLive2d
-                                  ? null
-                                  : _importLive2dModel,
-                              icon: _isImportingLive2d
-                                  ? const SizedBox.square(
-                                      dimension: 18,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                      ),
-                                    )
-                                  : const Icon(Icons.folder_open_outlined),
-                            ),
-                            const SizedBox(width: 8),
-                            IconButton.filled(
-                              tooltip: _callMode
-                                  ? strings.endContinuousCall
-                                  : strings.startContinuousCall,
-                              onPressed: _callTransitioning
-                                  ? null
-                                  : _toggleCallMode,
-                              icon: Icon(
-                                _callMode
-                                    ? Icons.call_end_outlined
-                                    : Icons.call_outlined,
+                          ),
+                          if (_showTranscript)
+                            Align(
+                              alignment: Alignment.bottomCenter,
+                              child: LayoutBuilder(
+                                builder: (context, constraints) {
+                                  final factor = keyboardVisible ? 0.46 : 0.58;
+                                  final minimum = keyboardVisible
+                                      ? 104.0
+                                      : 180.0;
+                                  final scaledHeight =
+                                      constraints.maxHeight * factor;
+                                  final targetHeight = scaledHeight < minimum
+                                      ? minimum
+                                      : scaledHeight;
+                                  final panelHeight = targetHeight
+                                      .clamp(0.0, constraints.maxHeight)
+                                      .toDouble();
+                                  return SizedBox(
+                                    width: double.infinity,
+                                    height: panelHeight,
+                                    child: _buildTranscriptPanel(chatState),
+                                  );
+                                },
                               ),
                             ),
-                          ],
-                        ),
+                          if (_showScrollToBottom && _showTranscript)
+                            Positioned(
+                              right: 16,
+                              bottom: 12,
+                              child: ScaleTransition(
+                                scale: _fabController,
+                                child: FloatingActionButton.small(
+                                  onPressed: () => _scrollToBottom(),
+                                  elevation: 2,
+                                  child: const Icon(Icons.keyboard_arrow_down),
+                                ),
+                              ),
+                            ),
+                        ],
                       ),
                     ),
-                    if (_showTranscript)
-                      Align(
-                        alignment: Alignment.bottomCenter,
-                        child: LayoutBuilder(
-                          builder: (context, constraints) {
-                            final factor = keyboardVisible ? 0.46 : 0.58;
-                            final minimum = keyboardVisible ? 104.0 : 180.0;
-                            final scaledHeight = constraints.maxHeight * factor;
-                            final targetHeight = scaledHeight < minimum
-                                ? minimum
-                                : scaledHeight;
-                            final panelHeight = targetHeight
-                                .clamp(0.0, constraints.maxHeight)
-                                .toDouble();
-                            return SizedBox(
-                              width: double.infinity,
-                              height: panelHeight,
-                              child: _buildTranscriptPanel(chatState),
-                            );
-                          },
-                        ),
-                      ),
-                    if (_showScrollToBottom && _showTranscript)
-                      Positioned(
-                        right: 16,
-                        bottom: 12,
-                        child: ScaleTransition(
-                          scale: _fabController,
-                          child: FloatingActionButton.small(
-                            onPressed: () => _scrollToBottom(),
-                            elevation: 2,
-                            child: const Icon(Icons.keyboard_arrow_down),
-                          ),
-                        ),
-                      ),
-                          ],
-                        ),
-                      ),
                     _buildExecutionStatus(chatState),
                     if (chatState.errorMessage != null)
                       keyboardVisible
@@ -1125,8 +1080,8 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                           onVoiceInput: _toggleListening,
                           isListening: speech.listening,
                           voiceEnabled: speech.capabilities.offlineStt,
-                          allowVoiceDuringStreaming: _callMode,
-                          dictatedText: speech.recognizedText,
+                          allowVoiceDuringStreaming: callActive,
+                          dictatedText: callActive ? '' : speech.recognizedText,
                           maxLines: keyboardVisible ? 3 : 5,
                         );
                       },
@@ -1174,6 +1129,15 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
             color: moss.hardwareAccelerationVerified
                 ? colors.primary
                 : colors.onSurfaceVariant,
+          ));
+        }
+        final session = _callSession;
+        if (session != null && session.active) {
+          final fullDuplex = session.acousticBargeIn;
+          items.add((
+            icon: fullDuplex ? Icons.record_voice_over : Icons.hearing,
+            label: fullDuplex ? strings.callFullDuplex : strings.callHalfDuplex,
+            color: fullDuplex ? colors.primary : colors.onSurfaceVariant,
           ));
         }
         if (items.isEmpty) return const SizedBox.shrink();
@@ -1414,6 +1378,9 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
         if (hasContent)
           MessageBubble(
             content: chatState.currentStreamingContent,
+            thinkingContent: chatState.currentThinkingContent.isEmpty
+                ? null
+                : chatState.currentThinkingContent,
             isUser: false,
             model: chatState.selectedModel,
             timestamp: DateTime.now().millisecondsSinceEpoch,

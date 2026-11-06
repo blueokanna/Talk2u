@@ -1,8 +1,5 @@
 use flutter_rust_bridge::frb;
 use std::fmt;
-use std::future::Future;
-use std::time::Duration;
-use tokio::time::sleep;
 
 #[frb(opaque)]
 #[derive(Debug, Clone)]
@@ -64,36 +61,41 @@ impl ChatError {
         }
     }
 
-    pub fn from_glm_response(status_code: u16, body_text: &str) -> Self {
-        let parsed = serde_json::from_str::<serde_json::Value>(body_text);
-        if let Ok(json) = parsed {
-            let error_obj = json.get("error");
-            let code = error_obj
-                .and_then(|e| e.get("code"))
-                .and_then(|c| {
-                    c.as_str()
-                        .map(|s| s.to_string())
-                        .or_else(|| c.as_u64().map(|n| n.to_string()))
-                })
-                .unwrap_or_default();
-            let message = error_obj
-                .and_then(|e| e.get("message"))
-                .and_then(|m| m.as_str())
-                .unwrap_or("未知错误")
-                .to_string();
-
-            Self::classify_glm_error(status_code, &code, &message)
-        } else {
-            ChatError::ApiError {
+    /// Classifies a failed HTTP response from its status and body.
+    ///
+    /// GLM puts a business code in `error.code` where OpenAI-compatible
+    /// providers only carry a status, so the body is the only place that
+    /// distinction exists. Reading it here — instead of special-casing the
+    /// provider at the transport boundary — is what keeps 1302/1303/1305
+    /// retryable while everything else stays on the status mapping.
+    pub fn from_http_error(status_code: u16, body_text: &str) -> Self {
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(body_text) else {
+            return ChatError::ApiError {
                 status: status_code,
-                message: body_text.to_string(),
-            }
-        }
+                message: body_text.chars().take(1000).collect(),
+            };
+        };
+        let error_obj = json.get("error");
+        let code = error_obj
+            .and_then(|error| error.get("code"))
+            .and_then(|code| {
+                code.as_str()
+                    .map(str::to_string)
+                    .or_else(|| code.as_u64().map(|value| value.to_string()))
+            })
+            .unwrap_or_default();
+        let message = error_obj
+            .and_then(|error| error.get("message"))
+            .or_else(|| json.get("message"))
+            .and_then(|message| message.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| body_text.chars().take(1000).collect());
+
+        Self::classify_glm_error(status_code, &code, &message)
     }
 
     fn classify_glm_error(status_code: u16, code: &str, message: &str) -> Self {
-        match code {
-            "1001" => ChatError::AuthError {
+        match code {            "1001" => ChatError::AuthError {
                 message: "请求头中未包含 Authorization 参数，请检查 API Key 配置".to_string(),
             },
             "1002" => ChatError::AuthError {
@@ -190,61 +192,9 @@ impl ChatError {
     }
 }
 
-#[frb(opaque)]
-pub struct RetryHandler {
-    max_retries: u32,
-    initial_delay_ms: u64,
-}
-
-impl RetryHandler {
-    pub fn new(max_retries: u32, initial_delay_ms: u64) -> Self {
-        Self {
-            max_retries,
-            initial_delay_ms,
-        }
-    }
-
-    pub async fn execute_with_retry<F, Fut, T>(&self, operation: F) -> Result<T, ChatError>
-    where
-        F: Fn() -> Fut,
-        Fut: Future<Output = Result<T, ChatError>>,
-    {
-        let mut last_error: Option<ChatError> = None;
-        let mut delay_ms = self.initial_delay_ms;
-
-        for attempt in 0..=self.max_retries {
-            match operation().await {
-                Ok(value) => return Ok(value),
-                Err(err) => {
-                    if !err.is_retryable() {
-                        return Err(err);
-                    }
-
-                    last_error = Some(err.clone());
-                    if attempt < self.max_retries {
-                        let wait_ms = if let ChatError::RateLimitError { retry_after_secs } = &err {
-                            retry_after_secs * 1000
-                        } else {
-                            let current = delay_ms;
-                            delay_ms *= 2;
-                            current
-                        };
-
-                        sleep(Duration::from_millis(wait_ms)).await;
-                    }
-                }
-            }
-        }
-
-        Err(last_error.unwrap())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::Arc;
 
     #[test]
     fn test_chat_error_display() {
@@ -333,151 +283,98 @@ mod tests {
         .is_retryable());
     }
 
-    #[tokio::test]
-    async fn test_retry_immediate_success() {
-        let handler = RetryHandler::new(3, 100);
-        let result = handler
-            .execute_with_retry(|| async { Ok::<i32, ChatError>(42) })
-            .await;
-        assert_eq!(result.unwrap(), 42);
+    #[test]
+    fn glm_business_codes_survive_without_the_sdk() {
+        // 1302/1303/1305 arrive as an `error.code` in the body, not in the
+        // status line. This is the classification the transport has to
+        // reproduce itself now that the Zhipu request goes through courierust.
+        for code in ["1302", "1303", "1305"] {
+            let body = format!(
+                r#"{{"error":{{"code":"{code}","message":"并发或频率限制"}}}}"#
+            );
+            let error = ChatError::from_http_error(200, &body);
+            assert!(
+                matches!(error, ChatError::RateLimitError { .. }),
+                "{code} mapped to {error:?}"
+            );
+            assert!(error.is_retryable(), "{code} should be retryable");
+        }
     }
 
-    #[tokio::test]
-    async fn test_retry_success_after_failures() {
-        let handler = RetryHandler::new(3, 10);
-        let call_count = Arc::new(AtomicU32::new(0));
-        let cc = call_count.clone();
+    #[test]
+    fn glm_auth_and_quota_codes_are_not_retryable() {
+        let auth = ChatError::from_http_error(
+            400,
+            r#"{"error":{"code":"1002","message":"Authorization Token 非法"}}"#,
+        );
+        assert!(matches!(auth, ChatError::AuthError { .. }));
+        assert!(!auth.is_retryable());
 
-        let result = handler
-            .execute_with_retry(move || {
-                let count = cc.fetch_add(1, Ordering::SeqCst) + 1;
-                async move {
-                    if count < 3 {
-                        Err(ChatError::NetworkError {
-                            message: "timeout".into(),
-                        })
-                    } else {
-                        Ok(42)
-                    }
-                }
-            })
-            .await;
-
-        assert_eq!(result.unwrap(), 42);
-        assert_eq!(call_count.load(Ordering::SeqCst), 3);
+        let quota = ChatError::from_http_error(
+            400,
+            r#"{"error":{"code":"1304","message":"今日调用次数已达上限"}}"#,
+        );
+        assert!(matches!(quota, ChatError::GlmBusinessError { .. }));
+        assert!(!quota.is_retryable());
     }
 
-    #[tokio::test]
-    async fn test_retry_all_fail_returns_last_error() {
-        let handler = RetryHandler::new(2, 10);
-        let call_count = Arc::new(AtomicU32::new(0));
-        let cc = call_count.clone();
-
-        let result = handler
-            .execute_with_retry(move || {
-                cc.fetch_add(1, Ordering::SeqCst);
-                async {
-                    Err::<i32, ChatError>(ChatError::NetworkError {
-                        message: "fail".into(),
-                    })
-                }
-            })
-            .await;
-
-        assert!(result.is_err());
-        assert_eq!(call_count.load(Ordering::SeqCst), 3);
+    #[test]
+    fn numeric_json_codes_are_read_as_well() {
+        let error = ChatError::from_http_error(
+            429,
+            r#"{"error":{"code":1302,"message":"系统并发数过高"}}"#,
+        );
+        assert!(matches!(error, ChatError::RateLimitError { .. }));
     }
 
-    #[tokio::test]
-    async fn test_retry_non_retryable_returns_immediately() {
-        let handler = RetryHandler::new(3, 10);
-        let call_count = Arc::new(AtomicU32::new(0));
-        let cc = call_count.clone();
+    #[test]
+    fn non_glm_bodies_fall_back_to_the_status_mapping() {
+        let openai = ChatError::from_http_error(
+            401,
+            r#"{"error":{"message":"Incorrect API key provided"}}"#,
+        );
+        match openai.clone() {
+            ChatError::AuthError { message } => {
+                assert_eq!(message, "Incorrect API key provided")
+            }
+            other => panic!("expected AuthError, got {other:?}"),
+        }
+        assert!(!openai.is_retryable());
 
-        let result = handler
-            .execute_with_retry(move || {
-                cc.fetch_add(1, Ordering::SeqCst);
-                async {
-                    Err::<i32, ChatError>(ChatError::ValidationError {
-                        message: "bad input".into(),
-                    })
-                }
-            })
-            .await;
-
-        assert!(result.is_err());
-        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+        let anthropic = ChatError::from_http_error(
+            529,
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+        );
+        assert!(matches!(anthropic, ChatError::ApiError { status: 529, .. }));
+        assert!(anthropic.is_retryable());
     }
 
-    #[tokio::test]
-    async fn test_retry_storage_error_not_retried() {
-        let handler = RetryHandler::new(3, 10);
-        let call_count = Arc::new(AtomicU32::new(0));
-        let cc = call_count.clone();
+    #[test]
+    fn plain_text_bodies_stay_readable_and_bounded() {
+        let error = ChatError::from_http_error(502, "upstream connect error");
+        match error {
+            ChatError::ApiError { status, message } => {
+                assert_eq!(status, 502);
+                assert_eq!(message, "upstream connect error");
+            }
+            other => panic!("expected ApiError, got {other:?}"),
+        }
 
-        let result = handler
-            .execute_with_retry(move || {
-                cc.fetch_add(1, Ordering::SeqCst);
-                async {
-                    Err::<i32, ChatError>(ChatError::StorageError {
-                        message: "disk full".into(),
-                    })
-                }
-            })
-            .await;
-
-        assert!(result.is_err());
-        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+        let huge = "x".repeat(5_000);
+        match ChatError::from_http_error(500, &huge) {
+            ChatError::ApiError { message, .. } => assert_eq!(message.chars().count(), 1_000),
+            other => panic!("expected ApiError, got {other:?}"),
+        }
     }
 
-    #[tokio::test]
-    async fn test_retry_rate_limit_waits_retry_after() {
-        let handler = RetryHandler::new(1, 10);
-        let call_count = Arc::new(AtomicU32::new(0));
-        let cc = call_count.clone();
-
-        let start = tokio::time::Instant::now();
-        let result = handler
-            .execute_with_retry(move || {
-                let count = cc.fetch_add(1, Ordering::SeqCst) + 1;
-                async move {
-                    if count == 1 {
-                        Err(ChatError::RateLimitError {
-                            retry_after_secs: 1,
-                        })
-                    } else {
-                        Ok(99)
-                    }
-                }
-            })
-            .await;
-
-        let elapsed = start.elapsed();
-        assert_eq!(result.unwrap(), 99);
-        assert!(elapsed >= Duration::from_millis(900));
-    }
-
-    #[tokio::test]
-    async fn test_retry_success_transparent() {
-        let handler = RetryHandler::new(3, 10);
-        let cc = Arc::new(AtomicU32::new(0));
-        let cc2 = cc.clone();
-
-        let retried_result = handler
-            .execute_with_retry(move || {
-                let count = cc2.fetch_add(1, Ordering::SeqCst) + 1;
-                async move {
-                    if count < 2 {
-                        Err(ChatError::NetworkError {
-                            message: "err".into(),
-                        })
-                    } else {
-                        Ok("hello".to_string())
-                    }
-                }
-            })
-            .await;
-
-        assert_eq!(retried_result.unwrap(), "hello".to_string());
+    #[test]
+    fn top_level_message_is_used_when_there_is_no_error_object() {
+        match ChatError::from_http_error(404, r#"{"message":"model not found"}"#) {
+            ChatError::ApiError { status, message } => {
+                assert_eq!(status, 404);
+                assert_eq!(message, "model not found");
+            }
+            other => panic!("expected ApiError, got {other:?}"),
+        }
     }
 }

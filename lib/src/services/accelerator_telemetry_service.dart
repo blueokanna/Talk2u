@@ -42,25 +42,19 @@ class AcceleratorTelemetryService {
   static final instance = AcceleratorTelemetryService._();
   static const _channel = MethodChannel('talk2u/accelerator_telemetry');
 
-  Timer? _timer;
   bool _sampling = false;
   AcceleratorTelemetrySample? latest;
-
-  void start() {
-    if (_timer != null || kIsWeb) return;
-    unawaited(sample());
-    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
-      unawaited(sample());
-    });
-  }
-
   Future<AcceleratorTelemetrySample?> sample() async {
     if (_sampling || kIsWeb) return latest;
     _sampling = true;
     try {
-      final value = await _channel.invokeMapMethod<dynamic, dynamic>('sample');
+      final value = await _channel
+          .invokeMapMethod<dynamic, dynamic>('sample')
+          .timeout(const Duration(seconds: 3));
       if (value != null) latest = AcceleratorTelemetrySample.fromMap(value);
     } on PlatformException {
+      latest = null;
+    } on TimeoutException {
       latest = null;
     } finally {
       _sampling = false;

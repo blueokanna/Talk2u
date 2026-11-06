@@ -236,5 +236,7 @@
   "live2dRuntimeFailed": "Live2D 运行时启动失败：{error}",
   "live2dLoadFailed": "Live2D 加载失败",
   "live2dInvalidStatus": "Live2D 返回了无效状态",
+  "callFullDuplex": "免提 · 硬件回声消除（可直接打断）",
+  "callHalfDuplex": "免提 · 半双工（播放时暂停收音）",
   "diagnosticsInvalidJson": "诊断结果不是 JSON 对象"
 }

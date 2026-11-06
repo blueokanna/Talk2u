@@ -1,7 +1,13 @@
 import 'dart:async';
 import 'package:flutter/widgets.dart';
+import 'package:talk2u/src/services/call_session.dart';
 import 'package:talk2u/src/services/moss_tts_service.dart';
 import 'package:talk2u/src/services/sherpa_speech_service.dart';
+import 'package:talk2u/src/services/speech_text_normalizer.dart';
+import 'package:talk2u/src/services/turn_taking.dart';
+
+export 'package:talk2u/src/services/speech_text_normalizer.dart'
+    show SpeechPlan, SpeechStageDirection;
 
 @immutable
 class SpeechAnimationCue {
@@ -16,22 +22,14 @@ class SpeechAnimationCue {
     required this.end,
     required this.priority,
   });
-}
 
-@immutable
-class SpeechStageDirection {
-  final String text;
-  final int spokenOffset;
-
-  const SpeechStageDirection({required this.text, required this.spokenOffset});
-}
-
-@immutable
-class SpeechPlan {
-  final String spokenText;
-  final List<SpeechStageDirection> stageDirections;
-
-  const SpeechPlan({required this.spokenText, required this.stageDirections});
+  SpeechAnimationCue copyWith({String? cue, int? start, int? end}) =>
+      SpeechAnimationCue(
+        cue: cue ?? this.cue,
+        start: start ?? this.start,
+        end: end ?? this.end,
+        priority: priority,
+      );
 }
 
 class _CuePattern {
@@ -128,7 +126,9 @@ class SpeechCapabilities {
       );
 }
 
-class OfflineSpeechService extends ChangeNotifier with WidgetsBindingObserver {
+class OfflineSpeechService extends ChangeNotifier
+    with WidgetsBindingObserver
+    implements CallSpeechPort {
   OfflineSpeechService._() {
     WidgetsBinding.instance.addObserver(this);
     MossTtsService.instance.addListener(_handleMossState);
@@ -145,24 +145,43 @@ class OfflineSpeechService extends ChangeNotifier with WidgetsBindingObserver {
   Future<void>? _startListeningOperation;
   Future<void>? _stopListeningOperation;
   final _recognitionController = StreamController<String>.broadcast();
+  @override
   double amplitude = 0;
+  @override
   bool generating = false;
+  @override
   bool speaking = false;
+  @override
   bool listening = false;
   String recognizedText = '';
   String animationCue = 'neutral';
   List<SpeechAnimationCue> animationCues = const [];
   int animationCueRevision = 0;
+  String speechEmotion = SpeechTextNormalizer.neutralEmotion;
   int? sttModelDownloadProgress;
   bool sttModelDownloadScheduled = false;
   String? lastError;
   int _activeAnimationCueIndex = -1;
   int _spokenTextLength = 0;
-  Timer? _animationTimelineTimer;
   DateTime? _lastAnimationCueChangedAt;
   int _latestSpeechPosition = 0;
+  final _selfEcho = SelfEchoTranscriptFilter();
 
   Stream<String> get recognitionResults => _recognitionController.stream;
+
+  @override
+  Stream<String> get transcripts => _recognitionController.stream;
+
+  @override
+  Stream<double> get frameEnergies =>
+      SherpaSpeechService.instance.frameEnergies;
+
+  @override
+  bool get echoCancellationVerified =>
+      SherpaSpeechService.instance.echoCancellationVerified;
+
+  @override
+  String get captureSource => SherpaSpeechService.instance.captureSource;
   SpeechCapabilities get capabilities {
     final moss = MossTtsService.instance;
     final sherpa = SherpaSpeechService.instance;
@@ -181,17 +200,28 @@ class OfflineSpeechService extends ChangeNotifier with WidgetsBindingObserver {
     );
   }
 
+  @override
   Future<void> initialize() async {
     await MossTtsService.instance.initialize();
     await SherpaSpeechService.instance.initialize();
     notifyListeners();
   }
 
+  @override
   Future<void> speak(String text) async {
     _stopAnimationTimeline();
     final plan = prepareSpeech(text);
-    if (plan.spokenText.isEmpty) throw StateError('回复中没有可朗读文本');
+    if (plan.spokenText.isEmpty) {
+      speechEmotion = SpeechTextNormalizer.neutralEmotion;
+      animationCues = const [];
+      animationCue = 'neutral';
+      animationCueRevision++;
+      notifyListeners();
+      return;
+    }
     _spokenTextLength = plan.spokenText.length;
+    speechEmotion = plan.emotion;
+    _selfEcho.rememberSpoken(plan.spokenText);
     animationCues = inferAnimationCues(text);
     animationCue = 'neutral';
     _activeAnimationCueIndex = -1;
@@ -211,13 +241,26 @@ class OfflineSpeechService extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
+  @override
+  Future<void> speakToCompletion(String text) async {
+    final moss = MossTtsService.instance;
+    await speak(text);
+    await moss.speechCompletion;
+  }
+
+  @override
   Future<void> stopSpeaking() async {
     _stopAnimationTimeline();
     await MossTtsService.instance.stopSpeaking();
     generating = false;
+    speaking = false;
+    speechEmotion = SpeechTextNormalizer.neutralEmotion;
+    animationCue = 'neutral';
+    animationCueRevision++;
     notifyListeners();
   }
 
+  @override
   Future<void> startListening() {
     final activeStart = _startListeningOperation;
     if (activeStart != null) return activeStart;
@@ -249,6 +292,7 @@ class OfflineSpeechService extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
+  @override
   Future<void> stopListening() {
     final activeStop = _stopListeningOperation;
     if (activeStop != null) return activeStop;
@@ -297,70 +341,34 @@ class OfflineSpeechService extends ChangeNotifier with WidgetsBindingObserver {
     }).cue;
   }
 
+  /// Removes emoji and control characters from a recognition transcript, which
+  /// some SenseVoice decoders emit as stray symbols on silence or noise.
+  static String sanitizeTranscript(String text) =>
+      SpeechTextNormalizer.cleanTranscript(text);
+
+  void clearRecognizedText() {
+    if (recognizedText.isEmpty) return;
+    recognizedText = '';
+    notifyListeners();
+  }
+
+  /// True when the recognizer most likely transcribed the agent's own playback
+  /// rather than the user.
+  @override
+  bool isSelfEcho(String transcript) => _selfEcho.isSelfEcho(transcript);
+
   @visibleForTesting
   static SpeechPlan prepareSpeech(String text) {
-    var source = text.trim();
-    source = source.replaceFirst(
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) {
+      return const SpeechPlan(spokenText: '', stageDirections: []);
+    }
+    final withoutSpeaker = trimmed.replaceFirst(
       RegExp(r'^[^\n：:]{1,16}[：:]\s*(?=[（(【\[*])'),
       '',
     );
-    final spoken = StringBuffer();
-    final directions = <SpeechStageDirection>[];
-    const pairs = <String, String>{'（': '）', '(': ')', '【': '】', '[': ']'};
-    var index = 0;
-    while (index < source.length) {
-      final opening = source[index];
-      final closing = pairs[opening];
-      if (closing != null) {
-        final end = source.indexOf(closing, index + 1);
-        if (end > index + 1) {
-          final content = source.substring(index + 1, end).trim();
-          if (_isStageDirection(content)) {
-            directions.add(
-              SpeechStageDirection(text: content, spokenOffset: spoken.length),
-            );
-            index = end + 1;
-            while (index < source.length && source[index].trim().isEmpty) {
-              index++;
-            }
-            continue;
-          }
-        }
-      }
-      if (opening == '*') {
-        final end = source.indexOf('*', index + 1);
-        if (end > index + 1) {
-          final content = source.substring(index + 1, end).trim();
-          if (content.isNotEmpty) {
-            directions.add(
-              SpeechStageDirection(text: content, spokenOffset: spoken.length),
-            );
-            index = end + 1;
-            while (index < source.length && source[index].trim().isEmpty) {
-              index++;
-            }
-            continue;
-          }
-        }
-      }
-      spoken.write(opening);
-      index++;
-    }
-    final raw = spoken.toString();
-    final leading = raw.length - raw.trimLeft().length;
-    final value = raw.trim();
-    return SpeechPlan(
-      spokenText: value,
-      stageDirections: directions
-          .map(
-            (direction) => SpeechStageDirection(
-              text: direction.text,
-              spokenOffset: (direction.spokenOffset - leading)
-                  .clamp(0, value.length)
-                  .toInt(),
-            ),
-          )
-          .toList(growable: false),
+    return SpeechTextNormalizer.prepare(
+      withoutSpeaker.trim().isEmpty ? trimmed : withoutSpeaker,
     );
   }
 
@@ -516,12 +524,16 @@ class OfflineSpeechService extends ChangeNotifier with WidgetsBindingObserver {
     selected.sort((left, right) => left.start.compareTo(right.start));
 
     final result = <SpeechAnimationCue>[];
+    final cueOccurrences = <String, int>{};
     for (final match in selected) {
+      final occurrence = cueOccurrences[match.cue] ?? 0;
+      cueOccurrences[match.cue] = occurrence + 1;
+      final varied = match.copyWith(cue: _variantCue(match.cue, occurrence));
       final recentlyRepeated =
           result.isNotEmpty &&
-          result.last.cue == match.cue &&
+          _cueFamily(result.last.cue) == _cueFamily(varied.cue) &&
           match.start - result.last.start < 6;
-      if (!recentlyRepeated) result.add(match);
+      if (!recentlyRepeated) result.add(varied);
     }
     final segments = _speechTextSegments(text);
     for (var index = 0; index < segments.length; index++) {
@@ -572,62 +584,37 @@ class OfflineSpeechService extends ChangeNotifier with WidgetsBindingObserver {
     }).cue;
   }
 
-  static bool _isStageDirection(String text) {
-    final value = text.toLowerCase();
-    if (value.isEmpty || value.length > 80) return false;
-    return const [
-      '笑',
-      '哭',
-      '叹气',
-      '叹息',
-      '点头',
-      '摇头',
-      '挥手',
-      '招手',
-      '抱',
-      '转身',
-      '低头',
-      '抬头',
-      '脸红',
-      '害羞',
-      '开心',
-      '高兴',
-      '兴奋',
-      '生气',
-      '愤怒',
-      '难过',
-      '悲伤',
-      '惊讶',
-      '震惊',
-      '小声',
-      '轻声',
-      '低语',
-      '耳语',
-      '大声',
-      '喊',
-      '欢呼',
-      '沉默',
-      '停顿',
-      '微笑',
-      'laugh',
-      'smile',
-      'cry',
-      'sigh',
-      'nod',
-      'wave',
-      'hug',
-      'whisper',
-      'shout',
-      'angry',
-      'happy',
-      'sad',
-      'excited',
-      'surprised',
-    ].any(value.contains);
+  /// Emotion cues rotate through a small family of equivalent performances so
+  /// a long reply does not replay the same motion on every sentence. The first
+  /// occurrence always uses the canonical name, which keeps the mapping
+  /// predictable for models that only define the base cue.
+  static const _cueVariants = <String, List<String>>{
+    'happy': ['happy', 'happySoft', 'excited'],
+    'sad': ['sad', 'sadSoft', 'sigh'],
+    'angry': ['angry', 'angrySoft'],
+    'surprise': ['surprise', 'surpriseSoft'],
+    'shy': ['shy', 'shySoft'],
+    'thinking': ['thinking', 'thinkingSoft'],
+  };
+
+  static String _variantCue(String cue, int occurrence) {
+    final variants = _cueVariants[cue];
+    if (variants == null || variants.isEmpty) return cue;
+    return variants[occurrence % variants.length];
   }
 
+  static String _cueFamily(String cue) => switch (cue) {
+    'happySoft' || 'excited' => 'happy',
+    'sadSoft' || 'sigh' => 'sad',
+    'angrySoft' => 'angry',
+    'surpriseSoft' => 'surprise',
+    'shySoft' => 'shy',
+    'thinkingSoft' => 'thinking',
+    _ => cue,
+  };
+
   static List<_SpeechTextSegment> _speechTextSegments(String text) {
-    const strong = '。！？；\n!?;.';
+    const strong = '。！？；…\n!?;.';
     const soft = '，、,：:';
     final result = <_SpeechTextSegment>[];
     var start = 0;
@@ -724,8 +711,6 @@ class OfflineSpeechService extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void _stopAnimationTimeline() {
-    _animationTimelineTimer?.cancel();
-    _animationTimelineTimer = null;
     _latestSpeechPosition = 0;
     _lastAnimationCueChangedAt = null;
   }
@@ -749,8 +734,6 @@ class OfflineSpeechService extends ChangeNotifier with WidgetsBindingObserver {
     speaking = moss.speaking;
     amplitude = speaking ? moss.playbackAmplitude : 0;
     if (speaking) {
-      _animationTimelineTimer?.cancel();
-      _animationTimelineTimer = null;
       _activateAnimationCue(
         (moss.playbackProgress * _spokenTextLength).floor(),
         force: !wasSpeaking && _activeAnimationCueIndex < 0,
@@ -760,6 +743,9 @@ class OfflineSpeechService extends ChangeNotifier with WidgetsBindingObserver {
       if (!generating) {
         _stopAnimationTimeline();
         _activeAnimationCueIndex = -1;
+        speechEmotion = SpeechTextNormalizer.neutralEmotion;
+        animationCue = 'neutral';
+        animationCueRevision++;
       }
     }
     if (moss.lastError != null) lastError = moss.lastError;

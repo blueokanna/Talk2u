@@ -1,4 +1,5 @@
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use courierust::courierust_http::header::{HeaderMap, HeaderName, HeaderValue};
+use crate::api::transport::validate_http_url;
 
 use super::data_models::{AppSettings, ProviderConfig};
 
@@ -15,6 +16,14 @@ pub struct ProviderRuntime {
     pub api_key: String,
     pub protocol: WireProtocol,
     pub max_output_tokens: u32,
+}
+
+/// Credentials reach the wire only through this path, so a key containing CR/LF
+/// (or any other byte outside the field-value set) fails loudly instead of
+/// splitting the request.
+fn secret_header_value(raw: &str, label: &str) -> Result<HeaderValue, String> {
+    HeaderValue::from_bytes(raw.as_bytes())
+        .map_err(|_| format!("{label} 含有非法的请求头字符，请重新填写"))
 }
 
 impl ProviderRuntime {
@@ -53,14 +62,8 @@ impl ProviderRuntime {
             other => return Err(format!("不支持的接口协议: {other}")),
         };
 
-        let parsed_url = reqwest::Url::parse(config.api_url.trim())
-            .map_err(|error| format!("{} 的调用 URL 无效: {error}", config.name))?;
-        if !matches!(parsed_url.scheme(), "http" | "https") || parsed_url.host().is_none() {
-            return Err(format!(
-                "{} 的调用 URL 必须是完整的 HTTP(S) 地址",
-                config.name
-            ));
-        }
+        validate_http_url(&config.api_url)
+            .map_err(|message| format!("{} 的调用 URL 无效: {message}", config.name))?;
 
         let runtime = Self {
             id: config.id.clone(),
@@ -79,26 +82,33 @@ impl ProviderRuntime {
 
     pub fn request_headers(&self) -> Result<HeaderMap, String> {
         let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
+        headers.insert(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        );
+        headers.insert(
+            HeaderName::from_static("accept"),
+            HeaderValue::from_static("text/event-stream"),
+        );
 
         match self.protocol {
             WireProtocol::Anthropic => {
                 headers.insert(
-                    "x-api-key",
-                    HeaderValue::from_str(&self.api_key)
-                        .map_err(|_| "Anthropic API Key 包含无效字符".to_string())?,
+                    HeaderName::from_static("anthropic-version"),
+                    HeaderValue::from_static("2023-06-01"),
                 );
-                headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+                headers.insert(
+                    HeaderName::from_static("x-api-key"),
+                    secret_header_value(&self.api_key, "Anthropic API Key")?,
+                );
             }
             WireProtocol::OpenAi => {
                 if self.api_key.is_empty() {
                     return Ok(headers);
                 }
                 headers.insert(
-                    AUTHORIZATION,
-                    HeaderValue::from_str(&format!("Bearer {}", self.api_key))
-                        .map_err(|_| "API Key 包含无效字符".to_string())?,
+                    HeaderName::from_static("authorization"),
+                    secret_header_value(&format!("Bearer {}", self.api_key), "API Key")?,
                 );
             }
         }
@@ -182,15 +192,24 @@ mod tests {
     #[test]
     fn anthropic_headers_use_x_api_key_without_bearer_token() {
         let headers = runtime(WireProtocol::Anthropic).request_headers().unwrap();
-        assert_eq!(headers.get("x-api-key").unwrap(), "secret-key");
-        assert_eq!(headers.get("anthropic-version").unwrap(), "2023-06-01");
-        assert!(headers.get(AUTHORIZATION).is_none());
+        assert_eq!(
+            headers.get("x-api-key").unwrap().to_str().unwrap(),
+            "secret-key"
+        );
+        assert_eq!(
+            headers.get("anthropic-version").unwrap().to_str().unwrap(),
+            "2023-06-01"
+        );
+        assert!(headers.get("authorization").is_none());
     }
 
     #[test]
     fn openai_headers_use_bearer_token() {
         let headers = runtime(WireProtocol::OpenAi).request_headers().unwrap();
-        assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Bearer secret-key");
+        assert_eq!(
+            headers.get("authorization").unwrap().to_str().unwrap(),
+            format!("Bearer {}", "secret-key")
+        );
         assert!(headers.get("x-api-key").is_none());
     }
 
@@ -274,7 +293,7 @@ mod tests {
         assert!(provider
             .request_headers()
             .unwrap()
-            .get(AUTHORIZATION)
+            .get("authorization")
             .is_none());
     }
 

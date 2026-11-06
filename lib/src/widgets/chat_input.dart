@@ -111,7 +111,6 @@ class _ChatInputState extends State<ChatInput> {
               child: TextField(
                 controller: _controller,
                 focusNode: _focusNode,
-                enabled: !widget.isStreaming,
                 maxLines: widget.maxLines,
                 minLines: 1,
                 textInputAction: TextInputAction.newline,

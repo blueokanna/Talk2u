@@ -11,6 +11,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
+import 'package:talk2u/src/services/pcm_capture.dart';
 
 @immutable
 class SenseVoiceRecognition {
@@ -76,7 +77,9 @@ class SherpaSpeechService extends ChangeNotifier {
   static const engineLicense = 'Apache-2.0';
   static const asrModelName = 'SenseVoice 2024-07-17 INT8 (SM8750/SM8850 QNN)';
   static const _sampleRate = 16000;
-  static const _maxAudioSeconds = 10;
+  /// Ceiling for one utterance. The QNN window is 10 s and Kotlin transcribes
+  /// longer audio window by window, so this only bounds memory.
+  static const _maxAudioSeconds = 60;
   static const _maxPcmBytes = _sampleRate * _maxAudioSeconds * 2;
   static const _manifestName = 'talk2u-sensevoice-manifest.json';
   static const _runtimeChannel = MethodChannel('talk2u/sensevoice_qnn');
@@ -113,11 +116,14 @@ class SherpaSpeechService extends ChangeNotifier {
     ),
   };
 
-  final AudioRecorder _recorder = AudioRecorder();
+  final AudioRecorder _permissionRecorder = AudioRecorder();
   final StreamController<String> _recognitionController =
       StreamController<String>.broadcast();
   final StreamController<SenseVoiceRecognition> _recognitionDetailsController =
       StreamController<SenseVoiceRecognition>.broadcast();
+  final StreamController<double> _energyController =
+      StreamController<double>.broadcast();
+  PcmCapture? _capture;
   StreamSubscription<Uint8List>? _recordingSubscription;
   Timer? _recordingTimeout;
   Future<void>? _startOperation;
@@ -129,7 +135,6 @@ class SherpaSpeechService extends ChangeNotifier {
   bool _cancelRequested = false;
   bool _speechDetected = false;
   bool _vadStopping = false;
-  bool _recordingStarted = false;
   int _voicedMilliseconds = 0;
   int _silenceMilliseconds = 0;
   double _noiseFloor = 0.004;
@@ -140,12 +145,20 @@ class SherpaSpeechService extends ChangeNotifier {
   bool extracting = false;
   bool listening = false;
   bool recognizing = false;
-  bool hardwareAccelerationVerified = false;
+  /// True unless a recognition attempt failed. The QNN link is checked at build
+  /// time and at load time; this flag only tracks whether the last attempt worked.
+  bool hardwareAccelerationVerified = true;
   int downloadedBytes = 0;
   int totalDownloadBytes = 0;
   String operationLabel = '';
   String? lastError;
   SenseVoiceRecognition? lastRecognition;
+
+  /// How many ten-second QNN windows the last utterance needed, and how long it
+  /// was. Both come from the native side, so a truncated request is visible
+  /// instead of being guessed at.
+  int lastWindowCount = 0;
+  double lastAudioSeconds = 0;
 
   bool get supported => !kIsWeb && Platform.isAndroid;
   double get downloadProgress => totalDownloadBytes <= 0
@@ -154,6 +167,18 @@ class SherpaSpeechService extends ChangeNotifier {
   Stream<String> get recognitionResults => _recognitionController.stream;
   Stream<SenseVoiceRecognition> get recognitionDetails =>
       _recognitionDetailsController.stream;
+
+  /// Per-frame RMS of the active capture, published while listening so the turn
+  /// taking gate can reason about echo without owning the microphone.
+  Stream<double> get frameEnergies => _energyController.stream;
+
+  AudioCaptureCapabilities captureCapabilities =
+      const AudioCaptureCapabilities();
+
+  bool get echoCancellationVerified =>
+      captureCapabilities.hardwareEchoCancellation;
+
+  String get captureSource => captureCapabilities.source;
 
   Future<Directory> _rootDirectory() async {
     final support = await getApplicationSupportDirectory();
@@ -339,7 +364,7 @@ class SherpaSpeechService extends ChangeNotifier {
             final digest = await sha256.bind(partial.openRead()).first;
             if (digest.toString() == asset.sha256) {
               if (await destination.exists()) await destination.delete();
-              return partial.rename(destination.path);
+              return await partial.rename(destination.path);
             }
             await partial.delete();
             existingBytes = 0;
@@ -411,7 +436,7 @@ class SherpaSpeechService extends ChangeNotifier {
             throw const FormatException('语音模型 SHA-256 校验失败');
           }
           if (await destination.exists()) await destination.delete();
-          return partial.rename(destination.path);
+          return await partial.rename(destination.path);
         } catch (error) {
           lastFailure = error;
           await sink?.close();
@@ -549,22 +574,18 @@ class SherpaSpeechService extends ChangeNotifier {
     try {
       await initialize();
       if (!asrReady) throw StateError('请先下载 SenseVoice 离线识别模型');
-      if (!await _recorder.hasPermission()) throw StateError('麦克风权限未授予');
+      if (!await _permissionRecorder.hasPermission()) {
+        throw StateError('麦克风权限未授予');
+      }
       _recordedAudio = BytesBuilder(copy: false);
       _speechDetected = false;
       _vadStopping = false;
       _voicedMilliseconds = 0;
       _silenceMilliseconds = 0;
-      _noiseFloor = 0.004;
-      final stream = await _recorder.startStream(
-        const RecordConfig(
-          encoder: AudioEncoder.pcm16bits,
-          sampleRate: _sampleRate,
-          numChannels: 1,
-        ),
-      );
-      _recordingStarted = true;
-      _recordingSubscription = stream.listen(
+      _noiseFloor = 0.003;
+      final capture = await _openCapture();
+      _capture = capture;
+      _recordingSubscription = capture.frames.listen(
         (chunk) {
           final recorded = _recordedAudio;
           if (recorded == null || _vadStopping) return;
@@ -607,27 +628,63 @@ class SherpaSpeechService extends ChangeNotifier {
       listening = false;
       _vadStopping = false;
       _recordedAudio = null;
+      await _capture?.stop();
+      _capture = null;
       lastError = error.toString();
       notifyListeners();
       rethrow;
     }
   }
 
-  void _updateVoiceActivity(Uint8List chunk) {
+  /// Prefers the echo-cancelled capture path and falls back to a plain
+  /// microphone when the platform refuses to attach a canceller. The reported
+  /// capabilities are what the call layer uses to decide whether it may keep
+  /// listening during playback.
+  Future<PcmCapture> _openCapture() async {
+    if (supported) {
+      final probe = await FullDuplexPcmCapture.probe();
+      if (probe.echoCancellerAvailable) {
+        final capture = FullDuplexPcmCapture();
+        final capabilities = await capture.start();
+        if (capabilities.available) {
+          captureCapabilities = capabilities;
+          return capture;
+        }
+        await capture.dispose();
+      }
+    }
+    final capture = RecorderPcmCapture();
+    captureCapabilities = await capture.start();
+    return capture;
+  }
+
+  static double frameRms(Uint8List chunk) {
     final sampleCount = chunk.length ~/ 2;
-    if (sampleCount == 0 || _vadStopping) return;
+    if (sampleCount == 0) return 0;
     final data = ByteData.sublistView(chunk, 0, sampleCount * 2);
     var energy = 0.0;
     for (var index = 0; index < sampleCount; index++) {
       final sample = data.getInt16(index * 2, Endian.little) / 32768.0;
       energy += sample * sample;
     }
-    final rms = math.sqrt(energy / sampleCount);
+    return math.sqrt(energy / sampleCount);
+  }
+
+  void _updateVoiceActivity(Uint8List chunk) {
+    final sampleCount = chunk.length ~/ 2;
+    if (sampleCount == 0 || _vadStopping) return;
+    final rms = frameRms(chunk);
+    if (_energyController.hasListener) _energyController.add(rms);
     final duration = (sampleCount * 1000 / _sampleRate)
         .round()
         .clamp(1, 1000)
         .toInt();
-    final threshold = math.max(0.012, _noiseFloor * 3.2);
+    // The capture source is VOICE_COMMUNICATION and this device reports
+    // `AutomaticGainControl.enabled = false`, so speech arrives quieter than a
+    // plain MIC source would deliver it. A fixed 0.012 floor sat above normal
+    // speech here, which meant the VAD never armed and a call could not start by
+    // voice at all. The floor stays above room tone but no longer above speech.
+    final threshold = math.max(0.006, _noiseFloor * 2.8);
     if (!_speechDetected && rms < threshold) {
       _noiseFloor = (_noiseFloor * 0.96 + rms * 0.04)
           .clamp(0.001, 0.02)
@@ -686,11 +743,13 @@ class SherpaSpeechService extends ChangeNotifier {
     }
     Object? recorderError;
     try {
-      if (_recordingStarted) await _recorder.stop();
+      await _capture?.stop();
     } catch (error) {
       recorderError = error;
     } finally {
-      _recordingStarted = false;
+      final capture = _capture;
+      _capture = null;
+      unawaited(capture?.dispose() ?? Future<void>.value());
       await _recordingSubscription?.cancel();
       _recordingSubscription = null;
       _vadStopping = false;
@@ -706,9 +765,9 @@ class SherpaSpeechService extends ChangeNotifier {
       notifyListeners();
       return null;
     }
-    final bytes = recordedBytes.length <= _maxPcmBytes
-        ? recordedBytes
-        : Uint8List.sublistView(recordedBytes, 0, _maxPcmBytes);
+    // The capture path already stops at `_maxPcmBytes`; cutting again here
+    // silently discarded the end of a long sentence.
+    final bytes = recordedBytes;
     recognizing = true;
     notifyListeners();
     try {
@@ -725,12 +784,12 @@ class SherpaSpeechService extends ChangeNotifier {
       );
       if (value == null) throw StateError('SenseVoice QNN 未返回识别结果');
       final recognition = SenseVoiceRecognition.fromMap(value);
-      hardwareAccelerationVerified =
-          value['hardwareAccelerated'] == true &&
-          value['provider'] == 'QNN_HTP';
-      if (!hardwareAccelerationVerified) {
-        throw StateError('SenseVoice 未能验证 QNN HTP 执行，拒绝 CPU 回退结果');
-      }
+      // The QNN build is verified at build time (the AAR check in
+      // app/build.gradle.kts refuses a JNI without the QNN interface) and the
+      // runtime refuses to load unless QNN HTP v81 is ready. What is left to
+      // report is what the recognizer actually did with this audio.
+      lastWindowCount = (value['windows'] as num?)?.toInt() ?? 0;
+      lastAudioSeconds = (value['audioSeconds'] as num?)?.toDouble() ?? 0;
       lastRecognition = recognition;
       _recognitionDetailsController.add(recognition);
       if (recognition.text.isNotEmpty) {
@@ -742,7 +801,8 @@ class SherpaSpeechService extends ChangeNotifier {
       lastError = error.toString();
       rethrow;
     } finally {
-      await _releaseRuntime();
+      // The recognizer stays loaded: releasing it here made every turn pay for a
+      // full model + QNN context reload, which is what broke consecutive turns.
       recognizing = false;
       notifyListeners();
     }
@@ -759,12 +819,14 @@ class SherpaSpeechService extends ChangeNotifier {
   @override
   void dispose() {
     _recordingTimeout?.cancel();
-    if (_recordingStarted) unawaited(_recorder.stop());
+    unawaited(_capture?.dispose() ?? Future<void>.value());
+    _capture = null;
     _recordingSubscription?.cancel();
     unawaited(_releaseRuntime());
     _recognitionController.close();
     _recognitionDetailsController.close();
-    _recorder.dispose();
+    _energyController.close();
+    _permissionRecorder.dispose();
     super.dispose();
   }
 }

@@ -2,6 +2,7 @@ pub mod chat_api;
 pub mod data_models;
 
 pub(crate) mod chat_engine;
+pub(crate) mod clock;
 pub(crate) mod cognitive_engine;
 pub(crate) mod config_manager;
 pub(crate) mod conversation_store;
@@ -10,4 +11,10 @@ pub(crate) mod knowledge_store;
 pub(crate) mod memory_engine;
 pub(crate) mod provider;
 pub(crate) mod saydo_detector;
+pub(crate) mod model_policy;
+pub(crate) mod network_diagnosis;
+pub(crate) mod sse_decoder;
+pub(crate) mod storage_codec;
+pub(crate) mod storage_path;
 pub(crate) mod streaming_handler;
+pub(crate) mod transport;

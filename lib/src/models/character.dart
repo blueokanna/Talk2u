@@ -289,7 +289,7 @@ class CharacterStore {
       if (result == null || result.files.isEmpty) return 0;
       final path = result.files.single.path;
       if (path == null) return 0;
-      return importFromFile(path);
+      return await importFromFile(path);
     } catch (e) {
       debugPrint('Failed to pick file for import: $e');
       return 0;

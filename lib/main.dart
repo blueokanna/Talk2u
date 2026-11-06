@@ -12,7 +12,6 @@ import 'package:talk2u/src/theme/app_theme.dart';
 import 'package:talk2u/src/pages/chat_page.dart';
 import 'package:talk2u/src/services/offline_llm_service.dart';
 import 'package:talk2u/src/services/offline_speech_service.dart';
-import 'package:talk2u/src/services/accelerator_telemetry_service.dart';
 import 'package:talk2u/src/settings/ui_preferences.dart';
 
 enum _StartupFailure { rustCoreTimeout, localDataTimeout }
@@ -105,7 +104,6 @@ class _StartupGateState extends State<_StartupGate> {
       ),
     );
     unawaited(OfflineLlmService.instance.initialize());
-    AcceleratorTelemetryService.instance.start();
   }
 
   void _retry() {

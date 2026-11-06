@@ -7,11 +7,11 @@ import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.graphics.BitmapFactory
 import android.os.Build
-import android.os.Bundle
 import android.os.StatFs
 import android.util.Log
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
@@ -32,12 +32,12 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private external fun initializeRustTls(context: Context): Boolean
-
     private val live2dModelsChannelName = "talk2u/live2d_models"
     private val llmRuntimeChannelName = "talk2u/llm_runtime"
     private val mossTtsChannelName = "talk2u/moss_tts"
     private val acceleratorTelemetryChannelName = "talk2u/accelerator_telemetry"
+    private val fullDuplexAudioChannelName = "talk2u/full_duplex_audio"
+    private val fullDuplexFramesChannelName = "talk2u/full_duplex_frames"
     private val mossImportRequest = 4203
     private val mossZipImportRequest = 4204
     private val sherpaZipImportRequest = 4205
@@ -64,16 +64,7 @@ class MainActivity : FlutterActivity() {
     private var pendingMossZipImportResult: MethodChannel.Result? = null
     private var pendingSherpaZipImportResult: MethodChannel.Result? = null
     private val acceleratorTelemetrySampler = AcceleratorTelemetry.Sampler()
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        val tlsReady = runCatching { initializeRustTls(applicationContext) }
-            .onFailure { Log.e("Talk2U/TLS", "Unable to initialize Android TLS verifier", it) }
-            .getOrDefault(false)
-        if (!tlsReady) {
-            Log.e("Talk2U/TLS", "Android TLS verifier initialization returned false")
-        }
-        super.onCreate(savedInstanceState)
-    }
+    private val fullDuplexAudio by lazy { FullDuplexAudioCapture(applicationContext) }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -84,6 +75,32 @@ class MainActivity : FlutterActivity() {
                 Log.i("Talk2U/GPU", GpuBackendProbe.diagnostics().toString())
             }, "talk2u-gpu-probe").start()
         }
+        EventChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            fullDuplexFramesChannelName,
+        ).setStreamHandler(
+            object : EventChannel.StreamHandler {
+                override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                    fullDuplexAudio.attachSink(events)
+                }
+
+                override fun onCancel(arguments: Any?) {
+                    fullDuplexAudio.attachSink(null)
+                }
+            },
+        )
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, fullDuplexAudioChannelName)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "capabilities" -> result.success(fullDuplexAudio.capabilities())
+                    "start" -> result.success(fullDuplexAudio.start())
+                    "stop" -> {
+                        fullDuplexAudio.stop()
+                        result.success(null)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, acceleratorTelemetryChannelName)
             .setMethodCallHandler { call, result ->
                 if (call.method != "sample") {
@@ -182,7 +199,9 @@ class MainActivity : FlutterActivity() {
                                 if (content.isBlank()) null else
                                     message["role"]?.toString().orEmpty() to content
                             }
-                        val maxTokens = call.argument<Int>("maxTokens")?.coerceIn(1, 256) ?: 256
+                        val maxTokens = call.argument<Int>("maxTokens")
+                            ?.coerceIn(1, GenieXRuntime.MAX_OUTPUT_TOKENS)
+                            ?: GenieXRuntime.MAX_OUTPUT_TOKENS
                         val generationId = call.argument<Int>("generationId")
                         if (messages.isEmpty()) {
                             result.error("invalid_qwen3_messages", "Qwen3 chat messages are empty", null)
@@ -1381,6 +1400,7 @@ class MainActivity : FlutterActivity() {
 
     override fun onDestroy() {
         activityDestroyed = true
+        runCatching { fullDuplexAudio.close() }
         mossCancellation.set(true)
         mossExecutor.execute(::closeMossEngine)
         mossExecutor.shutdown()

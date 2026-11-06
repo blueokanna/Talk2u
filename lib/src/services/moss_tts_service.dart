@@ -8,6 +8,7 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:talk2u/src/services/speech_text_normalizer.dart';
 
 @immutable
 class MossVoice {
@@ -126,6 +127,7 @@ class MossTtsService extends ChangeNotifier {
   StreamSubscription<Duration>? _positionSubscription;
   Completer<void>? _playbackCompleter;
   Completer<void>? _startupCompleter;
+  Completer<void>? _speechDoneCompleter;
   Timer? _lipSyncTimer;
   final Stopwatch _playbackClock = Stopwatch();
   Duration _playbackDuration = Duration.zero;
@@ -378,12 +380,14 @@ class MossTtsService extends ChangeNotifier {
     await initialize();
     if (!ready) throw StateError('请先导入 MOSS QNN HTP v81 部署包');
     if (!runtimeInitialized) await _initializeNativeRuntime();
-    final normalized = text.trim();
+    final normalized = SpeechTextNormalizer.clean(text);
     if (normalized.isEmpty) return;
     await stopSpeaking();
     final operation = ++_operation;
     final startup = Completer<void>();
     _startupCompleter = startup;
+    final completion = Completer<void>();
+    _speechDoneCompleter = completion;
     generating = true;
     playbackAmplitude = 0;
     playbackProgress = 0;
@@ -391,14 +395,21 @@ class MossTtsService extends ChangeNotifier {
     _amplitudeEnvelope = const [];
     lastError = null;
     notifyListeners();
-    unawaited(_runSpeech(normalized, operation, startup));
+    unawaited(_runSpeech(normalized, operation, startup, completion));
     await startup.future;
   }
+
+  /// Resolves when the current utterance has finished playing (or was
+  /// cancelled). [speak] deliberately resolves earlier, at first audio, so the
+  /// caller can react to playback starting.
+  Future<void> get speechCompletion =>
+      _speechDoneCompleter?.future ?? Future<void>.value();
 
   Future<void> _runSpeech(
     String text,
     int operation,
     Completer<void> startup,
+    Completer<void> completion,
   ) async {
     try {
       final chunks = splitMossText(text, maxCharacters: 48);
@@ -490,6 +501,10 @@ class MossTtsService extends ChangeNotifier {
       if (!startup.isCompleted) startup.completeError(error, stackTrace);
     } finally {
       if (identical(_startupCompleter, startup)) _startupCompleter = null;
+      if (identical(_speechDoneCompleter, completion)) {
+        _speechDoneCompleter = null;
+      }
+      if (!completion.isCompleted) completion.complete();
       await _deletePendingOutputs();
     }
   }
@@ -737,7 +752,7 @@ List<String> splitMossText(String source, {int maxCharacters = 110}) {
   if (text.isEmpty) return const [];
   final output = <String>[];
   final buffer = <int>[];
-  const strong = '。！？!?\n';
+  const strong = '。！？!?…\n';
   const soft = '，、；：,;: ';
   void flush() {
     final value = String.fromCharCodes(buffer).trim();
@@ -778,7 +793,6 @@ Future<bool> isPlayableMossWav(File file) async {
   }
 }
 
-@visibleForTesting
 @visibleForTesting
 String normalizeMossSentencePieceText(String text) {
   final output = StringBuffer();

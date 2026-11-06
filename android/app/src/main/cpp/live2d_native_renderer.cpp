@@ -66,6 +66,7 @@ using Csm::CubismModelSettingJson;
 using Csm::CubismMotion;
 using Csm::CubismUserModel;
 using Csm::csmByte;
+using Csm::csmChar;
 using Csm::csmFloat32;
 using Csm::csmInt32;
 using Csm::csmMap;
@@ -477,6 +478,7 @@ public:
 
     void Update(csmFloat32 deltaTime) {
         _motionUpdated = false;
+        idleTime_ += deltaTime;
         _model->LoadParameters();
         if (_motionManager->IsFinished()) {
             StartMotion("Idle", 0, kPriorityIdle);
@@ -484,6 +486,7 @@ public:
             _motionUpdated = _motionManager->UpdateMotion(_model, deltaTime);
         }
         _model->SaveParameters();
+        ApplyProceduralMotion();
         _updateScheduler.OnLateUpdate(_model, deltaTime);
         const csmFloat32 mouth = speaking_ ? mouth_ : 0.0F;
         for (csmUint32 index = 0; index < lipSyncIds_.GetSize(); ++index) {
@@ -642,6 +645,14 @@ private:
         _modelMatrix->SetupFromLayout(layout);
         _model->SaveParameters();
 
+        angleXIndex_ = ParameterIndex(Csm::DefaultParameterId::ParamAngleX);
+        angleYIndex_ = ParameterIndex(Csm::DefaultParameterId::ParamAngleY);
+        angleZIndex_ = ParameterIndex(Csm::DefaultParameterId::ParamAngleZ);
+        bodyAngleXIndex_ = ParameterIndex(Csm::DefaultParameterId::ParamBodyAngleX);
+        bodyAngleZIndex_ = ParameterIndex(Csm::DefaultParameterId::ParamBodyAngleZ);
+        eyeBallXIndex_ = ParameterIndex(Csm::DefaultParameterId::ParamEyeBallX);
+        eyeBallYIndex_ = ParameterIndex(Csm::DefaultParameterId::ParamEyeBallY);
+
         for (csmInt32 groupIndex = 0; groupIndex < setting_->GetMotionGroupCount(); ++groupIndex) {
             const char* group = setting_->GetMotionGroupName(groupIndex);
             if (group == nullptr) continue;
@@ -714,6 +725,40 @@ private:
         }
     }
 
+    csmInt32 ParameterIndex(const csmChar* id) const {
+        if (_model == nullptr) return -1;
+        return _model->GetParameterIndex(
+            CubismFramework::GetIdManager()->GetId(id));
+    }
+
+    void AddParameter(csmInt32 index, csmFloat32 value) const {
+        if (index >= 0 && value != 0.0F) {
+            _model->AddParameterValue(index, value);
+        }
+    }
+
+    /**
+     * Model-agnostic secondary motion. Cubism's own breath and blink keep the
+     * avatar alive, but without gaze drift and speech-driven body sway the
+     * character reads as a static image with a moving mouth. These offsets use
+     * only standard parameter IDs and are skipped when a model does not expose
+     * them, so imported models are never forced into a wrong rig.
+     */
+    void ApplyProceduralMotion() const {
+        const csmFloat32 t = idleTime_;
+        AddParameter(angleXIndex_, std::sin(t * 0.19F + 1.1F) * 1.4F);
+        AddParameter(angleYIndex_, std::sin(t * 0.23F + 0.4F) * 0.8F);
+        AddParameter(angleZIndex_, std::sin(t * 0.37F) * 0.9F);
+        AddParameter(eyeBallXIndex_, std::sin(t * 0.17F + 2.1F) * 0.18F);
+        AddParameter(eyeBallYIndex_, std::sin(t * 0.21F + 0.7F) * 0.12F);
+        if (speaking_) {
+            const csmFloat32 energy = std::clamp(mouth_, 0.0F, 1.0F);
+            AddParameter(bodyAngleXIndex_, (energy - 0.35F) * 0.9F);
+            AddParameter(bodyAngleZIndex_, (energy - 0.35F) * 0.5F);
+            AddParameter(angleYIndex_, energy * 0.8F);
+        }
+    }
+
     ModelSource source_;
     std::unique_ptr<CubismModelSettingJson> setting_;
     std::unordered_map<std::string, ACubismMotion*> motions_;
@@ -725,6 +770,14 @@ private:
     csmUint32 surfaceWidth_ = 1;
     csmUint32 surfaceHeight_ = 1;
     csmFloat32 mouth_ = 0.0F;
+    csmFloat32 idleTime_ = 0.0F;
+    csmInt32 angleXIndex_ = -1;
+    csmInt32 angleYIndex_ = -1;
+    csmInt32 angleZIndex_ = -1;
+    csmInt32 bodyAngleXIndex_ = -1;
+    csmInt32 bodyAngleZIndex_ = -1;
+    csmInt32 eyeBallXIndex_ = -1;
+    csmInt32 eyeBallYIndex_ = -1;
     bool speaking_ = false;
     bool _motionUpdated = false;
 };

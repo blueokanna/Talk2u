@@ -12,7 +12,7 @@ pub enum ChatStreamEvent {
 
 #[derive(Default)]
 #[frb]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, nextjson::NsonSerialize, nextjson::NsonDeserialize)]
 pub enum MessageType {
     #[default]
     Say,
@@ -21,7 +21,7 @@ pub enum MessageType {
 }
 
 #[frb]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, nextjson::NsonSerialize, nextjson::NsonDeserialize)]
 pub struct Message {
     pub id: String,
     pub role: MessageRole,
@@ -34,7 +34,7 @@ pub struct Message {
 }
 
 #[frb]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, nextjson::NsonSerialize, nextjson::NsonDeserialize)]
 pub enum MessageRole {
     User,
     Assistant,
@@ -43,7 +43,7 @@ pub enum MessageRole {
 
 #[derive(Default)]
 #[frb]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, nextjson::NsonSerialize, nextjson::NsonDeserialize)]
 pub enum DialogueStyle {
     Free,
     SayOnly,
@@ -53,7 +53,7 @@ pub enum DialogueStyle {
 }
 
 #[frb]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, nextjson::NsonSerialize, nextjson::NsonDeserialize)]
 pub struct Conversation {
     pub id: String,
     pub title: String,
@@ -70,7 +70,7 @@ pub struct Conversation {
 }
 
 #[frb]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, nextjson::NsonSerialize, nextjson::NsonDeserialize)]
 pub struct MemorySummary {
     pub id: String,
     pub summary: String,
@@ -275,7 +275,15 @@ pub struct ModelInfo {
 }
 
 #[frb]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    nextjson::NsonSerialize,
+    nextjson::NsonDeserialize,
+)]
 pub struct MemoryContextCard {
     pub source_range: String,
     pub topic_tags: Vec<String>,
@@ -285,7 +293,15 @@ pub struct MemoryContextCard {
 }
 
 #[frb]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    nextjson::NsonSerialize,
+    nextjson::NsonDeserialize,
+)]
 pub enum MemoryTier {
     Identity,
     CriticalEvent,

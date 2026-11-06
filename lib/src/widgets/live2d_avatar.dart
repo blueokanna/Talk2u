@@ -36,10 +36,35 @@ Future<void> _initializeDesktopCef() async {
   }
 }
 
+/// Drives the avatar from the chat page without knowing which platform
+/// renderer is active. Performances are delivered through the same cue channel
+/// the speech timeline uses, so they are ordered with spoken cues.
+class Live2dAvatarController extends ChangeNotifier {
+  String _cue = '';
+  int _revision = 0;
+
+  String get cue => _cue;
+  int get revision => _revision;
+
+  void perform(String cue) {
+    if (cue.isEmpty || cue == _cue) return;
+    _cue = cue;
+    _revision++;
+    notifyListeners();
+  }
+}
+
 class Live2dAvatar extends StatefulWidget {
   final String modelPath;
+  final Live2dAvatarController? controller;
+  final VoidCallback? onTap;
 
-  const Live2dAvatar({super.key, required this.modelPath});
+  const Live2dAvatar({
+    super.key,
+    required this.modelPath,
+    this.controller,
+    this.onTap,
+  });
 
   @override
   State<Live2dAvatar> createState() => _Live2dAvatarState();
@@ -53,6 +78,7 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
   double _lastAmplitude = -1;
   bool _wasSpeaking = false;
   int _lastCueRevision = -1;
+  int _lastControllerRevision = -1;
   String? _error;
   Map<String, dynamic>? _readyDetails;
   bool _diagnosticsLoading = false;
@@ -65,6 +91,8 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
   void initState() {
     super.initState();
     OfflineSpeechService.instance.addListener(_syncMouth);
+    widget.controller?.addListener(_syncController);
+    _lastControllerRevision = widget.controller?.revision ?? -1;
     if (_usesDesktopRenderer) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
@@ -74,6 +102,25 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
           unawaited(_initializeDesktopRenderer());
         }
       });
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant Live2dAvatar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller == widget.controller) return;
+    oldWidget.controller?.removeListener(_syncController);
+    widget.controller?.addListener(_syncController);
+    _lastControllerRevision = widget.controller?.revision ?? -1;
+  }
+
+  void _syncController({bool force = false}) {
+    final controller = widget.controller;
+    if (controller == null) return;
+    if (!force && controller.revision == _lastControllerRevision) return;
+    _lastControllerRevision = controller.revision;
+    if (controller.cue.isNotEmpty) {
+      _invoke('perform', {'cue': controller.cue});
     }
   }
 
@@ -90,7 +137,10 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
     final speech = OfflineSpeechService.instance;
     if (force || speech.speaking != _wasSpeaking) {
       _invoke('setSpeaking', {'value': speech.speaking});
-      if (!speech.speaking) {
+      if (speech.speaking && speech.speechEmotion != 'neutral') {
+        _invoke('perform', {'cue': speech.speechEmotion});
+      }
+      if (!speech.speaking && !speech.generating) {
         _invoke('setMouth', {'value': 0.0});
         _invoke('resetExpression', const {});
         _lastCueRevision = -1;
@@ -339,7 +389,10 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
             status['type'] == 'error' && status['recoverable'] == true;
         if (status['type'] == 'ready') _readyDetails = status;
       });
-      if (status['type'] == 'ready') _pushSpeechState(force: true);
+      if (status['type'] == 'ready') {
+        _pushSpeechState(force: true);
+        _syncController(force: true);
+      }
       if (_recoverableError && _automaticRestarts < 1) {
         _automaticRestarts++;
         _scheduleRendererRestart();
@@ -503,6 +556,7 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
   @override
   void dispose() {
     OfflineSpeechService.instance.removeListener(_syncMouth);
+    widget.controller?.removeListener(_syncController);
     _channel?.setMethodCallHandler(null);
     _desktopController?.dispose();
     unawaited(_windowsMessageSubscription?.cancel());
@@ -563,6 +617,13 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
         fit: StackFit.expand,
         children: [
           renderer,
+          if (widget.onTap != null)
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onTap: widget.onTap,
+              ),
+            ),
           if (_readyDetails != null)
             Align(
               alignment: Alignment.topRight,

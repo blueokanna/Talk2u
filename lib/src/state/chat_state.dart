@@ -38,12 +38,15 @@ class ChatState extends ChangeNotifier {
 
   DialogueStyle _dialogueStyle = DialogueStyle.mixed;
 
-  Timer? _streamThrottleTimer;
-  bool _streamDirty = false;
+  Timer? _streamFlushTimer;
+  static const _streamFlushInterval = Duration(milliseconds: 48);
 
   bool _doneEventReceived = false;
   bool _generationWasCancelled = false;
   int _completedResponseRevision = 0;
+  String? _regeneratingMessageId;
+  int _loadToken = 0;
+  int _streamToken = 0;
 
   String? get currentConversationId => _currentConversationId;
   bool get enableThinking => _enableThinking;
@@ -54,6 +57,7 @@ class ChatState extends ChangeNotifier {
   String? get errorMessage => _errorMessage;
   String? get lastFailedContent => _lastFailedContent;
   int get completedResponseRevision => _completedResponseRevision;
+  String? get regeneratingMessageId => _regeneratingMessageId;
   List<ConversationSummary> get conversations =>
       List.unmodifiable(_conversations);
   Character? get currentCharacter => _currentCharacter;
@@ -72,8 +76,10 @@ class ChatState extends ChangeNotifier {
 
   DialogueStyle get dialogueStyle => _dialogueStyle;
 
-  List<Message> get displayMessages =>
-      _messages.where((m) => m.role != MessageRole.system).toList();
+  List<Message> get displayMessages => _messages
+      .where((m) => m.role != MessageRole.system)
+      .where((m) => !(isStreaming && m.id == _regeneratingMessageId))
+      .toList();
 
   Future<void> initialize() async {
     try {
@@ -224,6 +230,7 @@ class ChatState extends ChangeNotifier {
 
   Future<void> createNewConversation() async {
     try {
+      _abortActiveGeneration();
       final conv = await rust_api.createConversation();
       _currentConversationId = conv.id;
       _messages = [];
@@ -240,6 +247,7 @@ class ChatState extends ChangeNotifier {
 
   Future<void> startCharacterChat(Character character) async {
     try {
+      _abortActiveGeneration();
       final conv = await rust_api.createConversation();
       _currentConversationId = conv.id;
       _messages = [];
@@ -284,9 +292,20 @@ class ChatState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> loadConversation(String id, {bool preserveError = false}) async {
+  Future<bool> loadConversation(
+    String id, {
+    bool preserveError = false,
+  }) async {
+    if (_currentConversationId != id) {
+      _abortActiveGeneration();
+    }
+    final token = ++_loadToken;
     try {
+      _regeneratingMessageId = null;
       final conv = await rust_api.getConversation(id: id);
+      // A newer load or a new generation started while this read was in
+      // flight; applying it now would overwrite fresher UI state.
+      if (token != _loadToken) return false;
       if (conv != null) {
         _currentConversationId = conv.id;
         _messages = conv.messages;
@@ -305,14 +324,20 @@ class ChatState extends ChangeNotifier {
         }
 
         notifyListeners();
+        return true;
       }
+      return false;
     } catch (e) {
       debugPrint('Failed to load conversation: $e');
+      return false;
     }
   }
 
   Future<void> deleteConversation(String id) async {
     try {
+      if (_currentConversationId == id) {
+        _abortActiveGeneration();
+      }
       await rust_api.deleteConversation(id: id);
       if (_currentConversationId == id) {
         _currentConversationId = null;
@@ -329,7 +354,7 @@ class ChatState extends ChangeNotifier {
   }
 
   Future<void> deleteMessage(String messageId) async {
-    if (_currentConversationId == null) return;
+    if (_currentConversationId == null || _isStreaming) return;
     try {
       await rust_api.deleteMessage(
         conversationId: _currentConversationId!,
@@ -344,7 +369,7 @@ class ChatState extends ChangeNotifier {
   }
 
   Future<void> editMessage(String messageId, String newContent) async {
-    if (_currentConversationId == null) return;
+    if (_currentConversationId == null || _isStreaming) return;
     if (newContent.trim().isEmpty) return;
     try {
       final success = await rust_api.editMessage(
@@ -362,7 +387,7 @@ class ChatState extends ChangeNotifier {
   }
 
   Future<void> rollbackToMessage(String messageId) async {
-    if (_currentConversationId == null) return;
+    if (_currentConversationId == null || _isStreaming) return;
     try {
       final deletedIds = await rust_api.rollbackToMessage(
         conversationId: _currentConversationId!,
@@ -401,25 +426,38 @@ class ChatState extends ChangeNotifier {
 
   Future<void> regenerateResponse(String assistantMessageId) async {
     if (_currentConversationId == null || _isStreaming) return;
+    final conversationId = _currentConversationId!;
     try {
       final msgIndex = _messages.indexWhere((m) => m.id == assistantMessageId);
       if (msgIndex < 0) return;
+      final rejectedReply = _messages[msgIndex].content;
 
-      await rust_api.rollbackToMessage(
-        conversationId: _currentConversationId!,
-        messageId: assistantMessageId,
-      );
+      final hasLaterMessages = _messages
+          .skip(msgIndex + 1)
+          .any((message) => message.role != MessageRole.system);
 
-      await loadConversation(_currentConversationId!);
-
-      final conversationId = _currentConversationId!;
+      // The remote pipeline replaces the trailing reply in place: keeping it
+      // lets Rust extract the previous text for an explicit anti-repetition
+      // directive. Older replies, and the on-device provider (which appends),
+      // still need a rollback first.
+      if (hasLaterMessages || usesAndroidOfflineProvider) {
+        await rust_api.rollbackToMessage(
+          conversationId: conversationId,
+          messageId: assistantMessageId,
+        );
+        await loadConversation(conversationId);
+      } else {
+        _regeneratingMessageId = assistantMessageId;
+      }
 
       _cancelExistingSubscription();
-
       startStreaming();
 
       if (usesAndroidOfflineProvider) {
-        await _generateOfflineAssistant(conversationId);
+        await _generateOfflineAssistant(
+          conversationId,
+          avoidRepeat: rejectedReply,
+        );
         return;
       }
 
@@ -433,7 +471,9 @@ class ChatState extends ChangeNotifier {
       _listenToChatStream(stream, conversationId);
     } catch (e) {
       debugPrint('Failed to regenerate response: $e');
+      _regeneratingMessageId = null;
       if (_isStreaming) endStreaming();
+      await loadConversation(conversationId, preserveError: true);
     }
   }
 
@@ -464,48 +504,64 @@ class ChatState extends ChangeNotifier {
     _streamSubscription = null;
   }
 
+  void _abortActiveGeneration() {
+    if (!_isStreaming) return;
+    _loadToken++;
+    final previous = _currentConversationId;
+    _generationWasCancelled = true;
+    _cancelExistingSubscription();
+    if (previous != null) {
+      unawaited(rust_api.cancelGeneration(conversationId: previous));
+    }
+    endStreaming();
+  }
+
   void startStreaming() {
+    // Any pending conversation read belongs to the previous turn and must not
+    // clear the stream that is about to start.
+    _loadToken++;
+    _streamToken++;
     _isStreaming = true;
     _currentStreamingContent = '';
     _currentThinkingContent = '';
     _errorMessage = null;
-    _streamDirty = false;
     _doneEventReceived = false;
     _generationWasCancelled = false;
-    _streamThrottleTimer?.cancel();
-    _streamThrottleTimer = Timer.periodic(const Duration(milliseconds: 30), (
-      _,
-    ) {
-      if (_streamDirty) {
-        _streamDirty = false;
-        notifyListeners();
-      }
-    });
+    _streamFlushTimer?.cancel();
+    _streamFlushTimer = null;
     notifyListeners();
+  }
+
+  /// One repaint per ~48 ms of deltas, with no timer while the stream is idle.
+  void _scheduleStreamFlush() {
+    if (_streamFlushTimer != null) return;
+    _streamFlushTimer = Timer(_streamFlushInterval, () {
+      _streamFlushTimer = null;
+      if (!_isStreaming) return;
+      notifyListeners();
+    });
   }
 
   void appendStreamingContent(String delta) {
     _currentStreamingContent += delta;
-    _streamDirty = true;
+    _scheduleStreamFlush();
   }
 
   void _replaceStreamingContent(String content) {
     _currentStreamingContent = content;
-    _streamDirty = true;
+    _scheduleStreamFlush();
   }
 
   void appendThinkingContent(String delta) {
     _currentThinkingContent += delta;
-    _streamDirty = true;
+    _scheduleStreamFlush();
   }
 
   void endStreaming() {
     _isStreaming = false;
-    _streamThrottleTimer?.cancel();
-    _streamThrottleTimer = null;
-    if (_streamDirty) {
-      _streamDirty = false;
-    }
+    _streamFlushTimer?.cancel();
+    _streamFlushTimer = null;
+    _regeneratingMessageId = null;
     notifyListeners();
   }
 
@@ -513,8 +569,10 @@ class ChatState extends ChangeNotifier {
     Stream<ChatStreamEvent> stream,
     String conversationId,
   ) {
+    final streamToken = _streamToken;
     _streamSubscription = stream.listen(
       (event) {
+        if (streamToken != _streamToken) return;
         if (_currentConversationId != conversationId) return;
 
         try {
@@ -527,7 +585,10 @@ class ChatState extends ChangeNotifier {
               final activeError = _errorMessage;
               endStreaming();
               if (_currentConversationId != conversationId) return;
-              loadConversation(conversationId, preserveError: true).then((_) {
+              loadConversation(conversationId, preserveError: true).then((
+                applied,
+              ) {
+                if (!applied) return;
                 if (activeError != null && _errorMessage == null) {
                   _errorMessage = activeError;
                 }
@@ -543,7 +604,7 @@ class ChatState extends ChangeNotifier {
               if (msg == '__RETRY_RESET__') {
                 _currentStreamingContent = '';
                 _currentThinkingContent = '';
-                _streamDirty = true;
+                _scheduleStreamFlush();
                 return;
               }
               if (msg == '__GENERATION_CANCELLED__') {
@@ -570,6 +631,7 @@ class ChatState extends ChangeNotifier {
       },
       onError: (e) {
         debugPrint('[ChatState] Stream error: $e');
+        if (streamToken != _streamToken) return;
         if (_currentConversationId != conversationId) return;
         if (_isStreaming) endStreaming();
         _errorMessage = e.toString();
@@ -578,10 +640,11 @@ class ChatState extends ChangeNotifier {
         });
       },
       onDone: () {
+        if (streamToken != _streamToken) return;
         if (!_isStreaming || _doneEventReceived) return;
 
         final activeError = _errorMessage;
-        _retryDoneCheck(conversationId, activeError, 0);
+        _retryDoneCheck(conversationId, activeError, 0, streamToken);
       },
     );
   }
@@ -590,9 +653,11 @@ class ChatState extends ChangeNotifier {
     String conversationId,
     String? activeError,
     int attempt,
+    int streamToken,
   ) {
     const delays = [300, 700, 1000];
 
+    if (streamToken != _streamToken) return;
     if (attempt >= delays.length) {
       if (_doneEventReceived || !_isStreaming) return;
       if (_currentConversationId != conversationId) return;
@@ -601,20 +666,23 @@ class ChatState extends ChangeNotifier {
         '[ChatState] Stream closed without Done after 2s grace (conv=$conversationId)',
       );
       endStreaming();
-      loadConversation(conversationId, preserveError: true).then((_) {
+      loadConversation(conversationId, preserveError: true).then((
+        applied,
+      ) {
+        if (!applied) return;
         if (activeError != null && _errorMessage == null) {
           _errorMessage = activeError;
         }
         final hasAssistantResponse =
             _messages.isNotEmpty &&
             _messages.last.role == MessageRole.assistant;
-        if (hasAssistantResponse) {
+        if (hasAssistantResponse && !_generationWasCancelled) {
           refreshConversationList();
           if (_errorMessage == null) {
             _completedResponseRevision++;
             _checkAndTriggerMemorySummarize(conversationId);
           }
-        } else {
+        } else if (!_generationWasCancelled) {
           _errorMessage ??= 'AI 响应中断，请点击重试';
         }
         notifyListeners();
@@ -624,9 +692,10 @@ class ChatState extends ChangeNotifier {
 
     _retryDoneTimer?.cancel();
     _retryDoneTimer = Timer(Duration(milliseconds: delays[attempt]), () {
+      if (streamToken != _streamToken) return;
       if (_doneEventReceived || !_isStreaming) return;
       if (_currentConversationId != conversationId) return;
-      _retryDoneCheck(conversationId, activeError, attempt + 1);
+      _retryDoneCheck(conversationId, activeError, attempt + 1, streamToken);
     });
   }
 
@@ -634,7 +703,7 @@ class ChatState extends ChangeNotifier {
     if (content.trim().isEmpty || _isStreaming) return;
 
     _cancelExistingSubscription();
-
+    _regeneratingMessageId = null;
     _errorMessage = null;
     _lastFailedContent = null;
 
@@ -726,9 +795,19 @@ class ChatState extends ChangeNotifier {
     return false;
   }
 
-  List<OfflineChatMessage> _buildOfflinePrompt() {
-    const contentBudget = 5000;
-    var remaining = contentBudget;
+  /// Builds the on-device prompt.
+  ///
+  /// GenieX runs the local Qwen3 session with `enable_sampling = false`, so the
+  /// same prompt always produces the same tokens. Rewriting a reply therefore
+  /// has to change the prompt: the rejected answer is quoted back with an
+  /// explicit instruction not to repeat it, which is the same contract the
+  /// cloud path gets from `build_regeneration_directive`.
+  List<OfflineChatMessage> _buildOfflinePrompt({String? avoidRepeat}) {
+    // Qwen3 runs in a 4096-token window, so the prompt is budgeted in tokens
+    // (≈1.5 per CJK glyph) rather than characters.
+    const promptTokenBudget =
+        OfflineLlmService.contextSize - OfflineLlmService.maxOutputTokens - 256;
+    var remainingTokens = promptTokenBudget;
     final systemMessages = _messages
         .where((message) => message.role == MessageRole.system)
         .map(
@@ -736,6 +815,9 @@ class ChatState extends ChangeNotifier {
               OfflineChatMessage(role: 'system', content: message.content),
         )
         .toList(growable: false);
+    for (final message in systemMessages) {
+      remainingTokens -= _estimateOfflineTokens(message.content);
+    }
 
     final recent = <OfflineChatMessage>[];
     for (final message in _messages.reversed) {
@@ -743,26 +825,89 @@ class ChatState extends ChangeNotifier {
           message.content.trim().isEmpty) {
         continue;
       }
-      if (remaining <= 0 && recent.isNotEmpty) break;
-      final content = message.content.length <= remaining
+      final tokens = _estimateOfflineTokens(message.content);
+      // The newest non-system message must survive even when a large system
+      // prompt already consumed the budget; otherwise the model receives no
+      // actual question.
+      final allowance = recent.isEmpty && remainingTokens < 96
+          ? 96
+          : remainingTokens;
+      final content = tokens <= allowance
           ? message.content
-          : message.content.substring(message.content.length - remaining);
+          : _tailByTokenBudget(message.content, allowance);
+      if (content.trim().isEmpty) break;
       recent.add(
         OfflineChatMessage(
           role: message.role == MessageRole.assistant ? 'assistant' : 'user',
           content: content,
         ),
       );
-      remaining -= content.length;
+      remainingTokens -= _estimateOfflineTokens(content);
+      if (remainingTokens <= 64) break;
     }
 
-    return [...systemMessages, ...recent.reversed];
+    final messages = [...systemMessages, ...recent.reversed];
+    final quoted = avoidRepeat?.trim() ?? '';
+    if (quoted.isNotEmpty) {
+      final runes = quoted.runes.toList(growable: false);
+      final excerpt = runes.length <= 600
+          ? quoted
+          : String.fromCharCodes(runes.take(600));
+      messages.add(
+        OfflineChatMessage(
+          role: 'system',
+          content:
+              '用户要求重写你上一条回复。下面这段内容已经被用户否决，'
+              '不要重复它、不要改写它，必须换一个角度和说法，给出全新的回复。\n$excerpt',
+        ),
+      );
+    }
+    return messages;
   }
 
-  Future<void> _generateOfflineAssistant(String conversationId) async {
+  static int _estimateOfflineTokens(String text) {
+    var cjk = 0;
+    var other = 0;
+    for (final rune in text.runes) {
+      final isCjk =
+          (rune >= 0x3400 && rune <= 0x9FFF) ||
+          (rune >= 0x3040 && rune <= 0x30FF) ||
+          (rune >= 0xAC00 && rune <= 0xD7AF);
+      if (isCjk) {
+        cjk++;
+      } else {
+        other++;
+      }
+    }
+    return (cjk * 1.5).ceil() + (other / 4).ceil() + 4;
+  }
+
+  /// Keeps the newest part of a long message without splitting a surrogate
+  /// pair, which would corrupt the prompt sent to the native tokenizer.
+  static String _tailByTokenBudget(String text, int tokenBudget) {
+    if (tokenBudget <= 0) return '';
+    final runes = text.runes.toList(growable: false);
+    var low = 0;
+    var high = runes.length;
+    while (low < high) {
+      final mid = (low + high) ~/ 2;
+      final candidate = String.fromCharCodes(runes.sublist(mid));
+      if (_estimateOfflineTokens(candidate) <= tokenBudget) {
+        high = mid;
+      } else {
+        low = mid + 1;
+      }
+    }
+    return String.fromCharCodes(runes.sublist(low));
+  }
+
+  Future<void> _generateOfflineAssistant(
+    String conversationId, {
+    String? avoidRepeat,
+  }) async {
     try {
       final response = await OfflineLlmService.instance.generate(
-        _buildOfflinePrompt(),
+        _buildOfflinePrompt(avoidRepeat: avoidRepeat),
         onText: (text) {
           if (_currentConversationId == conversationId && _isStreaming) {
             _replaceStreamingContent(text);
@@ -779,15 +924,24 @@ class ChatState extends ChangeNotifier {
       if (_currentConversationId == conversationId) {
         _replaceStreamingContent(response);
         endStreaming();
-        await loadConversation(conversationId);
+        final applied = await loadConversation(conversationId);
+        if (!applied) return;
         _completedResponseRevision++;
         await refreshConversationList();
       }
     } catch (error) {
       if (error is OfflineGenerationCancelled) {
         if (_currentConversationId == conversationId) {
+          final partial = _currentStreamingContent.trim();
           _generationWasCancelled = true;
           endStreaming();
+          if (partial.isNotEmpty) {
+            await rust_api.addAssistantMessageWithModel(
+              conversationId: conversationId,
+              content: partial,
+              model: _selectedModel,
+            );
+          }
           await loadConversation(conversationId, preserveError: true);
         }
         return;
@@ -830,8 +984,9 @@ class ChatState extends ChangeNotifier {
   void setError(String message, {String? failedContent}) {
     _errorMessage = message;
     _isStreaming = false;
-    _streamThrottleTimer?.cancel();
-    _streamThrottleTimer = null;
+    _regeneratingMessageId = null;
+    _streamFlushTimer?.cancel();
+    _streamFlushTimer = null;
     if (failedContent != null) {
       _lastFailedContent = failedContent;
     }
@@ -898,7 +1053,7 @@ class ChatState extends ChangeNotifier {
   @override
   void dispose() {
     _cancelExistingSubscription();
-    _streamThrottleTimer?.cancel();
+    _streamFlushTimer?.cancel();
     _retryDoneTimer?.cancel();
     super.dispose();
   }

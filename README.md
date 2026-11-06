@@ -11,7 +11,7 @@ Talk2U 是一个 Flutter + Rust 的本地角色聊天应用。聊天记录、角
 
 | 能力 | 状态 | 实际实现 |
 | --- | --- | --- |
-| 智谱清言 | 已实现 | OpenAI-compatible SSE，智谱 API Key 转 JWT |
+| 智谱清言 | 已实现 | 与其它平台共用 `courierust` 传输与同一套 SSE 解析，按 OpenAI 协议直连 |
 | DeepSeek | 已实现 | OpenAI-compatible SSE，支持 `deepseek-chat` / `deepseek-reasoner` |
 | OpenAI | 已实现 | Chat Completions SSE，Bearer API Key |
 | Anthropic | 已实现 | Messages API、`x-api-key`、`anthropic-version`、Anthropic SSE |
@@ -19,17 +19,20 @@ Talk2U 是一个 Flutter + Rust 的本地角色聊天应用。聊天记录、角
 | Qwen | 已实现 | DashScope OpenAI-compatible SSE |
 | 自定义 URL | 已实现 | OpenAI-compatible；API Key 可留空，支持 HTTP(S) 完整地址 |
 | 跨平台继续同一对话 | 已实现 | conversation 与供应商解耦，切换供应商不创建新会话 |
-| 本地记忆/知识检索 | 已实现 | Rust 本地文件存储、短期上下文、长期摘要、知识事实检索 |
-| Android 端侧 LLM | 已实现 | `Qwen/Qwen3-4B-Instruct-2507` Q4_K_M GGUF；llama.cpp 将 36 个 transformer block 与输出矩阵卸载到 Adreno Vulkan |
+| 本地记忆/知识检索 | 已实现 | Rust 本地文件存储、短期上下文、长期摘要、知识事实检索；system 上下文按 token 预算完整保留 |
+| Android 端侧 LLM | 已实现 | `Qwen/Qwen3-4B-Instruct-2507` Q4_K_M GGUF；4096 token 窗口内按 token 预算裁剪历史，单次输出上限 1024 token |
 | 离线 STT | 已实现 | Android SM8850 上使用 sherpa-onnx + SenseVoice 2024-07-17 INT8 QNN context，提供 ASR/LID/SER/AED |
-| 持续语音通话 | Android 有条件实现 | 最终识别结果自动发送、回复自动朗读并恢复监听；需要同一设备上同时存在可用的端侧 STT 与 TTS |
+| 持续语音通话 | Android 有条件实现 | `CallSession` 状态机；确认硬件 AEC 后全双工，否则半双工；参考信号双讲检测 + 文本自回音过滤；可语音/点按打断 |
+| 重新生成 | 已实现 | 旧回复不进入新 prompt，附带“禁止复用开头/句式/收尾”的显式指令，并以 temperature/top_p 0.95 重新采样；成功后原位替换旧消息 |
+| 空闲资源占用 | 已实现 | 无 1 Hz 硬件遥测轮询、无全程 30 ms 流式定时器、非通话模式不自动合成语音 |
 | Android/Windows/Linux Live2D | 有条件实现 | Android 使用 Cubism SDK for Native 5 R.5 + C++ + OpenGL ES；Windows 使用 WebView2，Linux 使用 CEF |
 | Cubism 5 moc3 | 已实现 | 导入时读取 `MOC3` 头并接受 moc3 版本 1-5；运行时拒绝 Core 4 |
 | `.cdi3.json` | 已实现 | 校验 Version 3，并用于发现 LipSync 参数 |
 | LipSync | 已实现 | MOSS 生成 WAV 的真实 PCM 振幅包络驱动模型嘴部参数 |
-| 肢体动作/表情 | 已实现，取决于模型 | 语境与舞台指示生成 cue，只播放 `talk2u.avatar.json` 明确映射或名称可验证的动作组 |
+| 肢体动作/表情 | 已实现，取决于模型 | 语境、emoji 与舞台指示生成 cue；同一情绪在多个等价表演间轮换，并在说话开始时维持主导情绪表情 |
+| 次级动态 | 已实现 | Native renderer 在标准参数上叠加缓慢视线漂移、头部微摆与说话时的身体起伏；缺失参数会自动跳过 |
 | 舞台指示静音 | 已实现 | `（哈哈大笑）`、`*挥手*` 等动作不送入 MOSS，但仍影响 Live2D cue；解释性括号保留朗读 |
-| Android 离线 TTS | 有条件实现 | 导入 SM8850/HTP v81 部署包后，prefill/decode/codec 使用 QNN HTP，sampler 使用 ORT CPU；不回退系统 TTS |
+| Android 离线 TTS | 有条件实现 | 导入 SM8850/HTP v81 部署包后，prefill/decode/codec 使用 QNN HTP，sampler 使用 ORT CPU；不回退系统 TTS；朗读前过滤 emoji、Markdown、代码、URL 与空行 |
 | Android 离线 STT | 已实现 | SenseVoice INT8 支持中文、英文及自动语言识别；模型由应用下载、校验和管理 |
 | Android NNAPI 设备诊断 | 已实现 | 枚举设备名、版本、类型和 feature level；CPU 类型不会计为加速设备 |
 | 原生 Vulkan/OpenGL ES 预检 | 已实现 | NDK C++ 真实创建 Vulkan instance/device；失败时真实创建 EGL OpenGL ES 3/2 context |
@@ -40,6 +43,34 @@ Talk2U 是一个 Flutter + Rust 的本地角色聊天应用。聊天记录、角
 | Discord Gateway/Android 常驻 Bot | 未实现 | 当前是桌面或服务器前台轮询进程 |
 
 “已实现”不等于第三方服务永远可用。实际联网调用还需要有效 API Key、账户额度、可访问的服务地址和正确模型 ID。仓库不会内置任何 API Key。
+
+## 研究贡献
+
+`docs/emotion_aware_rag_paper.tex` 的 AHCA 描述的是上下文层（身份锚定、分层记忆、W-RRF 检索、情绪衰减、多样性调节）。在这之上，本仓库实现了四个此前只存在于设计里的系统级机制，每一个都有可复现的代码路径，而不是概念图：
+
+1. **参考信号锚定的双讲检测（RATT）** — 助手自己合成音频，天然拥有回声参考。用 20 ms 振幅包络 + 180 ms 峰值保持把盲回声路径辨识降级为已知参考检测，从而与设备延迟解耦；再把平台 AEC 的 `enabled` 结果当作能力门控，决定全双工还是半双工。参见 `turn_taking.dart`、`call_session.dart`、`FullDuplexAudioCapture.kt`，推导与评测协议见 [docs/reference_anchored_turn_taking.tex](docs/reference_anchored_turn_taking.tex)。
+2. **反自启动的重生成** — 旧回复被排除在新 prompt 之外（消除 self-priming），旧回复的开头/结尾/段长被写成显式反重复约束，采样温度与 top-p 同时抬高，成功后原位替换消息 ID。这解决的是“重生成等于复读”，而不是“重生成等于再采样一次”。参见 `chat_engine.rs::regenerate_response`。
+3. **非语言情感转导** — MOSS 的 JNI 没有 emotion 参数，也没有 SSML。这里把 emoji 与 Markdown 结构映射为声码器可正确处理的停顿与标点，同时把同一批符号解析为主导情绪，驱动整段回复的初帧表情；纯 emoji 回复直接跳过合成。参见 `speech_text_normalizer.dart`。
+4. **播放进度锚定的表演时间轴** — 用实际 WAV 的振幅包络作为时间基准，把静音舞台指示、情绪词与 emoji 偏移映射到帧级 Live2D 动作，并在同一情绪家族内轮换等价表演以避免动作重复。参见 `offline_speech_service.dart` 与 `live2d_native_renderer.cpp`。
+
+没有语料的指标一律标为待测：RATT 的 barge-in 延迟、误打断率、自回音回合率、过抑制率都在论文小节里给出协议与消融设置，仓库不预先写死数字。
+
+## Rust 核心的依赖边界
+
+Rust 核心现在按“一件事一个 crate”划分，每个依赖只有唯一职责，不存在互相覆盖的第二实现：
+
+| crate | 职责 | 落地位置 |
+| --- | --- | --- |
+| `courierust` | 唯一出站 HTTP/TLS 实现：SSE 增量解析、重试与去重、Android 信任锚加载 | `rust/src/api/transport.rs` |
+| `rustglm` | 只提供智谱的“契约”：模型能力表、`thinking` 与流式分片的线上类型；它的 HTTP 客户端刻意不用，原因见智谱一节 | `rust/src/api/model_policy.rs` |
+| `rustbinary` | 对话落盘封包（`T2UB` magic + 版本号 + 有界解码），旧格式只读迁移 | `rust/src/api/storage_codec.rs` |
+| `tzcraft` | 全局时间源：128 位纳秒 `Ticks`，向下取整语义，跨平台一致 | `rust/src/api/clock.rs` |
+| `recurse-x` | 独立递归 DNS：与设备解析器交叉验证，区分劫持与链路故障 | `rust/src/api/network_diagnosis.rs` |
+| `nextjson` | 持久化结构的序列化 derive | `rust/src/api/data_models.rs` |
+
+`reqwest` 与 `rustls` 已经完全不在依赖树里。智谱、DeepSeek、OpenAI、Kimi、Qwen、自定义端点全部走同一个 `courierust` 客户端；Android 上的信任锚由本仓库自己从 `/apex/com.android.conscrypt/cacerts` 与 `/system/etc/security/cacerts` 读取，因为该 crate 自带的 `load_system()` 只认 Linux 发行版的证书布局。这条加载路径就是"应用信任设备所信任的一切"（含用户手动安装的 CA）的实现。
+
+设计取舍、迁移语义与验证命令见 [docs/rust_stack.md](docs/rust_stack.md)。
 
 ## 架构
 
@@ -210,7 +241,7 @@ Windows 使用系统 WebView2 Runtime；Linux 的 CEF 运行库会随构建 bund
 
 | 平台 | 协议 | 默认 URL | 默认对话模型 |
 | --- | --- | --- | --- |
-| 智谱清言 | OpenAI-compatible + 智谱 JWT | `https://open.bigmodel.cn/api/paas/v4/chat/completions` | `glm-4.7` |
+| 智谱清言 | OpenAI-compatible | `https://open.bigmodel.cn/api/paas/v4/chat/completions` | `glm-4.7` |
 | DeepSeek | OpenAI-compatible | `https://api.deepseek.com/chat/completions` | `deepseek-chat` |
 | OpenAI | Chat Completions | `https://api.openai.com/v1/chat/completions` | `gpt-4.1-mini` |
 | Anthropic | Messages API | `https://api.anthropic.com/v1/messages` | `claude-sonnet-4-5` |
@@ -218,9 +249,27 @@ Windows 使用系统 WebView2 Runtime；Linux 的 CEF 运行库会随构建 bund
 | Qwen | OpenAI-compatible | `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` | `qwen-plus` |
 | 自定义 | OpenAI-compatible | 用户填写 | 用户填写 |
 
-> 默认的智谱调用使用 [rustglm 1.0.0](https://crates.io/crates/rustglm/1.0.0) 的 Rust SDK 仓库
+> 智谱不是第二套传输层：它的端点说 OpenAI chat-completions 协议，因此与其它供应商共用同一条 `transport::post_stream` + SSE 状态机，只是 `api_url`、`api_key` 和模型 ID 不同
 
-智谱请求会转换为 RustGLM 的 `GlmChatCompletionRequest`，并使用 SDK 的流接口、HTTP 配置与重试策略。`SdkError` 会按 HTTP、Transport、Timeout、Configuration、Validation、Stream、Decode、Unsupported、Agent 和 Tool 分类映射；Decode 不向界面暴露原始响应体，Unsupported/Agent/Tool 作为不可重试的校验错误处理，不会误触发流重试。
+`rustglm` 1.1.0 仍然是依赖，但不是 HTTP 客户端——它的客户端用 `TlsSettings::with_system_roots()` 取信任锚，只认 Linux 发行版的证书布局，在 Android 上必然握手失败。它真正承担的是只有它知道的那些东西：
+
+- `ModelCapabilities::of(model)` 决定模型是否会推理、以及 `thinking.type: "disabled"` 对它是合法参数还是 400。`glm-4.7` 与 `glm-4.7-flash` 永远思考、拒绝该字段，所以应用直接不发，而不是硬塞；旧的手写表在这点上就是错的，还额外发明了厂商类型里根本不存在的 `budget_tokens`。
+- `Thinking` 负责生成精确的 `thinking` 对象，由 crate 序列化。
+- `ChatCompletionChunk` 负责解码流式分片，包括 `content` 以数组分片而非字符串返回的情况。
+
+业务错误码仍然从响应体分类，因为智谱把配额与并发问题放在 `error.code` 里而不是状态行：
+
+| 响应 | Talk2U 错误 | 可重试 |
+| --- | --- | --- |
+| `error.code` 1302 / 1303 / 1305（并发、频率、过载） | 限流 | 是，带退避 |
+| `error.code` 1001–1004、1110–1112、1120–1121 | 鉴权 | 否 |
+| `error.code` 1113、1304、1308、1310（余额、日/周/月额度） | 智谱业务错误 | 否 |
+| 无 code 的 HTTP 401/403 | 鉴权 | 否 |
+| 无 code 的 HTTP 429 | 限流 | 是 |
+| 无 code 的 HTTP 5xx | API 错误 | 是 |
+| 非 JSON 响应体 | API 错误，body 截断到 1000 字符 | 按状态码 |
+
+流内以 JSON `error` 对象结尾、或 `finish_reason` 为 `sensitive` 的响应，会作为流错误暴露，而不是静默返回空回复。
 
 第三方平台会更新模型名。遇到“model not found”时，以对应平台控制台当前显示的模型 ID 为准，直接在设置中覆盖默认值，不需要改代码。
 
@@ -495,12 +544,29 @@ MOSS QNN/ORT 合成
 支持的 cue：
 
 ```text
-neutral, greeting, wave, hug, nod, happy, sad, angry, shy, surprise
+neutral, calm, greeting, wave, hug, nod, listening,
+happy, happySoft, excited, sad, sadSoft, sigh,
+angry, angrySoft, shy, shySoft, surprise, surpriseSoft,
+thinking, thinkingSoft, talking, talkingSoft, emphasis, dramatic
 ```
 
-应用会按 MOSS WAV 的播放进度映射到当前文本位置，触发明确动作词和常见情绪词。只有配置存在，或模型本身有可验证的同名 motion/expression，才播放对应资源。
+应用会按 MOSS WAV 的播放进度映射到当前文本位置，触发明确动作词、常见情绪词和 emoji 情绪。同一情绪在一次长回复中会轮换到等价的次级表演（例如 `happy` → `happySoft` → `excited`），避免每句话都重复同一个动作。模型没有定义某个变体时，Kotlin 层会回退到基础 cue；导入模型若完全没有 `talk2u.avatar.json`，只为 `neutral/talking/nod/listening` 这类结构性状态生成保守映射，不会把任意动作伪装成情绪。
 
 Mao 的项目配置根据 CDI3 参数名和 motion 曲线做了显式映射：`exp_02/04/05/06/08` 分别用于开心、惊讶、难过、害羞和生气；`mtn_02` 用于点头，右臂运动明显的 `mtn_04` 用于招手/问候。这些是 Talk2U 的项目映射，不是模型作者提供的语义元数据，发布前仍应在目标设备逐项观看验收。三个 `special_*` 魔法动作没有被自动解释为情绪。
+
+Native renderer 还会在标准参数存在时叠加一层轻量次级动态：缓慢的视线漂移、头部微摆，以及说话时随口腔能量变化的身体起伏。它们只使用 `ParamAngleX/Y/Z`、`ParamBodyAngleX/Z`、`ParamEyeBallX/Y`，模型未导出对应参数时自动跳过，因此不会破坏第三方模型的骨架。
+
+### 语音文本净化与情绪
+
+朗读前，回复会经过确定性文本净化，而不是直接把 Markdown 送进声码器：
+
+- 移除 `<think>` / `<analysis>` 等推理块、围栏代码块、行内代码、URL、邮箱、HTML 和 emoji 短代码。
+- 移除 Markdown 标题、列表符号、引用符号、表格分隔线、强调符号；保留链接文字。
+- emoji 不朗读，但会转成停顿或情绪标记并参与主导情绪判断；纯 emoji 回复直接跳过朗读。
+- 连续空行压缩为句号停顿，不把换行符送进 MOSS；省略号和重复标点会归一到自然停顿。
+- `（哈哈大笑）`、`*挥手*` 等舞台指示静音，但保留时间偏移供 Live2D 使用；解释性括号（如 `NNAPI（神经网络 API）`）仍然朗读。
+
+主导情绪会决定整段回复的第一帧表情，随后再由逐句 cue 接管。MOSS-TTS-Nano 的公开 JNI 只接受文本与音色，没有独立 emotion 参数，因此语音情绪通过两条可靠路径实现：保留模型写出的情绪标点，以及把 emoji 映射为 `，`、`……`、`！`、`？` 这类可被声码器正确处理的停顿；不会伪造模型不支持的 SSML 或情绪权重。
 
 ### Live2D 防闪退措施
 
@@ -530,6 +596,43 @@ Mao 的项目配置根据 CDI3 参数名和 motion 曲线做了显式映射：`e
 设置页的文件夹按钮用于导入准备好的 `moss-qnn-v81` 目录。目录必须包含 `moss-qnn-deployment.json`、MOSS TTS/codec 元数据、tokenizer、共享权重和 `.qnn.onnx` 图。导入器拒绝目录穿越、版本不匹配、错误 SoC/HTP 架构、缺失文件、大小或 SHA-256 不匹配。
 
 成功导入后可选择 MOSS 内置中英文音色并试听。系统 TTS 不再作为后备路径；QNN 初始化或合成失败会直接显示错误。
+
+### 连续对话与打断
+
+连续通话只在 Android 上可用，要求同一设备同时具备可用的 SenseVoice 与 MOSS，并且通话逻辑集中在 `CallSession` 状态机里（idle / listening / thinking / speaking / halted），不再散落在页面布尔量中。
+
+**回声消除是真实能力，不是声明。** 采集走独立通道 `FullDuplexAudioCapture`：`AudioRecord` + `VOICE_COMMUNICATION` 源，把平台 `AcousticEchoCanceler` 附着到真实 audio session，并回读 `enabled` 结果；`NoiseSuppressor`、`AutomaticGainControl` 同样逐个核实。只有确认拿到回声消除，才启用全双工：
+
+| 平台测量结果 | 运行模式 | 播放期间麦克风 |
+| --- | --- | --- |
+| AEC 已附着且 `enabled == true` | 全双工 | 保持开启，可被语音打断 |
+| AEC 不可用或被拒 | 半双工 | 关闭，播完再开 |
+
+界面状态栏会显示当前是哪种模式，避免把“设备不支持”误判成“打断失灵”。
+
+全双工的判定不是简单阈值，而是**以自身播放为参考信号**的双讲检测（`ReferenceAnchoredEchoGate`）：合成音频的 20 ms 振幅包络就是已知参考，用 180 ms 峰值保持消除设备相关的 20–120 ms 延迟影响，得到残差回声预测 `E = λ·R`，只有观测能量连续 140 ms 超过 `max(噪声底×3.2, 1.6E + 0.012)` 才判定用户在说话。硬件 AEC 生效时 λ = 0.18，否则 0.55。参数与推导写在 [docs/reference_anchored_turn_taking.tex](docs/reference_anchored_turn_taking.tex)。
+
+能量判定回答“什么时候让路”，不回答“这段转写是不是用户说的”。因此还有第二道闸：`SelfEchoTranscriptFilter` 用字符二元组 Dice 系数比对最近 8 秒内真正播放过的文本，相似度 ≥ 0.6 或长度 ≥ 8 的子串直接丢弃，短于 6 个有效字符不参与判定，避免把用户一句“好的”误杀。
+
+打断路径：
+
+1. 直接开口：能量双讲检测触发，立即停播并回到监听，转写随后进入正常回合。
+2. 点按 Live2D 或麦克风：停止播放与生成，通话模式下手动收回话轮。
+3. 输入框发送文字：停播并标记“等待回复”，不会在生成期间误开麦克风。
+
+状态机还有两个针对全双工的守卫：派发话轮后 900 ms 内忽略能量打断（否则上一句的录音尾巴会取消它刚触发的回复）；`thinking` 阶段参考信号为零，任何持续人声都判定为真打断，因此生成过程中也能被叫停。若 120 秒内没有任何回合推进，自动收回话轮。
+
+### 重新生成语义
+
+“重新生成”不是把同一 prompt 再发一次。Rust 侧会：
+
+- 从上下文中排除被拒绝的旧回复，避免模型顺着旧答案续写或改写。
+- 把旧回复的开头、结尾、段落数和平均句长写入显式的反重复指令。
+- 追加一个基于时间轮换的创作方向（换切入点、更克制、更口语、先动作后展开等）。
+- 使用 `temperature=0.95`、`top_p=0.95` 重新采样。
+- 成功后原位替换旧消息并保留消息 ID；失败或取消时旧回复保持不变，不会出现“回答被删掉但新回答没来”的空窗。
+
+如果用户重新生成的是更早的回复，UI 会先回滚到该消息，再由 Rust 追加新回复；这条路径会丢失“旧回复文本”作为反重复参考，但仍保留显式的新方向指令与更高采样温度。
 
 ## 角色、详细知识和长期对话
 

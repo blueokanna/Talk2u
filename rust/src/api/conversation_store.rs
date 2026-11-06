@@ -28,30 +28,61 @@ impl ConversationStore {
     }
 
     fn conversation_path(&self, id: &str) -> Result<PathBuf, ChatError> {
-        Ok(self.conversations_dir()?.join(format!("{}.msgpack", id)))
+        super::storage_path::validate_storage_id(id)?;
+        Ok(self.conversations_dir()?.join(format!("{}.t2ub", id)))
     }
 
-    fn migrate_json_if_needed(&self, id: &str) -> Result<(), ChatError> {
+    /// Reads a conversation, migrating legacy encodings in place.
+    ///
+    /// New writes always use the rustbinary envelope. Files from earlier
+    /// builds (`.msgpack`, and the oldest `.json`) are still readable and are
+    /// rewritten on first touch, so an upgrade never strands a conversation.
+    fn read_conversation(&self, id: &str) -> Result<Conversation, ChatError> {
+        super::storage_path::validate_storage_id(id)?;
         let dir = self.conversations_dir()?;
-        let json_path = dir.join(format!("{}.json", id));
-        let msgpack_path = dir.join(format!("{}.msgpack", id));
-
-        if json_path.exists() && !msgpack_path.exists() {
-            let json = fs::read_to_string(&json_path).map_err(|e| ChatError::StorageError {
-                message: format!("Failed to read json for migration: {}", e),
+        let binary = dir.join(format!("{id}.t2ub"));
+        if binary.exists() {
+            let bytes = fs::read(&binary).map_err(|error| ChatError::StorageError {
+                message: format!("Failed to read conversation file '{id}': {error}"),
             })?;
-            let conv: Conversation =
-                serde_json::from_str(&json).map_err(|e| ChatError::StorageError {
-                    message: format!("Failed to parse json for migration: {}", e),
-                })?;
-            self.save_conversation(&conv)?;
-            let _ = fs::remove_file(&json_path);
+            return super::storage_codec::decode(&bytes);
         }
-        Ok(())
+
+        let msgpack = dir.join(format!("{id}.msgpack"));
+        if msgpack.exists() {
+            let bytes = fs::read(&msgpack).map_err(|error| ChatError::StorageError {
+                message: format!("Failed to read legacy conversation '{id}': {error}"),
+            })?;
+            let conversation: Conversation =
+                rmp_serde::from_slice(&bytes).map_err(|error| ChatError::StorageError {
+                    message: format!("Failed to decode legacy conversation '{id}': {error}"),
+                })?;
+            self.save_conversation(&conversation)?;
+            let _ = fs::remove_file(&msgpack);
+            return Ok(conversation);
+        }
+
+        let json = dir.join(format!("{id}.json"));
+        if json.exists() {
+            let text = fs::read_to_string(&json).map_err(|error| ChatError::StorageError {
+                message: format!("Failed to read json conversation '{id}': {error}"),
+            })?;
+            let conversation: Conversation =
+                serde_json::from_str(&text).map_err(|error| ChatError::StorageError {
+                    message: format!("Failed to parse json conversation '{id}': {error}"),
+                })?;
+            self.save_conversation(&conversation)?;
+            let _ = fs::remove_file(&json);
+            return Ok(conversation);
+        }
+
+        Err(ChatError::StorageError {
+            message: format!("Conversation '{id}' does not exist"),
+        })
     }
 
     pub fn create_conversation(&self) -> Conversation {
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = crate::api::clock::now_millis();
         Conversation {
             id: uuid::Uuid::new_v4().to_string(),
             title: String::new(),
@@ -67,24 +98,20 @@ impl ConversationStore {
 
     pub fn save_conversation(&self, conversation: &Conversation) -> Result<(), ChatError> {
         let path = self.conversation_path(&conversation.id)?;
-        let data = rmp_serde::to_vec(conversation).map_err(|e| ChatError::StorageError {
-            message: format!("Failed to serialize conversation: {}", e),
+        let data = super::storage_codec::encode(conversation)?;
+        // Write-and-rename: a crash mid-write leaves the previous file intact
+        // instead of a truncated conversation.
+        let staging = path.with_extension("t2ub.tmp");
+        fs::write(&staging, data).map_err(|error| ChatError::StorageError {
+            message: format!("Failed to write conversation file: {error}"),
         })?;
-        fs::write(&path, data).map_err(|e| ChatError::StorageError {
-            message: format!("Failed to write conversation file: {}", e),
+        fs::rename(&staging, &path).map_err(|error| ChatError::StorageError {
+            message: format!("Failed to commit conversation file: {error}"),
         })
     }
 
     pub fn load_conversation(&self, id: &str) -> Result<Conversation, ChatError> {
-        let _ = self.migrate_json_if_needed(id);
-
-        let path = self.conversation_path(id)?;
-        let data = fs::read(&path).map_err(|e| ChatError::StorageError {
-            message: format!("Failed to read conversation file '{}': {}", id, e),
-        })?;
-        rmp_serde::from_slice(&data).map_err(|e| ChatError::StorageError {
-            message: format!("Failed to deserialize conversation '{}': {}", id, e),
-        })
+        self.read_conversation(id)
     }
 
     pub fn list_conversations(&self) -> Vec<ConversationSummary> {
@@ -105,6 +132,10 @@ impl ConversationStore {
                 let ext = path.extension().and_then(|e| e.to_str())?;
 
                 let conv: Conversation = match ext {
+                    "t2ub" => {
+                        let data = fs::read(&path).ok()?;
+                        super::storage_codec::decode(&data).ok()?
+                    }
                     "msgpack" => {
                         let data = fs::read(&path).ok()?;
                         rmp_serde::from_slice(&data).ok()?
@@ -139,8 +170,13 @@ impl ConversationStore {
     pub fn delete_conversation(&self, id: &str) -> Result<(), ChatError> {
         let path = self.conversation_path(id)?;
         let dir = self.conversations_dir()?;
-        let json_path = dir.join(format!("{}.json", id));
-        let _ = fs::remove_file(&json_path);
+        for name in [
+            format!("{id}.json"),
+            format!("{id}.msgpack"),
+            format!("{id}.t2ub.tmp"),
+        ] {
+            let _ = fs::remove_file(dir.join(name));
+        }
 
         if path.exists() {
             fs::remove_file(&path).map_err(|e| ChatError::StorageError {
@@ -160,7 +196,7 @@ impl ConversationStore {
         }
 
         conv.messages.push(message);
-        conv.updated_at = chrono::Utc::now().timestamp_millis();
+        conv.updated_at = crate::api::clock::now_millis();
         self.save_conversation(&conv)
     }
 
@@ -173,7 +209,7 @@ impl ConversationStore {
                 message: format!("Message '{}' not found", message_id),
             });
         }
-        conv.updated_at = chrono::Utc::now().timestamp_millis();
+        conv.updated_at = crate::api::clock::now_millis();
         self.save_conversation(&conv)
     }
 
@@ -190,7 +226,7 @@ impl ConversationStore {
     ) -> Result<(), ChatError> {
         let mut conv = self.load_conversation(conversation_id)?;
         conv.memory_summaries = summaries.to_vec();
-        conv.updated_at = chrono::Utc::now().timestamp_millis();
+        conv.updated_at = crate::api::clock::now_millis();
         self.save_conversation(&conv)
     }
 
@@ -205,8 +241,8 @@ impl ConversationStore {
         match found {
             Some(msg) => {
                 msg.content = new_content.to_string();
-                msg.timestamp = chrono::Utc::now().timestamp_millis();
-                conv.updated_at = chrono::Utc::now().timestamp_millis();
+                msg.timestamp = crate::api::clock::now_millis();
+                conv.updated_at = crate::api::clock::now_millis();
                 self.save_conversation(&conv)
             }
             None => Err(ChatError::StorageError {
@@ -230,7 +266,7 @@ impl ConversationStore {
             })?;
         let deleted_ids: Vec<String> = conv.messages[pos..].iter().map(|m| m.id.clone()).collect();
         conv.messages.truncate(pos);
-        conv.updated_at = chrono::Utc::now().timestamp_millis();
+        conv.updated_at = crate::api::clock::now_millis();
         self.save_conversation(&conv)?;
         Ok(deleted_ids)
     }
@@ -242,7 +278,7 @@ impl ConversationStore {
     ) -> Result<(), ChatError> {
         let mut conv = self.load_conversation(conversation_id)?;
         conv.dialogue_style = style;
-        conv.updated_at = chrono::Utc::now().timestamp_millis();
+        conv.updated_at = crate::api::clock::now_millis();
         self.save_conversation(&conv)
     }
 

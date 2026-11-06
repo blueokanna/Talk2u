@@ -76,12 +76,14 @@ impl KnowledgeStore {
     }
 
     fn facts_path(&self, conversation_id: &str) -> Result<PathBuf, ChatError> {
+        super::storage_path::validate_storage_id(conversation_id)?;
         Ok(self
             .knowledge_dir()?
             .join(format!("{}_facts.json", conversation_id)))
     }
 
     fn index_path(&self, conversation_id: &str) -> Result<PathBuf, ChatError> {
+        super::storage_path::validate_storage_id(conversation_id)?;
         Ok(self
             .knowledge_dir()?
             .join(format!("{}_index.json", conversation_id)))
@@ -461,7 +463,7 @@ impl KnowledgeStore {
     }
 
     fn parse_fact_array(arr: &[serde_json::Value], turn: u32) -> Vec<Fact> {
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = crate::api::clock::now_millis();
         arr.iter()
             .filter_map(|item| {
                 let content = item
@@ -684,7 +686,7 @@ impl KnowledgeStore {
         for fact in &mut facts {
             if fact_ids.contains(&fact.id) {
                 fact.hit_count += 1;
-                fact.last_confirmed_at = chrono::Utc::now().timestamp_millis();
+                fact.last_confirmed_at = crate::api::clock::now_millis();
             }
         }
         self.save_facts(conversation_id, &facts)

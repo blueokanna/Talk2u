@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use reqwest::header::AUTHORIZATION;
 use serde::{Deserialize, Serialize};
 
 use crate::api::chat_engine::ChatEngine;
@@ -11,6 +10,7 @@ use crate::api::config_manager::ConfigManager;
 use crate::api::conversation_store::ConversationStore;
 use crate::api::data_models::{ChatStreamEvent, Message, MessageRole, MessageType};
 use crate::api::provider::ProviderRuntime;
+use courierust::courierust_http::method::Method;
 
 const DISCORD_API: &str = "https://discord.com/api/v10";
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 3;
@@ -56,7 +56,7 @@ pub struct DiscordBridge {
     system_prompt: Option<String>,
     enable_thinking: Option<bool>,
     poll_interval: Duration,
-    client: reqwest::Client,
+    http_timeout: Duration,
 }
 
 impl DiscordBridge {
@@ -90,13 +90,6 @@ impl DiscordBridge {
                 "0" | "false" | "no" => Some(false),
                 _ => None,
             });
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(20))
-            .timeout(Duration::from_secs(60))
-            .user_agent("Talk2U-Discord-Bridge/1.0")
-            .build()
-            .map_err(|error| error.to_string())?;
-
         Ok(Self {
             data_path: data_path.into(),
             channel_id,
@@ -107,7 +100,7 @@ impl DiscordBridge {
             system_prompt: std::env::var("TALK2U_DISCORD_SYSTEM_PROMPT").ok(),
             enable_thinking,
             poll_interval: Duration::from_secs(poll_interval_secs),
-            client,
+            http_timeout: Duration::from_secs(60),
         })
     }
 
@@ -115,13 +108,18 @@ impl DiscordBridge {
         fs::create_dir_all(&self.data_path).map_err(|error| error.to_string())?;
         let mut state = self.load_or_create_state().await?;
         println!(
-            "Discord bridge ready: channel={}, conversation={}",
-            self.channel_id, state.conversation_id
+            "[{}] Discord bridge ready: channel={}, conversation={}",
+            crate::api::clock::format_utc(crate::api::clock::now_millis()),
+            self.channel_id,
+            state.conversation_id
         );
 
         loop {
             if let Err(error) = self.poll_once(&mut state).await {
-                eprintln!("Discord bridge poll failed: {error}");
+                eprintln!(
+                    "[{}] Discord bridge poll failed: {error}",
+                    crate::api::clock::format_utc(crate::api::clock::now_millis())
+                );
             }
             tokio::time::sleep(self.poll_interval).await;
         }
@@ -272,18 +270,44 @@ impl DiscordBridge {
         after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<DiscordMessage>, String> {
-        let url = format!("{DISCORD_API}/channels/{}/messages", self.channel_id);
-        let limit = limit.to_string();
-        let mut request = self
-            .client
-            .get(url)
-            .header(AUTHORIZATION, format!("Bot {}", self.token))
-            .query(&[("limit", limit.as_str())]);
-        if let Some(after) = after {
-            request = request.query(&[("after", after)]);
+        let mut query = format!("?limit={limit}");
+        if let Some(after) = after.filter(|value| is_snowflake_cursor(value)) {
+            query.push_str("&after=");
+            query.push_str(after);
         }
-        let response = request.send().await.map_err(|error| error.to_string())?;
-        parse_discord_response(response).await
+        let url = format!("{DISCORD_API}/channels/{}/messages{query}", self.channel_id);
+        let (status, body) = self.request(Method::GET, url, None).await?;
+        if !(200..300).contains(&status) {
+            return Err(format!("Discord API {status}: {}", truncate(&body, 500)));
+        }
+        serde_json::from_str::<Vec<DiscordMessage>>(&body).map_err(|error| error.to_string())
+    }
+
+    /// One buffered call through the shared transport. The transport blocks, so
+    /// it is pushed onto the blocking pool instead of stalling a worker thread.
+    async fn request(
+        &self,
+        method: Method,
+        url: String,
+        body: Option<serde_json::Value>,
+    ) -> Result<(u16, String), String> {
+        let headers = crate::api::transport::headers_from_pairs([
+            ("authorization", format!("Bot {}", self.token)),
+            ("user-agent", "Talk2U-Discord-Bridge/1.0".to_string()),
+            ("content-type", "application/json".to_string()),
+        ])
+        .map_err(|error| error.to_string())?;
+        let payload = match body {
+            Some(value) => serde_json::to_vec(&value).map_err(|error| error.to_string())?,
+            None => Vec::new(),
+        };
+        let timeout = self.http_timeout;
+        tokio::task::spawn_blocking(move || {
+            crate::api::transport::send_buffered(method, &url, headers, payload, timeout)
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
     }
 
     async fn flush_pending_reply(&self, state: &mut BridgeState) -> Result<(), String> {
@@ -295,19 +319,18 @@ impl DiscordBridge {
             }
             let content = pending.chunks[pending.next_chunk].clone();
             let url = format!("{DISCORD_API}/channels/{}/messages", self.channel_id);
-            let response = self
-                .client
-                .post(url)
-                .header(AUTHORIZATION, format!("Bot {}", self.token))
-                .json(&serde_json::json!({
-                    "content": content,
-                    "allowed_mentions": {"parse": []}
-                }))
-                .send()
-                .await
-                .map_err(|error| error.to_string())?;
-            if !response.status().is_success() {
-                return Err(discord_http_error(response).await);
+            let (status, body) = self
+                .request(
+                    Method::POST,
+                    url,
+                    Some(serde_json::json!({
+                        "content": content,
+                        "allowed_mentions": {"parse": []}
+                    })),
+                )
+                .await?;
+            if !(200..300).contains(&status) {
+                return Err(format!("Discord API {status}: {}", truncate(&body, 500)));
             }
             pending.next_chunk += 1;
             self.save_state(state)?;
@@ -330,7 +353,7 @@ impl DiscordBridge {
                 content: prompt.trim().to_string(),
                 thinking_content: None,
                 model: "system".to_string(),
-                timestamp: chrono::Utc::now().timestamp_millis(),
+                timestamp: crate::api::clock::now_millis(),
                 message_type: MessageType::Say,
             });
         }
@@ -358,25 +381,12 @@ impl DiscordBridge {
     }
 }
 
-async fn parse_discord_response(
-    response: reqwest::Response,
-) -> Result<Vec<DiscordMessage>, String> {
-    if !response.status().is_success() {
-        return Err(discord_http_error(response).await);
-    }
-    response
-        .json::<Vec<DiscordMessage>>()
-        .await
-        .map_err(|error| error.to_string())
+fn is_snowflake_cursor(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 20 && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-async fn discord_http_error(response: reqwest::Response) -> String {
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    format!(
-        "Discord API {status}: {}",
-        body.chars().take(500).collect::<String>()
-    )
+fn truncate(value: &str, limit: usize) -> String {
+    value.chars().take(limit).collect()
 }
 
 fn snowflake_value(value: &str) -> u128 {
@@ -385,7 +395,7 @@ fn snowflake_value(value: &str) -> u128 {
 
 fn current_discord_snowflake() -> String {
     const DISCORD_EPOCH_MILLIS: i64 = 1_420_070_400_000;
-    let elapsed = (chrono::Utc::now().timestamp_millis() - DISCORD_EPOCH_MILLIS).max(0);
+    let elapsed = (crate::api::clock::now_millis() - DISCORD_EPOCH_MILLIS).max(0);
     ((elapsed as u128) << 22).to_string()
 }
 
@@ -426,5 +436,14 @@ mod tests {
     #[test]
     fn generated_cursor_is_a_valid_positive_snowflake() {
         assert!(snowflake_value(&current_discord_snowflake()) > 0);
+    }
+
+    #[test]
+    fn only_numeric_cursors_reach_the_query_string() {
+        assert!(is_snowflake_cursor("1183573619123380224"));
+        assert!(!is_snowflake_cursor("1183573619123380224&limit=100"));
+        assert!(!is_snowflake_cursor(""));
+        assert!(!is_snowflake_cursor("../../etc/passwd"));
+        assert!(!is_snowflake_cursor("123456789012345678901"));
     }
 }

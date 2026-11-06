@@ -11,21 +11,51 @@ This document describes the implemented behavior and its verification boundary. 
 
 | Capability | Status | Implementation |
 | --- | --- | --- |
-| Zhipu GLM | Implemented | `rustglm 1.0.0`, Zhipu JWT authentication, streaming chat |
+| Zhipu GLM | Implemented | OpenAI-compatible wire over the shared `courierust` transport, same SSE parser as every other provider |
 | DeepSeek, OpenAI, Kimi, Qwen | Implemented | OpenAI-compatible streaming adapters |
 | Anthropic | Implemented | Messages API headers, request conversion, and Anthropic SSE |
-| Local memory and knowledge | Implemented | Rust local storage, recent context, summaries, and fact retrieval |
-| Android local LLM | Implemented | `Qwen/Qwen3-4B-Instruct-2507` Q4_K_M through llama.cpp, with 36 transformer blocks and the output matrix on Adreno Vulkan |
+| Local memory and knowledge | Implemented | Rust local storage, recent context, summaries, and fact retrieval; durable system blocks are kept within a token budget |
+| Android local LLM | Implemented | `Qwen/Qwen3-4B-Instruct-2507` Q4_K_M through llama.cpp; the 4096-token window is budgeted by tokens and the output cap is 1024 tokens |
 | Offline STT | Implemented | sherpa-onnx SenseVoice 2024-07-17 INT8 QNN context on SM8850, preserving ASR/LID/SER/AED results |
-| Continuous voice call | Conditional on Android | Final STT results are sent automatically; completed replies are spoken and listening resumes |
-| Android offline TTS | Conditional | MOSS prefill/decode/codec on QNN HTP and sampler on ORT CPU after importing a validated SM8850/v81 package; no system TTS fallback |
+| Continuous voice call | Conditional on Android | `CallSession` state machine; full duplex when the platform confirms hardware AEC, half duplex otherwise; reference-anchored double-talk detection plus lexical self-echo rejection; voice or tap interruption |
+| Regenerate | Implemented | The rejected reply is excluded from the new prompt, an explicit anti-repetition directive is added, sampling uses temperature/top_p 0.95, and the old message is replaced in place |
+| Idle resource use | Implemented | No 1 Hz telemetry polling, no always-on 30 ms stream timer, and no automatic speech synthesis outside call mode |
+| Android offline TTS | Conditional | MOSS prefill/decode/codec on QNN HTP and sampler on ORT CPU; no system TTS fallback; emoji, Markdown, code, URLs and blank lines are filtered before synthesis |
 | Windows/Linux offline TTS | Not implemented | The current desktop speech path only provides SenseVoice STT |
 | Live2D | Conditional | Cubism SDK for Native 5 R.5 with C++/OpenGL ES on Android; WebView2 on Windows and CEF on Linux |
-| Live2D semantic cues | Implemented, model-dependent | Context and silent stage directions select configured motion or expression mappings |
+| Live2D semantic cues | Implemented, model-dependent | Context, emoji and silent stage directions select configured motion or expression mappings; equivalent performances rotate within a long reply |
 | Android Live2D GPU rendering | Implemented | Native C++ Cubism OpenGL ES renderer; software GL implementations are rejected and ready follows the first valid frame |
 | Android NNAPI diagnostics | Implemented | Device name, version, type, and feature level; CPU devices are excluded from accelerator results |
 
 An implemented online provider still requires a valid API key, account quota, reachable endpoint, and a model ID enabled for that account.
+
+## Research Contributions
+
+The AHCA paper in `docs/emotion_aware_rag_paper.tex` covers the context layer (identity anchoring, tiered memory, W-RRF retrieval, emotional decay, diversity regulation). On top of it this repository implements four systems-level mechanisms that are code paths, not diagrams:
+
+1. **Reference-anchored turn taking (RATT).** The agent synthesises its own audio, so it already holds the echo reference. A 20 ms amplitude envelope plus a 180 ms peak-hold turns blind echo-path identification into known-reference detection and removes the device-delay dependency; the measured `enabled` state of the platform `AcousticEchoCanceler` gates full duplex versus half duplex. See `turn_taking.dart`, `call_session.dart`, `FullDuplexAudioCapture.kt`, and [docs/reference_anchored_turn_taking.tex](docs/reference_anchored_turn_taking.tex).
+2. **Regeneration without self-priming.** The rejected reply is excluded from the new prompt, its opening/ending/shape become an explicit anti-repetition constraint, temperature and top-p are raised together, and the message id is preserved on success. The point is that regeneration is not resampling: it is a forced divergence from a specific prior output. See `chat_engine.rs::regenerate_response`.
+3. **Non-verbal affect transduction.** MOSS exposes neither an emotion parameter nor SSML. Emoji and Markdown structure are mapped to pauses and punctuation the vocoder handles correctly, and the same symbols decide the sustained expression for the whole reply; an emoji-only reply skips synthesis. See `speech_text_normalizer.dart`.
+4. **Playback-anchored performance timeline.** The generated WAV envelope is the time base; silent stage directions, emotion words and emoji offsets drive frame-level Live2D cues, with equivalent performances rotating inside an emotion family. See `offline_speech_service.dart` and `live2d_native_renderer.cpp`.
+
+No number is claimed without a corpus: barge-in latency, false-interruption rate, self-echo turn rate and over-suppression rate are specified as a protocol with ablations in the paper section, and the repository deliberately does not hard-code results.
+
+## Rust dependency boundaries
+
+The Rust core keeps one crate per job. Every dependency owns exactly one concern, and no two of them implement the same concern:
+
+| crate | Role | Where |
+| --- | --- | --- |
+| `courierust` | The only outbound HTTP/TLS implementation: incremental SSE parsing, retry without replay, Android trust-anchor loading | `rust/src/api/transport.rs` |
+| `rustglm` | The Zhipu contract only: model capability registry, `thinking` and streamed-chunk wire types. Its HTTP client is deliberately unused — see the Zhipu section | `rust/src/api/model_policy.rs` |
+| `rustbinary` | Conversation envelope on disk (`T2UB` magic + version + bounded decode), read-only migration of the old format | `rust/src/api/storage_codec.rs` |
+| `tzcraft` | The single time source: 128-bit nanosecond `Ticks`, floor semantics, identical on every platform | `rust/src/api/clock.rs` |
+| `recurse-x` | Independent recursive DNS, cross-checked against the device resolver to separate hijack from path failure | `rust/src/api/network_diagnosis.rs` |
+| `nextjson` | Serialisation derives for persisted structs | `rust/src/api/data_models.rs` |
+
+`reqwest` and `rustls` do not appear anywhere in the dependency tree. Every provider — Zhipu, DeepSeek, OpenAI, Kimi, Qwen, custom endpoints — goes out through the same `courierust` client, which on Android reads trust anchors from `/apex/com.android.conscrypt/cacerts` and `/system/etc/security/cacerts` because the crate's own `load_system()` only knows the Linux bundle layout. That loader is why the app trusts exactly what the device trusts, including user-installed CAs.
+
+See [docs/rust_stack.md](docs/rust_stack.md) for the design rationale, migration semantics, and verification commands.
 
 ## Architecture
 
@@ -77,23 +107,29 @@ The Android package is currently restricted to `arm64-v8a`. Every enabled ABI mu
 
 Gradle and CMake consume the Framework sources, OpenGL ES shaders, headers, and ARM64 Core static library directly from the external SDK. Do not commit `Live2DCubismCore`, copied Core headers, or the Cubism SDK to a public repository. The local APK statically links Core into `libtalk2u_live2d.so`; binary distribution remains subject to the Live2D license accepted by the builder.
 
-## Zhipu and RustGLM
+## Zhipu
 
-The Zhipu provider is implemented with the pinned `rustglm = 1.0.0` crate rather than a parallel handwritten Zhipu transport. Talk2U converts its provider-neutral request into `GlmChatCompletionRequest`, configures the SDK HTTP client and retry policy, then consumes the SDK stream.
+Zhipu is not a second transport. Its endpoint speaks the OpenAI chat-completions wire, so it goes through the same `transport::post_stream` + SSE state machine as every other provider; only `api_url`, `api_key` and the model id differ. There is one TLS trust store, one retry policy and one parser to reason about.
 
-`SdkError` handling preserves meaningful categories:
+`rustglm` 1.1.0 is still a dependency, but not as the HTTP client — its client resolves trust anchors with `TlsSettings::with_system_roots()`, which only knows the Linux bundle layout and therefore cannot verify anything on Android. What it is used for is the part only it knows:
 
-| RustGLM error | Talk2U error |
-| --- | --- |
-| HTTP 401/403 | Authentication error |
-| HTTP 429 | Rate-limit error |
-| Other HTTP status | API error |
-| Transport or timeout | Network error |
-| Configuration or validation | Validation error |
-| Stream or decode | Stream error |
-| Unsupported, agent, or tool | Non-retryable validation error |
+* `ModelCapabilities::of(model)` decides whether a model reasons, and whether `thinking.type: "disabled"` is legal for it. `glm-4.7` and `glm-4.7-flash` always reason and answer `400` to that flag, so the app omits the field instead of asserting it — the previous hand-written table got this wrong and also invented a `budget_tokens` key the vendor type does not have.
+* `Thinking` produces the exact `thinking` object, serialised by the crate.
+* `ChatCompletionChunk` decodes streamed deltas, including content delivered as parts rather than a string.
 
-Decode failures do not expose the raw response body in user-facing errors.
+Business codes are classified from the body, since GLM reports quota and concurrency problems in `error.code` rather than in the status line:
+
+| Response | Talk2U error | Retryable |
+| --- | --- | --- |
+| `error.code` 1302 / 1303 / 1305 (concurrency, rate, overload) | Rate limit | Yes, with backoff |
+| `error.code` 1001–1004, 1110–1112, 1120–1121 | Authentication | No |
+| `error.code` 1113, 1304, 1308, 1310 (balance, daily/monthly quota) | GLM business error | No |
+| HTTP 401/403 without a code | Authentication | No |
+| HTTP 429 without a code | Rate limit | Yes |
+| HTTP 5xx without a code | API error | Yes |
+| Non-JSON body | API error with the body truncated to 1000 chars | By status |
+
+A stream that ends with a JSON `error` object, or with `finish_reason: "sensitive"`, surfaces as a stream error instead of a silent empty reply.
 
 ## Android Hardware TTS
 
@@ -142,9 +178,42 @@ The call button enables an Android turn loop:
 listen -> final recognition -> send -> generate -> speak -> resume listening
 ```
 
-Android recognition always uses the installed SenseVoice INT8 model through sherpa-onnx. Ending the call or disposing the page stops the app recorder and MOSS playback.
+Android recognition always uses the installed SenseVoice INT8 model through sherpa-onnx. The turn loop lives in `CallSession` (idle / listening / thinking / speaking / halted) instead of a set of page booleans.
 
-The call requires both an available offline STT and offline TTS on the same device. It is not currently a full-duplex echo-cancelled telephony stack, and the Windows/Linux desktop build cannot start a complete offline call until desktop TTS is implemented.
+**Echo cancellation is measured, not asserted.** Capture runs through `FullDuplexAudioCapture`: `AudioRecord` on the `VOICE_COMMUNICATION` source with the platform `AcousticEchoCanceler` attached to the real audio session id, reading `enabled` back after attachment (`NoiseSuppressor` and `AutomaticGainControl` are verified the same way).
+
+| Platform measurement | Mode | Microphone during playback |
+| --- | --- | --- |
+| AEC attached and `enabled == true` | full duplex | stays open, voice interruption enabled |
+| AEC unavailable or refused | half duplex | closed until playback ends |
+
+The status row states which mode is active, so a device limitation cannot be mistaken for a broken barge-in.
+
+Full duplex does not use a bare energy threshold. It uses the agent's own playback as the reference (`ReferenceAnchoredEchoGate`): the 20 ms amplitude envelope of the synthesised audio is the known reference, a 180 ms peak-hold removes the device-dependent 20–120 ms delay, and the residual is predicted as `E = λR`. A frame counts as near-end speech only after 140 ms of observed energy above `max(noiseFloor × 3.2, 1.6E + 0.012)`; `λ = 0.18` with a verified canceller and `0.55` without. The derivation and full protocol are in [docs/reference_anchored_turn_taking.tex](docs/reference_anchored_turn_taking.tex).
+
+Energy says *when* to yield, not *whether* the transcript is the user's. A second gate (`SelfEchoTranscriptFilter`) compares the transcript against the text actually spoken in the last 8 seconds using a character-bigram Dice coefficient: `≥ 0.6`, or an 8+ character substring, is dropped. Transcripts shorter than six normalised characters are never rejected, so a real "好的" survives.
+
+Interruption paths:
+
+1. Start talking: the double-talk detector stops playback immediately and the transcript becomes the next turn.
+2. Tap the Live2D area or the mic: playback and generation stop; in call mode the turn is handed back.
+3. Type in the composer: playback stops and the turn is marked as awaiting a reply.
+
+Two guards exist because this is now real full duplex: energy-based interruption is ignored for 900 ms after a turn is dispatched (otherwise the tail of the utterance that started the turn cancels the reply it triggered), and in the `thinking` state the reference is zero, so sustained speech is treated as a genuine interrupt and cancels generation. A 120 s idle turn timer returns the floor.
+
+The call requires both offline STT and offline TTS on the same device. The Windows/Linux desktop build cannot start a complete offline call until desktop TTS is implemented.
+
+## Speech Text Normalization
+
+Replies are normalized before synthesis instead of sending Markdown and emoji to the vocoder:
+
+- Reasoning blocks (`<think>`, `<analysis>`), fenced code, inline code, URLs, emails, HTML and emoji shortcodes are removed.
+- Markdown headings, list markers, blockquotes, table rules and emphasis markers are removed; link labels are kept.
+- Emoji are never spoken. They become natural pauses or affect the sustained emotion, and an emoji-only reply is skipped entirely.
+- Blank lines collapse into sentence pauses; newline characters never reach MOSS. Ellipses and repeated punctuation normalize to a single natural pause.
+- Stage directions stay silent but keep their timeline offsets; explanatory parentheses such as `NNAPI (Neural Networks API)` remain spoken.
+
+MOSS-TTS-Nano's public JNI accepts only text and a voice id; it has no separate emotion parameter. Emotional delivery therefore relies on preserving the model's expressive punctuation and mapping emoji to standard pauses (`，`, `……`, `！`, `？`). The dominant emotion also selects the avatar's first expression and is carried through the per-sentence cue timeline; no unsupported SSML or invented emotion weights are used.
 
 ## Silent Stage Directions
 
@@ -156,9 +225,13 @@ Spoken: You said it so well!
 Cue:    happy at spoken offset 0
 ```
 
-Parenthesized or bracketed content is removed only when it contains recognized action or emotion terms. Explanatory text such as `NNAPI (Neural Networks API)` remains spoken. Asterisk actions such as `*wave*` are silent and still produce a semantic cue. Offsets remain compatible with Android UTF-16 TTS range callbacks.
+Parenthesized or bracketed content is removed only when it contains recognized action or emotion terms. Explanatory text such as `NNAPI (Neural Networks API)` remains spoken. Asterisk actions such as `*wave*` are silent and still produce a semantic cue. Offsets follow the cleaned UTF-16 text passed to the avatar.
 
-Actual motion quality depends on the imported model. Talk2U only plays a motion or expression that is explicitly mapped in `talk2u.avatar.json` or can be verified from model metadata. It does not assign semantics to arbitrary numbered motion files.
+### Regeneration semantics
+
+Regeneration is not the same prompt sent twice. The Rust engine excludes the rejected reply from the new context, writes the old opening/ending/paragraph shape into an explicit anti-repetition directive, adds a time-rotated creative direction, and samples at `temperature=0.95` / `top_p=0.95`. On success the previous message is replaced in place and keeps its id; on failure or cancellation the old reply is left untouched.
+
+Actual motion quality depends on the imported model. Talk2U only plays a motion or expression that is explicitly mapped in `talk2u.avatar.json` or can be verified from model metadata. It does not assign semantics to arbitrary numbered motion files. Emotion families rotate through equivalent variants (`happy` → `happySoft` → `excited`) so long replies do not repeat one motion, and the native renderer layers slow gaze drift, head sway and speech-driven body movement on standard Cubism parameters when the model exposes them.
 
 ## Live2D and GPU Rendering
 
@@ -180,7 +253,7 @@ On the verified PLK110/SM8850/API 36 device, Mao rendered on the Adreno 840 and 
 
 Completed automated checks for this change include:
 
-- Rust tests, including RustGLM error mapping
+- Rust tests, including GLM business-code and HTTP status error classification
 - Flutter speech planning and MOSS utility tests
 - Android Kotlin compilation
 - Android C++ external native build

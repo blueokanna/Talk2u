@@ -274,5 +274,7 @@
   "@live2dRuntimeFailed": {"placeholders": {"error": {"type": "String"}}},
   "live2dLoadFailed": "Unable to load Live2D",
   "live2dInvalidStatus": "Live2D returned an invalid status",
+  "callFullDuplex": "Hands-free ? hardware AEC (interrupt anytime)",
+  "callHalfDuplex": "Hands-free ? half duplex (mic paused during playback)",
   "diagnosticsInvalidJson": "Diagnostics result is not a JSON object"
 }

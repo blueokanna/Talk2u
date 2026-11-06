@@ -1,0 +1,220 @@
+% ---------------------------------------------------------------------------
+% Reference-Anchored Turn Taking (RATT)
+%
+% Standalone section intended to be merged into the main AHCA paper:
+%   \input{reference_anchored_turn_taking}
+% Requires only amsmath / amssymb, which the main document already loads.
+% Every claim here maps to code in this repository:
+%   lib/src/services/turn_taking.dart      (gate + lexical self-echo filter)
+%   lib/src/services/call_session.dart     (turn-taking state machine)
+%   android/.../FullDuplexAudioCapture.kt  (VOICE_COMMUNICATION + AEC attach)
+% ---------------------------------------------------------------------------
+
+\section{Reference-Anchored Turn Taking for Spoken Companion Agents}
+\label{sec:ratt}
+
+\subsection{Motivation}
+
+A spoken companion agent differs from a conventional voice assistant in one
+operational respect that turns out to be architecturally useful: it produces
+its own audio. Every synthesised segment is generated locally, so the agent
+holds the exact reference signal that a blind acoustic echo canceller has to
+estimate. Existing pipelines either (i) mute the microphone during playback,
+which forbids interruption and makes the agent feel like a broadcast, or
+(ii) rely on the platform echo canceller alone, which is present on most
+Android devices but whose residual return loss varies by more than 20\,dB
+across hardware.
+
+We exploit (i) being unnecessary: the known reference converts echo
+suppression from \emph{blind system identification} into a
+\emph{known-reference detection} problem, and (ii) being insufficient: the
+hardware canceller removes the linear part of the echo, while a lexical filter
+removes what the recogniser still hallucinates from the residual.
+
+\subsection{Signal Model}
+
+Let $f_s = 16$\,kHz and a frame of $T_f = 20$\,ms, giving $N = 320$ samples per
+frame. At frame index $k$ the synthesiser reports the amplitude envelope
+$a_k \in [0,1]$ of the segment currently being played (the per-frame RMS of the
+generated WAV, normalised). The microphone observes
+
+\begin{equation}
+  x_k \;=\; \underbrace{\lambda\, a_{k-\delta}}_{\text{residual echo}}
+        \;+\; \underbrace{s_k}_{\text{near-end speech}}
+        \;+\; \underbrace{n_k}_{\text{noise}},
+  \label{eq:observation}
+\end{equation}
+
+where $\lambda$ is the residual echo gain left by the echo canceller and
+$\delta$ the bulk delay between playback and capture.
+
+Two properties of $\delta$ matter. It is device dependent
+(typically $20$--$120$\,ms) and it drifts with audio routing changes
+(speaker, headset, Bluetooth). Estimating it online would require
+cross-correlation over a window comparable to the reverberation time, which is
+both expensive and fragile during double talk. Instead we discard the delay
+entirely by replacing $a_{k-\delta}$ with a causal peak-hold of the reference:
+
+\begin{equation}
+  R_k \;=\; \max_{\,j \in [k-W,\,k]} a_j ,
+  \qquad W = \left\lceil \frac{180\,\text{ms}}{T_f} \right\rceil = 9 .
+  \label{eq:peakhold}
+\end{equation}
+
+Because $|a_j| \le 1$ and the envelope is piecewise smooth on the scale of a
+syllable, $R_k$ is a tight upper bound on $a_{k-\delta}$ for every
+$\delta \le W T_f$. The bound costs at most one frame of sensitivity, which is
+irrelevant against the $H=140$\,ms evidence window used below.
+
+\subsection{Decision Rule}
+
+The predicted residual echo and the interruption threshold are
+
+\begin{align}
+  E_k &= \lambda R_k, \label{eq:echo}\\
+  \tau_k &= \max\Big( \max\big(\tau_{\min},\; g\, \hat n_k\big),\;
+             \gamma E_k + m \Big), \label{eq:threshold}
+\end{align}
+
+where $\hat n_k$ is a slow noise-floor estimate updated only when the agent is
+silent, $g = 3.2$, $\tau_{\min} = 0.014$, $\gamma = 1.6$, and
+$m = 0.012$.
+
+Frame $k$ is \emph{voiced-evidence} when $x_k > \tau_k$. A barge-in is declared
+only after voiced evidence has persisted for
+
+\begin{equation}
+  H = 140\,\text{ms} \quad (7\ \text{frames}),
+\end{equation}
+
+which rejects key clicks, door slams and single-syllable noise bursts while
+keeping interruption latency under the ~200\,ms that users perceive as
+simultaneous.
+
+The leak gain is set from the measured capability of the platform, not from a
+constant: $\lambda = 0.18$ when the echo canceller reported
+\texttt{enabled}, and $\lambda = 0.55$ otherwise. The two regimes are not
+interchangeable, and the agent never pretends they are (Section~\ref{sec:ratt-degrade}).
+
+\subsection{Lexical Self-Echo Rejection}
+
+Energy evidence answers \emph{when} to yield, not \emph{whether} the transcript
+that follows belongs to the user. A recogniser fed a strong residual can emit
+the agent's own sentence, which the naive pipeline then sends back to the
+language model as a new user turn: a self-sustaining loop.
+
+The agent again has an unfair advantage: it knows the exact text it read out.
+Let $\sigma(\cdot)$ strip whitespace, punctuation and symbols, and let
+$\mathcal{B}(u)$ be the multiset of character bigrams of $u$. For transcript
+$u$ and a segment $v$ spoken within the last $8$\,s,
+
+\begin{equation}
+  D(u,v) \;=\; \frac{2 \sum_{b} \min\!\big(c_u(b), c_v(b)\big)}
+                     {|\mathcal{B}(u)| + |\mathcal{B}(v)|},
+  \label{eq:dice}
+\end{equation}
+
+is the bigram Dice coefficient. The transcript is rejected when
+$D(u,v) \ge 0.6$, or when it is a substring of $v$ and
+$|\sigma(u)| \ge 8$. Character bigrams are used rather than word tokens because
+Chinese has no whitespace boundaries and ASR substitutions are typically
+single-character. Transcripts shorter than six normalised characters are never
+rejected, so a genuine short answer such as ``好的'' survives even if the agent
+just said the same thing.
+
+\subsection{Capability-Gated Degradation}
+\label{sec:ratt-degrade}
+
+The session queries the platform at capture start and records whether
+\texttt{AcousticEchoCanceler} existed \emph{and} reported \texttt{enabled}
+after attachment to the real \texttt{AudioRecord} session id. This is a
+measurement, not a feature flag.
+
+If the measurement fails, the session runs half duplex: the microphone is
+closed before synthesis starts and reopened after playback plus a settle delay.
+The UI states which mode is active, so an operator can tell a barge-in failure
+from a device that never supported it. We consider this distinction a
+correctness requirement rather than a product detail: silently degrading to
+half duplex while claiming full duplex is the failure mode most voice-agent
+papers do not report.
+
+\subsection{Turn-Taking State Machine}
+
+The session is a five-state machine
+$\{\text{idle}, \text{listening}, \text{thinking}, \text{speaking},
+\text{halted}\}$ in which every async continuation is guarded by a monotonically
+increasing generation counter. This removes the class of bugs in which a late
+completion from turn $t-1$ starts playback during turn $t$.
+
+Two guards are specific to full duplex:
+
+\begin{enumerate}
+  \item \textbf{Post-dispatch grace.} For $900$\,ms after a turn is dispatched,
+        barge-in from energy evidence is ignored. The tail of the utterance
+        that opened the turn is still in the capture buffer; without the grace
+        period it cancels the reply it just triggered.
+  \item \textbf{Interrupt during generation.} In the \text{thinking} state the
+        reference is zero, so \eqref{eq:threshold} collapses to the noise-floor
+        term and any sustained speech is genuine. A user can therefore cut off
+        the model mid-generation, not only mid-playback.
+\end{enumerate}
+
+\subsection{Complexity}
+
+Per 20\,ms frame the gate performs $O(W)$ work for the peak-hold and $O(1)$
+otherwise, with $W=9$: a sliding-window maximum maintained by a monotonic deque
+gives amortised $O(1)$. The lexical filter runs once per final transcript over
+at most four cached segments of $O(|v|)$ bigrams. Neither component allocates
+inside the audio callback, and neither runs a timer: the gate is purely
+event-driven by capture frames, so an idle session consumes no CPU.
+
+\subsection{Evaluation Protocol}
+
+We deliberately separate what is implemented from what remains to be measured.
+The protocol below is what a reviewer should ask for; no numbers are claimed in
+this section until they are produced by the harness.
+
+\paragraph{Metrics}
+\begin{itemize}
+  \item \textbf{Barge-in latency}: time from the first user frame above
+        $\tau_k$ to the last emitted playback sample. Target $<250$\,ms.
+  \item \textbf{False barge-in rate}: interruptions with no true near-end
+        speech, per hour of playback.
+  \item \textbf{Self-echo turn rate}: assistant-voiced transcripts that reach
+        the language model, with and without the lexical filter.
+  \item \textbf{Over-suppression rate}: user utterances dropped by the
+        filter, stratified by length.
+  \item \textbf{Turn completion rate}: calls in which the user's utterance is
+        followed by a spoken reply and a re-opened microphone.
+\end{itemize}
+
+\paragraph{Protocol}
+Record the capture stream and the reference envelope simultaneously on the
+target device. For each session, replay in four configurations:
+(a) agent only, (b) user only, (c) agent and user overlapping (scripted
+double talk at controlled signal-to-echo ratios), and (d) silence with room
+noise. Configuration (a) bounds the false barge-in rate, (c) bounds latency and
+missed interruptions, (d) bounds noise-triggered turns.
+
+\paragraph{Ablations}
+Peak-hold window $W \in \{5, 9, 15\}$; evidence window
+$H \in \{80, 140, 220\}$\,ms; leak $\lambda \in \{0.12, 0.18, 0.35, 0.55\}$;
+lexical filter on/off; hardware canceller on/off. Report $\lambda$ and $H$
+jointly, since they trade latency against false interruption.
+
+\paragraph{Device matrix}
+At minimum one device per SoC family with a verified canceller and one without,
+because the capability gate is the variable that changes the architecture
+rather than a tuning parameter.
+
+\subsection{Threats to Validity}
+
+The peak-hold bound assumes the residual echo is a monotonically scaled copy of
+the reference envelope; non-linear loudspeaker distortion at high volume
+violates it, producing a higher effective $\lambda$. This is why the gate is
+combined with the lexical filter rather than trusted alone. The lexical filter
+cannot distinguish a user quoting the agent from the recogniser echoing it;
+the $8$-character substring rule biases toward keeping the user's turn, which is
+the correct error direction for an assistant. Finally, all thresholds were
+chosen from the signal model and the frame budget, not fitted to a corpus; the
+protocol above exists to test whether that transfer holds.

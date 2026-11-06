@@ -814,6 +814,13 @@ class AppLocalizationsEn extends AppLocalizations {
   String get live2dInvalidStatus => 'Live2D returned an invalid status';
 
   @override
+  String get callFullDuplex => 'Hands-free ? hardware AEC (interrupt anytime)';
+
+  @override
+  String get callHalfDuplex =>
+      'Hands-free ? half duplex (mic paused during playback)';
+
+  @override
   String get diagnosticsInvalidJson =>
       'Diagnostics result is not a JSON object';
 }

@@ -15,6 +15,33 @@ const REASONING_TIMEOUT_SECS: u64 = 90;
 const DISTILLATION_TIMEOUT_SECS: u64 = 120;
 const FACT_EXTRACTION_TIMEOUT_SECS: u64 = 60;
 
+#[derive(Debug, Clone, Copy, Default)]
+struct SamplingProfile {
+    temperature: Option<f64>,
+    top_p: Option<f64>,
+}
+
+impl SamplingProfile {
+    const fn fresh_regeneration() -> Self {
+        Self {
+            temperature: Some(0.95),
+            top_p: Some(0.95),
+        }
+    }
+}
+
+struct ReplyGeneration<'a> {
+    conversation_id: &'a str,
+    conversation: &'a Conversation,
+    user_content: &'a str,
+    message_type: &'a MessageType,
+    chat_model: &'a str,
+    thinking_model: &'a str,
+    enable_thinking: bool,
+    previous_reply: Option<&'a str>,
+    sampling: SamplingProfile,
+}
+
 pub struct ChatEngine {
     provider: ProviderRuntime,
     auxiliary_model: String,
@@ -49,6 +76,7 @@ impl ChatEngine {
         model: &str,
         actual_thinking: bool,
         enhanced_messages: &[Message],
+        sampling: SamplingProfile,
         on_event: &impl Fn(ChatStreamEvent),
     ) -> Result<(String, String), ChatError> {
         let need_content_reset = std::sync::atomic::AtomicBool::new(false);
@@ -63,14 +91,24 @@ impl ChatEngine {
             other => on_event(other),
         };
 
-        let request_body = Self::build_request_body(enhanced_messages, model, actual_thinking);
+        let request_body = Self::build_request_body_with_sampling(
+            enhanced_messages,
+            model,
+            actual_thinking,
+            sampling,
+        );
         match StreamingHandler::stream_chat(&self.provider, request_body, &filtered_event).await {
             Ok((content, thinking)) if !content.trim().is_empty() => {
                 return Ok((content, thinking));
             }
             Ok((_, ref thinking)) if actual_thinking && !thinking.trim().is_empty() => {
                 need_content_reset.store(true, std::sync::atomic::Ordering::Relaxed);
-                let retry_body = Self::build_request_body(enhanced_messages, model, false);
+                let retry_body = Self::build_request_body_with_sampling(
+                    enhanced_messages,
+                    model,
+                    false,
+                    sampling,
+                );
                 return match StreamingHandler::stream_chat(
                     &self.provider,
                     retry_body,
@@ -94,7 +132,7 @@ impl ChatEngine {
 
         need_content_reset.store(true, std::sync::atomic::Ordering::Relaxed);
         let compact = Self::build_compact_retry_messages(enhanced_messages, 6);
-        let compact_body = Self::build_request_body(&compact, model, false);
+        let compact_body = Self::build_request_body_with_sampling(&compact, model, false, sampling);
         match StreamingHandler::stream_chat(&self.provider, compact_body, &filtered_event).await {
             Ok((content, thinking)) if !content.trim().is_empty() => Ok((content, thinking)),
             Ok(_) => Err(ChatError::ApiError {
@@ -242,30 +280,23 @@ impl ChatEngine {
         SayDoDetector::detect(content)
     }
 
-    pub fn should_enable_thinking(model: &str, user_preference: bool) -> bool {
-        match model {
-            "glm-4.7" => user_preference,
-            "glm-4-air" => user_preference,
-            "glm-4.7-flash" => false,
-            _ => false,
-        }
+
+    fn estimate_content_tokens(content: &str) -> usize {
+        let char_count = content.chars().count();
+        let cjk_chars = content.chars().filter(|c| is_cjk_char(*c)).count();
+        let other_chars = char_count.saturating_sub(cjk_chars);
+        // CJK glyphs average ~1.5 tokens; Latin text and code average ~4
+        // characters per token. The previous word-count formula
+        // overestimated English by roughly 5x, which pushed English
+        // conversations into needless long-context distillation.
+        (cjk_chars as f64 * 1.5).ceil() as usize + other_chars.div_ceil(4)
     }
 
     pub fn estimate_token_count(messages: &[Message]) -> usize {
-        let mut total_tokens: usize = 0;
-        for msg in messages {
-            let char_count = msg.content.chars().count();
-            let cjk_chars = msg.content.chars().filter(|c| is_cjk_char(*c)).count();
-            let ascii_words = msg
-                .content
-                .split_whitespace()
-                .filter(|w| w.is_ascii())
-                .count();
-            total_tokens += (cjk_chars as f64 * 1.5) as usize
-                + ascii_words
-                + (char_count - cjk_chars - ascii_words);
-        }
-        total_tokens + messages.len() * 4
+        messages
+            .iter()
+            .map(|message| Self::estimate_content_tokens(&message.content) + 4)
+            .sum()
     }
 
     pub fn choose_summary_model(messages: &[Message]) -> &'static str {
@@ -733,6 +764,20 @@ impl ChatEngine {
         model: &str,
         enable_thinking: bool,
     ) -> serde_json::Value {
+        Self::build_request_body_with_sampling(
+            messages,
+            model,
+            enable_thinking,
+            SamplingProfile::default(),
+        )
+    }
+
+    fn build_request_body_with_sampling(
+        messages: &[Message],
+        model: &str,
+        enable_thinking: bool,
+        sampling: SamplingProfile,
+    ) -> serde_json::Value {
         let system_content: String = messages
             .iter()
             .filter(|m| m.role == MessageRole::System)
@@ -774,24 +819,27 @@ impl ChatEngine {
             merged_api_messages.push(msg);
         }
         let api_messages = merged_api_messages;
-        const TOTAL_TOKEN_BUDGET: usize = 100_000;
+        // Leave headroom inside the 128K GLM-4.7 window for long replies while
+        // never starving the answer down to a handful of tokens: the previous
+        // 100K budget with a hard 1K floor could exceed the usable window once
+        // the prompt itself grew large.
+        const TOTAL_TOKEN_BUDGET: usize = 120_000;
+        const MIN_OUTPUT_TOKENS: u32 = 512;
 
         let input_estimate = Self::estimate_token_count(messages);
 
         let model_max_output: u32 = match model {
-            "glm-4.7" => 131072,
-            "glm-4.7-flash" => 131072,
-            "glm-4-air" => 4095,
-            "glm-4-long" => 4095,
-            _ => 16384,
+            "glm-4.7" => 131_072,
+            "glm-4.7-flash" => 131_072,
+            "glm-4-air" => 4_095,
+            "glm-4-long" => 4_095,
+            _ => 16_384,
         };
 
-        let available_output = if TOTAL_TOKEN_BUDGET > input_estimate + 1024 {
-            (TOTAL_TOKEN_BUDGET - input_estimate) as u32
-        } else {
-            2048u32
-        };
-        let max_tokens: u32 = available_output.min(model_max_output).max(1024);
+        let available_output = TOTAL_TOKEN_BUDGET.saturating_sub(input_estimate) as u32;
+        let max_tokens: u32 = available_output
+            .min(model_max_output)
+            .max(MIN_OUTPUT_TOKENS);
 
         let mut body = serde_json::json!({
             "model": model,
@@ -799,26 +847,275 @@ impl ChatEngine {
             "stream": true,
             "max_tokens": max_tokens,
         });
+        if let Some(temperature) = sampling.temperature {
+            body["temperature"] = serde_json::json!(temperature);
+        }
+        if let Some(top_p) = sampling.top_p {
+            body["top_p"] = serde_json::json!(top_p);
+        }
 
-        match model {
-            "glm-4.7" | "glm-4-air" => {
-                if Self::should_enable_thinking(model, enable_thinking) {
-                    let budget = if model == "glm-4-air" { 10240 } else { 16384 };
-                    body["thinking"] = serde_json::json!({
-                        "type": "enabled",
-                        "budget_tokens": budget
-                    });
-                } else {
-                    body["thinking"] = serde_json::json!({"type": "disabled"});
-                }
-            }
-            "glm-4.7-flash" => {
-                body["thinking"] = serde_json::json!({"type": "disabled"});
-            }
-            _ => {}
+        // `thinking` is per-model wire semantics, not an app preference: an
+        // always-reasoning model answers 400 to "disabled", so the field is
+        // omitted instead of being asserted.
+        if let Some(thinking) =
+            crate::api::model_policy::thinking_for(model, enable_thinking).body()
+        {
+            body["thinking"] = thinking;
         }
 
         body
+    }
+    fn system_message(content: impl Into<String>) -> Message {
+        Message {
+            id: String::new(),
+            role: MessageRole::System,
+            content: content.into(),
+            thinking_content: None,
+            model: "system".to_string(),
+            timestamp: 0,
+            message_type: MessageType::Say,
+        }
+    }
+
+    fn insert_before_last_user(messages: &mut Vec<Message>, message: Message) {
+        let index = messages.iter().rposition(|m| m.role == MessageRole::User);
+        match index {
+            Some(position) => messages.insert(position, message),
+            None => messages.push(message),
+        }
+    }
+
+    /// Builds the explicit instruction that stops a regenerated reply from
+    /// being a near-copy of the answer the user just rejected.
+    fn build_regeneration_directive(previous_reply: &str) -> String {
+        let fingerprint = MemoryEngine::fingerprint_response(previous_reply);
+        let excerpt: String = previous_reply.chars().take(600).collect();
+        let directions = [
+            "换一个完全不同的切入点，先回应对方这句话里最具体的那个细节",
+            "这次把重点放在情绪和潜台词上，少解释、多留白",
+            "用更短、更克制的句子回答，把空间留给对方",
+            "换一种语气：更口语、更像随口说出来的，而不是写出来的",
+            "先做一个小动作或短句，再自然地把意思展开",
+            "直接给出结论或反问，再补充理由，避免铺垫",
+        ];
+        let direction = directions
+            [crate::api::clock::now_millis().unsigned_abs() as usize % directions.len()];
+
+        format!(
+            "【重新生成要求 — 必须执行】\n\
+             用户点击了“重新生成”。这不是“再说一遍”，而是要求一个实质不同的新回复。\n\
+             上一次回复的开头是：「{}」\n\
+             上一次回复的结尾是：「{}」\n\
+             上一次的段落数：{}，平均句长：{:.1} 字。\n\
+             上一次回复原文（仅用于避免重复，不要复述）：\n{}\n\n\
+             ■ 硬性要求：\n\
+             - 不得复用上一次的开头、句式骨架、比喻、段落顺序和收尾方式。\n\
+             - 不得只替换几个词或语气词；必须换一个真实的表达路径。\n\
+             - 角色设定、已确认的事实和上下文必须保持一致，不要为了不同而自相矛盾。\n\
+             - 这次采用的方向：{}。\n\
+             - 直接给出新回复，不要解释你在重新生成。",
+            fingerprint.opening_chars,
+            fingerprint.ending_chars,
+            fingerprint.paragraph_count,
+            fingerprint.avg_sentence_len,
+            excerpt,
+            direction,
+        )
+    }
+
+    /// Shared reply pipeline for both a new turn and a regeneration.
+    ///
+    /// The only differences between the two entry points are persistence and
+    /// the previous-reply directive; keeping the retrieval, distillation,
+    /// reasoning and quality-hint stages in one place prevents the two paths
+    /// from drifting apart (which is exactly how regeneration became a copy of
+    /// the original answer).
+    async fn generate_reply(
+        &self,
+        request: ReplyGeneration<'_>,
+        on_event: &impl Fn(ChatStreamEvent),
+    ) -> Result<(String, String), ChatError> {
+        let memory_summaries = self
+            .memory_engine
+            .load_memory_index(request.conversation_id)
+            .unwrap_or_default();
+
+        let mut enhanced_messages = Self::build_context_enhanced_messages(
+            request.conversation,
+            request.user_content,
+            &memory_summaries,
+        );
+
+        Self::insert_before_last_user(
+            &mut enhanced_messages,
+            Self::system_message(SayDoDetector::build_style_prompt(request.message_type)),
+        );
+
+        let non_system_for_hint: Vec<&Message> = request
+            .conversation
+            .messages
+            .iter()
+            .filter(|m| m.role != MessageRole::System)
+            .collect();
+        Self::insert_before_last_user(
+            &mut enhanced_messages,
+            Self::system_message(Self::build_humanization_hint(
+                request.user_content,
+                &non_system_for_hint,
+                request.message_type,
+            )),
+        );
+
+        if let Some(previous_reply) = request.previous_reply {
+            Self::insert_before_last_user(
+                &mut enhanced_messages,
+                Self::system_message(Self::build_regeneration_directive(previous_reply)),
+            );
+        }
+
+        if request.enable_thinking {
+            self.retrieve_knowledge_context(
+                request.conversation_id,
+                request.user_content,
+                &mut enhanced_messages,
+            );
+
+            if let Ok(Some(distilled_state)) = self
+                .memory_engine
+                .load_distilled_state(request.conversation_id)
+            {
+                if !distilled_state.core_prompt.trim().is_empty() {
+                    Self::insert_before_last_user(
+                        &mut enhanced_messages,
+                        Self::system_message(format!(
+                            "【历史蒸馏核心状态（持久化）】\n{}\n",
+                            distilled_state.core_prompt
+                        )),
+                    );
+                }
+            }
+
+            let memory_summaries_for_assess = self
+                .memory_engine
+                .load_memory_index(request.conversation_id)
+                .unwrap_or_default();
+            let (needs_long_context, _total_tokens) =
+                Self::assess_context_needs(&enhanced_messages, &memory_summaries_for_assess);
+
+            if needs_long_context {
+                let distilled = self
+                    .request_long_context_distillation(
+                        &enhanced_messages,
+                        &memory_summaries_for_assess,
+                        request.user_content,
+                        on_event,
+                    )
+                    .await;
+                if !distilled.trim().is_empty() {
+                    let core_facts_snapshot: Vec<String> = memory_summaries_for_assess
+                        .iter()
+                        .flat_map(|s| s.core_facts.clone())
+                        .collect();
+                    let mut hasher = DefaultHasher::new();
+                    let character_prompt = enhanced_messages
+                        .iter()
+                        .find(|m| m.role == MessageRole::System)
+                        .map(|m| m.content.as_str())
+                        .unwrap_or_default();
+                    character_prompt.hash(&mut hasher);
+                    let distilled_state = DistilledSystemState {
+                        core_prompt: distilled.clone(),
+                        last_memory_count: memory_summaries_for_assess.len(),
+                        last_max_compression_gen: memory_summaries_for_assess
+                            .iter()
+                            .map(|s| s.compression_generation)
+                            .max()
+                            .unwrap_or(0),
+                        character_prompt_hash: hasher.finish(),
+                        last_turn_count: request.conversation.turn_count,
+                        distilled_at: crate::api::clock::now_millis(),
+                        core_facts_snapshot,
+                    };
+                    let _ = self
+                        .memory_engine
+                        .save_distilled_state(request.conversation_id, &distilled_state);
+
+                    Self::insert_before_last_user(
+                        &mut enhanced_messages,
+                        Self::system_message(format!(
+                            "【长上下文蒸馏摘要 — 以下为 GLM-4-LONG 整理的关键信息，必须严格遵守】\n{}\n",
+                            distilled
+                        )),
+                    );
+                }
+            }
+
+            let (mut reasoning_conclusion, mut thinking_text) = self
+                .request_enhanced_reasoning(
+                    request.thinking_model,
+                    request.conversation_id,
+                    &enhanced_messages,
+                    request.user_content,
+                    on_event,
+                )
+                .await;
+
+            if reasoning_conclusion.trim().is_empty() {
+                let (fallback_conclusion, fallback_thinking) = self
+                    .request_reasoning(request.thinking_model, &enhanced_messages, on_event)
+                    .await;
+                if !fallback_conclusion.trim().is_empty() {
+                    reasoning_conclusion = fallback_conclusion;
+                }
+                if !fallback_thinking.trim().is_empty() {
+                    thinking_text = fallback_thinking;
+                }
+            }
+
+            if !reasoning_conclusion.trim().is_empty() {
+                Self::insert_before_last_user(
+                    &mut enhanced_messages,
+                    Self::system_message(format!(
+                        "【深度推理分析结果（GLM-4-AIR + 本地知识库）】\n{}\n\n\
+                         ■ 执行指令：\n\
+                         基于以上分析和知识库事实，以角色身份自然地回复用户。\n\
+                         - 分析中提到的关键事实必须准确体现在回复中\n\
+                         - 知识库中的事实不可矛盾或篡改\n\
+                         - 分析建议的情感策略必须执行\n\
+                         - 不要在回复中提及分析过程本身\n\
+                         - 回复必须完整，不要截断或省略\n\
+                         - 像真人一样自然地表达，有情绪、有温度、有个性",
+                        reasoning_conclusion
+                    )),
+                );
+            }
+
+            let (content, _) = self
+                .request_with_fallback(
+                    request.chat_model,
+                    false,
+                    &enhanced_messages,
+                    request.sampling,
+                    on_event,
+                )
+                .await?;
+
+            Ok((content, thinking_text))
+        } else {
+            self.retrieve_knowledge_context(
+                request.conversation_id,
+                request.user_content,
+                &mut enhanced_messages,
+            );
+            self.request_with_fallback(
+                request.chat_model,
+                false,
+                &enhanced_messages,
+                request.sampling,
+                on_event,
+            )
+            .await
+        }
     }
 
     pub fn build_context_enhanced_messages(
@@ -827,14 +1124,25 @@ impl ChatEngine {
         memory_summaries: &[MemorySummary],
     ) -> Vec<Message> {
         let mut enhanced_messages: Vec<Message> = Vec::new();
-
+        const MAX_SYSTEM_MESSAGES: usize = 8;
+        const MAX_SYSTEM_TOKENS: usize = 12_000;
         let mut system_token_budget: usize = 0;
-        for msg in &conv.messages {
-            if msg.role == MessageRole::System {
-                enhanced_messages.push(msg.clone());
-                system_token_budget += msg.content.len() / 2;
+        let mut system_count: usize = 0;
+        for msg in conv
+            .messages
+            .iter()
+            .filter(|message| message.role == MessageRole::System)
+        {
+            if system_count >= MAX_SYSTEM_MESSAGES {
                 break;
             }
+            let message_tokens = Self::estimate_content_tokens(&msg.content);
+            if system_count > 0 && system_token_budget + message_tokens > MAX_SYSTEM_TOKENS {
+                break;
+            }
+            enhanced_messages.push(msg.clone());
+            system_token_budget += message_tokens;
+            system_count += 1;
         }
 
         let short_term = MemoryEngine::build_short_term_context(&conv.messages);
@@ -1025,10 +1333,12 @@ impl ChatEngine {
 
         let mut selected_messages: Vec<Message> = Vec::new();
         let mut accumulated_tokens: usize = 0;
-        let max_messages = 20usize;
+        // The token budget decides how much history fits; the message cap only
+        // bounds pathological tiny-message turns.
+        let max_messages = 40usize;
 
         for msg in non_system.iter().rev() {
-            let msg_tokens = msg.content.len() / 2;
+            let msg_tokens = Self::estimate_content_tokens(&msg.content);
             if selected_messages.len() >= max_messages {
                 break;
             }
@@ -1302,237 +1612,37 @@ impl ChatEngine {
         Self::validate_message(content)?;
 
         let message_type = Self::detect_message_type(content);
-
         let user_msg = Message {
             id: uuid::Uuid::new_v4().to_string(),
             role: MessageRole::User,
             content: content.to_string(),
             thinking_content: None,
             model: chat_model.to_string(),
-            timestamp: chrono::Utc::now().timestamp_millis(),
+            timestamp: crate::api::clock::now_millis(),
             message_type: message_type.clone(),
         };
         self.conversation_store
             .add_message(conversation_id, user_msg)?;
-
         self.conversation_store
             .increment_turn_count(conversation_id)?;
 
         let conv = self.conversation_store.load_conversation(conversation_id)?;
-
-        let memory_summaries = self
-            .memory_engine
-            .load_memory_index(conversation_id)
-            .unwrap_or_default();
-
-        let mut enhanced_messages =
-            Self::build_context_enhanced_messages(&conv, content, &memory_summaries);
-
-        let style_hint = SayDoDetector::build_style_prompt(&message_type);
-        let style_msg = Message {
-            id: String::new(),
-            role: MessageRole::System,
-            content: style_hint.to_string(),
-            thinking_content: None,
-            model: "system".to_string(),
-            timestamp: 0,
-            message_type: MessageType::Say,
-        };
-        let last_user_idx = enhanced_messages
-            .iter()
-            .rposition(|m| m.role == MessageRole::User);
-        if let Some(idx) = last_user_idx {
-            enhanced_messages.insert(idx, style_msg);
-        } else {
-            enhanced_messages.push(style_msg);
-        }
-
-        let non_system_for_hint: Vec<&Message> = conv
-            .messages
-            .iter()
-            .filter(|m| m.role != MessageRole::System)
-            .collect();
-        let quality_hint =
-            Self::build_humanization_hint(content, &non_system_for_hint, &message_type);
-        let quality_msg = Message {
-            id: String::new(),
-            role: MessageRole::System,
-            content: quality_hint,
-            thinking_content: None,
-            model: "system".to_string(),
-            timestamp: 0,
-            message_type: MessageType::Say,
-        };
-        let last_user_idx = enhanced_messages
-            .iter()
-            .rposition(|m| m.role == MessageRole::User);
-        if let Some(idx) = last_user_idx {
-            enhanced_messages.insert(idx, quality_msg);
-        } else {
-            enhanced_messages.push(quality_msg);
-        }
-
-        let (full_content, full_thinking) = if enable_thinking {
-            self.retrieve_knowledge_context(conversation_id, content, &mut enhanced_messages);
-
-            if let Ok(Some(distilled_state)) =
-                self.memory_engine.load_distilled_state(conversation_id)
-            {
-                if !distilled_state.core_prompt.trim().is_empty() {
-                    let distilled_msg = Message {
-                        id: String::new(),
-                        role: MessageRole::System,
-                        content: format!(
-                            "【历史蒸馏核心状态（持久化）】\n{}\n",
-                            distilled_state.core_prompt
-                        ),
-                        thinking_content: None,
-                        model: "system".to_string(),
-                        timestamp: 0,
-                        message_type: MessageType::Say,
-                    };
-                    let last_user_idx = enhanced_messages
-                        .iter()
-                        .rposition(|m| m.role == MessageRole::User);
-                    if let Some(idx) = last_user_idx {
-                        enhanced_messages.insert(idx, distilled_msg);
-                    } else {
-                        enhanced_messages.push(distilled_msg);
-                    }
-                }
-            }
-
-            let memory_summaries_for_assess = self
-                .memory_engine
-                .load_memory_index(conversation_id)
-                .unwrap_or_default();
-            let (needs_long_context, _total_tokens) =
-                Self::assess_context_needs(&enhanced_messages, &memory_summaries_for_assess);
-
-            if needs_long_context {
-                let distilled = self
-                    .request_long_context_distillation(
-                        &enhanced_messages,
-                        &memory_summaries_for_assess,
-                        content,
-                        &on_event,
-                    )
-                    .await;
-                if !distilled.trim().is_empty() {
-                    let core_facts_snapshot: Vec<String> = memory_summaries_for_assess
-                        .iter()
-                        .flat_map(|s| s.core_facts.clone())
-                        .collect();
-                    let mut hasher = DefaultHasher::new();
-                    let character_prompt = enhanced_messages
-                        .iter()
-                        .find(|m| m.role == MessageRole::System)
-                        .map(|m| m.content.as_str())
-                        .unwrap_or_default();
-                    character_prompt.hash(&mut hasher);
-                    let distilled_state = DistilledSystemState {
-                        core_prompt: distilled.clone(),
-                        last_memory_count: memory_summaries_for_assess.len(),
-                        last_max_compression_gen: memory_summaries_for_assess
-                            .iter()
-                            .map(|s| s.compression_generation)
-                            .max()
-                            .unwrap_or(0),
-                        character_prompt_hash: hasher.finish(),
-                        last_turn_count: conv.turn_count,
-                        distilled_at: chrono::Utc::now().timestamp_millis(),
-                        core_facts_snapshot,
-                    };
-                    let _ = self
-                        .memory_engine
-                        .save_distilled_state(conversation_id, &distilled_state);
-
-                    let distill_msg = Message {
-                        id: String::new(),
-                        role: MessageRole::System,
-                        content: format!(
-                            "【长上下文蒸馏摘要 — 以下为 GLM-4-LONG 整理的关键信息，必须严格遵守】\n{}\n",
-                            distilled
-                        ),
-                        thinking_content: None,
-                        model: "system".to_string(),
-                        timestamp: 0,
-                        message_type: MessageType::Say,
-                    };
-                    let last_user_idx = enhanced_messages
-                        .iter()
-                        .rposition(|m| m.role == MessageRole::User);
-                    if let Some(idx) = last_user_idx {
-                        enhanced_messages.insert(idx, distill_msg);
-                    } else {
-                        enhanced_messages.push(distill_msg);
-                    }
-                }
-            }
-
-            let (mut reasoning_conclusion, mut thinking_text) = self
-                .request_enhanced_reasoning(
-                    thinking_model,
+        let (full_content, full_thinking) = self
+            .generate_reply(
+                ReplyGeneration {
                     conversation_id,
-                    &enhanced_messages,
-                    content,
-                    &on_event,
-                )
-                .await;
-
-            if reasoning_conclusion.trim().is_empty() {
-                let (fallback_conclusion, fallback_thinking) = self
-                    .request_reasoning(thinking_model, &enhanced_messages, &on_event)
-                    .await;
-                if !fallback_conclusion.trim().is_empty() {
-                    reasoning_conclusion = fallback_conclusion;
-                }
-                if !fallback_thinking.trim().is_empty() {
-                    thinking_text = fallback_thinking;
-                }
-            }
-
-            if !reasoning_conclusion.trim().is_empty() {
-                let reasoning_msg = Message {
-                    id: String::new(),
-                    role: MessageRole::System,
-                    content: format!(
-                        "【深度推理分析结果（GLM-4-AIR + 本地知识库）】\n{}\n\n\
-                         ■ 执行指令：\n\
-                         基于以上分析和知识库事实，以角色身份自然地回复用户。\n\
-                         - 分析中提到的关键事实必须准确体现在回复中\n\
-                         - 知识库中的事实不可矛盾或篡改\n\
-                         - 分析建议的情感策略必须执行\n\
-                         - 不要在回复中提及分析过程本身\n\
-                         - 回复必须完整，不要截断或省略\n\
-                         - 像真人一样自然地表达，有情绪、有温度、有个性",
-                        reasoning_conclusion
-                    ),
-                    thinking_content: None,
-                    model: "system".to_string(),
-                    timestamp: 0,
-                    message_type: MessageType::Say,
-                };
-                let last_user_idx = enhanced_messages
-                    .iter()
-                    .rposition(|m| m.role == MessageRole::User);
-                if let Some(idx) = last_user_idx {
-                    enhanced_messages.insert(idx, reasoning_msg);
-                } else {
-                    enhanced_messages.push(reasoning_msg);
-                }
-            }
-
-            let (content, _) = self
-                .request_with_fallback(chat_model, false, &enhanced_messages, &on_event)
-                .await?;
-
-            (content, thinking_text)
-        } else {
-            self.retrieve_knowledge_context(conversation_id, content, &mut enhanced_messages);
-            self.request_with_fallback(chat_model, false, &enhanced_messages, &on_event)
-                .await?
-        };
+                    conversation: &conv,
+                    user_content: content,
+                    message_type: &message_type,
+                    chat_model,
+                    thinking_model,
+                    enable_thinking,
+                    previous_reply: None,
+                    sampling: SamplingProfile::default(),
+                },
+                &on_event,
+            )
+            .await?;
 
         if full_content.trim().is_empty() {
             on_event(ChatStreamEvent::Error(
@@ -1543,30 +1653,31 @@ impl ChatEngine {
             return Ok(());
         }
 
-        let thinking = if full_thinking.is_empty() {
-            None
-        } else {
-            Some(full_thinking)
-        };
-
-        let assistant_msg = Message {
-            id: uuid::Uuid::new_v4().to_string(),
-            role: MessageRole::Assistant,
-            content: full_content,
-            thinking_content: thinking,
-            model: chat_model.to_string(),
-            timestamp: chrono::Utc::now().timestamp_millis(),
-            message_type: MessageType::Say,
-        };
-        self.conversation_store
-            .add_message(conversation_id, assistant_msg)?;
+        self.conversation_store.add_message(
+            conversation_id,
+            Self::assistant_message(full_content, full_thinking, chat_model),
+        )?;
 
         on_event(ChatStreamEvent::Done);
-
         self.extract_and_store_facts(conversation_id, &on_event)
             .await;
-
         Ok(())
+    }
+
+    fn assistant_message(content: String, thinking: String, model: &str) -> Message {
+        Message {
+            id: uuid::Uuid::new_v4().to_string(),
+            role: MessageRole::Assistant,
+            content,
+            thinking_content: if thinking.is_empty() {
+                None
+            } else {
+                Some(thinking)
+            },
+            model: model.to_string(),
+            timestamp: crate::api::clock::now_millis(),
+            message_type: MessageType::Say,
+        }
     }
 
     pub async fn regenerate_response(
@@ -1579,243 +1690,55 @@ impl ChatEngine {
     ) -> Result<(), ChatError> {
         let conv = self.conversation_store.load_conversation(conversation_id)?;
 
-        let last_user_content = conv
+        let last_user_index = conv
             .messages
             .iter()
-            .rev()
-            .find(|m| m.role == MessageRole::User)
-            .map(|m| m.content.clone())
-            .unwrap_or_default();
-
-        if last_user_content.is_empty() {
+            .rposition(|m| m.role == MessageRole::User)
+            .ok_or_else(|| ChatError::ValidationError {
+                message: "No user message found to regenerate from".to_string(),
+            })?;
+        let user_content = conv.messages[last_user_index].content.clone();
+        if user_content.trim().is_empty() {
             return Err(ChatError::ValidationError {
                 message: "No user message found to regenerate from".to_string(),
             });
         }
 
-        let message_type = Self::detect_message_type(&last_user_content);
-
-        let memory_summaries = self
-            .memory_engine
-            .load_memory_index(conversation_id)
-            .unwrap_or_default();
-
-        let mut enhanced_messages =
-            Self::build_context_enhanced_messages(&conv, &last_user_content, &memory_summaries);
-
-        let style_hint = SayDoDetector::build_style_prompt(&message_type);
-        let style_msg = Message {
-            id: String::new(),
-            role: MessageRole::System,
-            content: style_hint.to_string(),
-            thinking_content: None,
-            model: "system".to_string(),
-            timestamp: 0,
-            message_type: MessageType::Say,
-        };
-        let last_user_idx = enhanced_messages
+        let previous_assistant = conv.messages[last_user_index + 1..]
             .iter()
-            .rposition(|m| m.role == MessageRole::User);
-        if let Some(idx) = last_user_idx {
-            enhanced_messages.insert(idx, style_msg);
-        } else {
-            enhanced_messages.push(style_msg);
-        }
-
-        let non_system_for_hint: Vec<&Message> = conv
-            .messages
+            .rev()
+            .find(|m| m.role == MessageRole::Assistant)
+            .cloned();
+        // The rejected answer must not be part of the prompt context. Keeping
+        // it around is what made "regenerate" paraphrase the old reply; a
+        // textual "don't repeat" hint cannot fully undo that priming. Durable
+        // system blocks appended after the user turn are preserved.
+        let trailing_system: Vec<Message> = conv.messages[last_user_index + 1..]
             .iter()
-            .filter(|m| m.role != MessageRole::System)
+            .filter(|message| message.role == MessageRole::System)
+            .cloned()
             .collect();
-        let quality_hint =
-            Self::build_humanization_hint(&last_user_content, &non_system_for_hint, &message_type);
-        let quality_msg = Message {
-            id: String::new(),
-            role: MessageRole::System,
-            content: quality_hint,
-            thinking_content: None,
-            model: "system".to_string(),
-            timestamp: 0,
-            message_type: MessageType::Say,
-        };
-        let last_user_idx = enhanced_messages
-            .iter()
-            .rposition(|m| m.role == MessageRole::User);
-        if let Some(idx) = last_user_idx {
-            enhanced_messages.insert(idx, quality_msg);
-        } else {
-            enhanced_messages.push(quality_msg);
-        }
+        let mut prompt_conversation = conv.clone();
+        prompt_conversation.messages.truncate(last_user_index + 1);
+        prompt_conversation.messages.extend(trailing_system);
 
-        let (full_content, full_thinking) = if enable_thinking {
-            self.retrieve_knowledge_context(
-                conversation_id,
-                &last_user_content,
-                &mut enhanced_messages,
-            );
-
-            if let Ok(Some(distilled_state)) =
-                self.memory_engine.load_distilled_state(conversation_id)
-            {
-                if !distilled_state.core_prompt.trim().is_empty() {
-                    let distilled_msg = Message {
-                        id: String::new(),
-                        role: MessageRole::System,
-                        content: format!(
-                            "【历史蒸馏核心状态（持久化）】\n{}\n",
-                            distilled_state.core_prompt
-                        ),
-                        thinking_content: None,
-                        model: "system".to_string(),
-                        timestamp: 0,
-                        message_type: MessageType::Say,
-                    };
-                    let last_user_idx = enhanced_messages
-                        .iter()
-                        .rposition(|m| m.role == MessageRole::User);
-                    if let Some(idx) = last_user_idx {
-                        enhanced_messages.insert(idx, distilled_msg);
-                    } else {
-                        enhanced_messages.push(distilled_msg);
-                    }
-                }
-            }
-
-            let memory_summaries_for_assess = self
-                .memory_engine
-                .load_memory_index(conversation_id)
-                .unwrap_or_default();
-            let (needs_long_context, _total_tokens) =
-                Self::assess_context_needs(&enhanced_messages, &memory_summaries_for_assess);
-
-            if needs_long_context {
-                let distilled = self
-                    .request_long_context_distillation(
-                        &enhanced_messages,
-                        &memory_summaries_for_assess,
-                        &last_user_content,
-                        &on_event,
-                    )
-                    .await;
-                if !distilled.trim().is_empty() {
-                    let core_facts_snapshot: Vec<String> = memory_summaries_for_assess
-                        .iter()
-                        .flat_map(|s| s.core_facts.clone())
-                        .collect();
-                    let mut hasher = DefaultHasher::new();
-                    let character_prompt = enhanced_messages
-                        .iter()
-                        .find(|m| m.role == MessageRole::System)
-                        .map(|m| m.content.as_str())
-                        .unwrap_or_default();
-                    character_prompt.hash(&mut hasher);
-                    let distilled_state = DistilledSystemState {
-                        core_prompt: distilled.clone(),
-                        last_memory_count: memory_summaries_for_assess.len(),
-                        last_max_compression_gen: memory_summaries_for_assess
-                            .iter()
-                            .map(|s| s.compression_generation)
-                            .max()
-                            .unwrap_or(0),
-                        character_prompt_hash: hasher.finish(),
-                        last_turn_count: conv.turn_count,
-                        distilled_at: chrono::Utc::now().timestamp_millis(),
-                        core_facts_snapshot,
-                    };
-                    let _ = self
-                        .memory_engine
-                        .save_distilled_state(conversation_id, &distilled_state);
-
-                    let distill_msg = Message {
-                        id: String::new(),
-                        role: MessageRole::System,
-                        content: format!(
-                            "【长上下文蒸馏摘要 — 以下为 GLM-4-LONG 整理的关键信息，必须严格遵守】\n{}\n",
-                            distilled
-                        ),
-                        thinking_content: None,
-                        model: "system".to_string(),
-                        timestamp: 0,
-                        message_type: MessageType::Say,
-                    };
-                    let last_user_idx = enhanced_messages
-                        .iter()
-                        .rposition(|m| m.role == MessageRole::User);
-                    if let Some(idx) = last_user_idx {
-                        enhanced_messages.insert(idx, distill_msg);
-                    } else {
-                        enhanced_messages.push(distill_msg);
-                    }
-                }
-            }
-
-            let (mut reasoning_conclusion, mut thinking_text) = self
-                .request_enhanced_reasoning(
-                    thinking_model,
+        let message_type = Self::detect_message_type(&user_content);
+        let (full_content, full_thinking) = self
+            .generate_reply(
+                ReplyGeneration {
                     conversation_id,
-                    &enhanced_messages,
-                    &last_user_content,
-                    &on_event,
-                )
-                .await;
-
-            if reasoning_conclusion.trim().is_empty() {
-                let (fallback_conclusion, fallback_thinking) = self
-                    .request_reasoning(thinking_model, &enhanced_messages, &on_event)
-                    .await;
-                if !fallback_conclusion.trim().is_empty() {
-                    reasoning_conclusion = fallback_conclusion;
-                }
-                if !fallback_thinking.trim().is_empty() {
-                    thinking_text = fallback_thinking;
-                }
-            }
-
-            if !reasoning_conclusion.trim().is_empty() {
-                let reasoning_msg = Message {
-                    id: String::new(),
-                    role: MessageRole::System,
-                    content: format!(
-                        "【深度推理分析结果（GLM-4-AIR + 本地知识库）】\n{}\n\n\
-                         ■ 执行指令：\n\
-                         基于以上分析和知识库事实，以角色身份自然地回复用户。\n\
-                         - 分析中提到的关键事实必须准确体现在回复中\n\
-                         - 知识库中的事实不可矛盾或篡改\n\
-                         - 分析建议的情感策略必须执行\n\
-                         - 不要在回复中提及分析过程本身\n\
-                         - 回复必须完整，不要截断或省略\n\
-                         - 像真人一样自然地表达，有情绪、有温度、有个性",
-                        reasoning_conclusion
-                    ),
-                    thinking_content: None,
-                    model: "system".to_string(),
-                    timestamp: 0,
-                    message_type: MessageType::Say,
-                };
-                let last_user_idx = enhanced_messages
-                    .iter()
-                    .rposition(|m| m.role == MessageRole::User);
-                if let Some(idx) = last_user_idx {
-                    enhanced_messages.insert(idx, reasoning_msg);
-                } else {
-                    enhanced_messages.push(reasoning_msg);
-                }
-            }
-
-            let (content, _) = self
-                .request_with_fallback(chat_model, false, &enhanced_messages, &on_event)
-                .await?;
-
-            (content, thinking_text)
-        } else {
-            self.retrieve_knowledge_context(
-                conversation_id,
-                &last_user_content,
-                &mut enhanced_messages,
-            );
-            self.request_with_fallback(chat_model, false, &enhanced_messages, &on_event)
-                .await?
-        };
+                    conversation: &prompt_conversation,
+                    user_content: &user_content,
+                    message_type: &message_type,
+                    chat_model,
+                    thinking_model,
+                    enable_thinking,
+                    previous_reply: previous_assistant.as_ref().map(|m| m.content.as_str()),
+                    sampling: SamplingProfile::fresh_regeneration(),
+                },
+                &on_event,
+            )
+            .await?;
 
         if full_content.trim().is_empty() {
             on_event(ChatStreamEvent::Error(
@@ -1826,26 +1749,33 @@ impl ChatEngine {
             return Ok(());
         }
 
-        let thinking = if full_thinking.is_empty() {
-            None
+        if let Some(previous) = previous_assistant {
+            let mut updated = self.conversation_store.load_conversation(conversation_id)?;
+            let now = crate::api::clock::now_millis();
+            if let Some(index) = updated.messages.iter().position(|m| m.id == previous.id) {
+                let mut replacement =
+                    Self::assistant_message(full_content, full_thinking, chat_model);
+                replacement.id = previous.id;
+                replacement.timestamp = now;
+                updated.messages[index] = replacement;
+                updated.updated_at = now;
+                self.conversation_store.save_conversation(&updated)?;
+            } else {
+                self.conversation_store.add_message(
+                    conversation_id,
+                    Self::assistant_message(full_content, full_thinking, chat_model),
+                )?;
+            }
         } else {
-            Some(full_thinking)
-        };
-
-        let assistant_msg = Message {
-            id: uuid::Uuid::new_v4().to_string(),
-            role: MessageRole::Assistant,
-            content: full_content,
-            thinking_content: thinking,
-            model: chat_model.to_string(),
-            timestamp: chrono::Utc::now().timestamp_millis(),
-            message_type: MessageType::Say,
-        };
-        self.conversation_store
-            .add_message(conversation_id, assistant_msg)?;
+            self.conversation_store.add_message(
+                conversation_id,
+                Self::assistant_message(full_content, full_thinking, chat_model),
+            )?;
+        }
 
         on_event(ChatStreamEvent::Done);
-
+        self.extract_and_store_facts(conversation_id, &on_event)
+            .await;
         Ok(())
     }
 
@@ -2026,7 +1956,7 @@ impl ChatEngine {
             core_facts: final_core_facts,
             turn_range_start: turn_start,
             turn_range_end: turn_end,
-            created_at: chrono::Utc::now().timestamp_millis(),
+            created_at: crate::api::clock::now_millis(),
             keywords: all_keywords,
             compression_generation: max_generation,
             context_card: None,
@@ -2102,7 +2032,7 @@ impl ChatEngine {
         conv.messages = kept_messages;
         conv.turn_count = 0;
         conv.memory_summaries.clear();
-        conv.updated_at = chrono::Utc::now().timestamp_millis();
+        conv.updated_at = crate::api::clock::now_millis();
 
         self.conversation_store.save_conversation(&conv)?;
         self.memory_engine.delete_memory_index(conversation_id)?;
@@ -2123,7 +2053,7 @@ mod tests {
             content: content.to_string(),
             thinking_content: None,
             model: "glm-4-flash".to_string(),
-            timestamp: chrono::Utc::now().timestamp_millis(),
+            timestamp: crate::api::clock::now_millis(),
             message_type: MessageType::Say,
         }
     }
@@ -2213,8 +2143,7 @@ mod tests {
     fn test_build_request_body_thinking_enabled_for_glm4_air() {
         let messages = vec![make_message(MessageRole::User, "think hard")];
         let body = ChatEngine::build_request_body(&messages, "glm-4-air", true);
-        assert_eq!(body["thinking"]["type"], "enabled");
-        assert_eq!(body["thinking"]["budget_tokens"], 10240);
+        assert_eq!(body["thinking"], serde_json::json!({"type": "enabled"}));
     }
 
     #[test]
@@ -2225,22 +2154,17 @@ mod tests {
     }
 
     #[test]
-    fn test_build_request_body_thinking_disabled_explicitly() {
+    fn test_build_request_body_never_disables_an_always_thinking_model() {
+        // glm-4.7 and glm-4.7-flash always reason: sending
+        // `thinking.type: "disabled"` is a wire error, so the field is absent.
         let messages = vec![make_message(MessageRole::User, "hi")];
-        let body = ChatEngine::build_request_body(&messages, "glm-4.7", false);
-        assert_eq!(body["thinking"], serde_json::json!({"type": "disabled"}));
-        let body = ChatEngine::build_request_body(&messages, "glm-4.7-flash", false);
-        assert_eq!(body["thinking"], serde_json::json!({"type": "disabled"}));
-    }
-
-    #[test]
-    fn test_build_request_body_thinking_for_glm4_7_is_forced_disabled() {
-        let messages = vec![make_message(MessageRole::User, "think hard")];
-        let body = ChatEngine::build_request_body(&messages, "glm-4.7", true);
-        assert_eq!(body["thinking"]["type"], "enabled");
-        assert_eq!(body["thinking"]["budget_tokens"], 16384);
-        let body = ChatEngine::build_request_body(&messages, "glm-4.7", false);
-        assert_eq!(body["thinking"], serde_json::json!({"type": "disabled"}));
+        for model in ["glm-4.7", "glm-4.7-flash"] {
+            let body = ChatEngine::build_request_body(&messages, model, false);
+            assert!(
+                body.get("thinking").is_none(),
+                "{model} must not receive a thinking flag"
+            );
+        }
     }
 
     #[test]
@@ -2260,8 +2184,7 @@ mod tests {
     fn test_build_request_body_thinking_enabled_for_glm4_7() {
         let messages = vec![make_message(MessageRole::User, "think hard")];
         let body = ChatEngine::build_request_body(&messages, "glm-4.7", true);
-        assert_eq!(body["thinking"]["type"], "enabled");
-        assert_eq!(body["thinking"]["budget_tokens"], 16384);
+        assert_eq!(body["thinking"], serde_json::json!({"type": "enabled"}));
     }
 
     #[test]
@@ -2316,16 +2239,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_should_enable_thinking() {
-        assert!(ChatEngine::should_enable_thinking("glm-4.7", true));
-        assert!(!ChatEngine::should_enable_thinking("glm-4.7", false));
-        assert!(ChatEngine::should_enable_thinking("glm-4-air", true));
-        assert!(!ChatEngine::should_enable_thinking("glm-4-air", false));
-        assert!(!ChatEngine::should_enable_thinking("glm-4.7-flash", true));
-        assert!(!ChatEngine::should_enable_thinking("glm-4.7-flash", false));
-        assert!(!ChatEngine::should_enable_thinking("glm-4-long", true));
-    }
 
     #[test]
     fn test_parse_summary_json() {

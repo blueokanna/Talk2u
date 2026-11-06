@@ -50,6 +50,8 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
     @Volatile private var chipset = ""
     @Volatile private var modelKey: String? = null
     @Volatile private var profile: ProfilingData? = null
+    /** Profile of the most recent turn, staged by [runTurn]. */
+    @Volatile private var lastProfile: ProfilingData? = null
     @Volatile private var lastKnownModelBytes = 0L
 
     private data class QairtBundle(
@@ -169,18 +171,66 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
             checkNotNull(llm) { "GenieX Qwen3 runtime is not loaded" }
         }
         require(messages.any { it.second.isNotBlank() }) { "Qwen3 chat messages are empty" }
-        val chat = messages.mapNotNull { (role, content) ->
+        val chat = toChatMessages(messages)
+
+        var response = runTurn(active, chat, maxTokens, onText)
+        if (response.isEmpty()) {
+            // One recovery attempt with the tail of the conversation. Reaching
+            // this point means the runtime produced no token at all, which in
+            // practice is a context that no longer fits; retrying with only the
+            // system prompt and the last few turns is bounded work and keeps a
+            // long chat usable instead of failing the turn.
+            val trimmed = trimForRetry(messages)
+            if (trimmed.size < messages.size) {
+                response = runTurn(active, toChatMessages(trimmed), maxTokens, onText)
+            }
+        }
+        check(response.isNotEmpty()) {
+            "GenieX QAIRT/NPU 没有返回任何内容，上下文可能已超出窗口，请开始新的对话"
+        }
+        check(!response.contains("<|im_start|>") && !response.contains("<|im_end|>")) {
+            "GenieX returned raw chat-template control tokens"
+        }
+        synchronized(stateLock) {
+            check(llm === active) { "GenieX session changed during generation" }
+            profile = lastProfile
+            verified = true
+        }
+        return response
+    }
+
+    private fun toChatMessages(messages: List<Pair<String, String>>): Array<ChatMessage> =
+        messages.mapNotNull { (role, content) ->
             content.trim().takeIf(String::isNotEmpty)?.let {
                 ChatMessage(normalizeRole(role), it)
             }
         }.toTypedArray()
 
+    /** System messages plus the newest [RETRY_TURNS] non-system messages. */
+    private fun trimForRetry(messages: List<Pair<String, String>>): List<Pair<String, String>> {
+        val system = messages.filter { normalizeRole(it.first) == "system" }
+        val turns = messages.filter { normalizeRole(it.first) != "system" }
+        val keptTurns = if (turns.size <= RETRY_TURNS) turns else turns.takeLast(RETRY_TURNS)
+        return system + keptTurns
+    }
+
+    /** Runs one turn and returns the full text, or an empty string. */
+    private fun runTurn(
+        active: LlmWrapper,
+        chat: Array<ChatMessage>,
+        maxTokens: Int,
+        onText: (String) -> Unit,
+    ): String {
         val streamed = StringBuilder()
         var completedProfile: ProfilingData? = null
         runBlocking {
             check(active.reset() == GENIEX_SUCCESS) { "Unable to reset the GenieX Qwen3 session" }
             val prompt = active.applyChatTemplate(chat, "", false, true).getOrThrow().formattedText
             check(prompt.isNotBlank()) { "GenieX returned an empty Qwen3 chat template" }
+            Log.i(
+                "Talk2U/LLM",
+                "turn.start messages=${chat.size} promptChars=${prompt.length} keep=$SLIDING_WINDOW_KEEP",
+            )
             active.generateStreamFlow(prompt, generationConfig(maxTokens)).collect { result ->
                 when (result) {
                     is LlmStreamResult.Token -> {
@@ -192,17 +242,15 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
                 }
             }
         }
-        val response = streamed.toString().trim()
-        check(response.isNotEmpty()) { "GenieX QAIRT/NPU returned an empty response" }
-        check(!response.contains("<|im_start|>") && !response.contains("<|im_end|>")) {
-            "GenieX returned raw chat-template control tokens"
-        }
-        synchronized(stateLock) {
-            check(llm === active) { "GenieX session changed during generation" }
-            profile = completedProfile
-            verified = true
-        }
-        return response
+        Log.i(
+            "Talk2U/LLM",
+            "turn.done replyChars=${streamed.length} promptTokens=${completedProfile?.promptTokens} " +
+                "generatedTokens=${completedProfile?.generatedTokens} " +
+                "prefill=${completedProfile?.prefillSpeed} decode=${completedProfile?.decodingSpeed} " +
+                "stop=${completedProfile?.stopReason}",
+        )
+        lastProfile = completedProfile
+        return streamed.toString().trim()
     }
 
     fun stop() {
@@ -441,6 +489,17 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
         active?.close()
     }
 
+    /**
+     * Generation settings for one turn.
+     *
+     * The sliding window used to be disabled. With it disabled, the second
+     * turn can fill the KV cache and the runtime stops before emitting a
+     * token, which the caller sees as "GenieX returned an empty response":
+     * the first reply works and every longer conversation dies on turn two.
+     * Pinning the first [SLIDING_WINDOW_KEEP] tokens (system prompt and
+     * persona) and sliding the rest is the multi-turn behaviour this app
+     * needs.
+     */
     private fun generationConfig(maxTokens: Int): GenerationConfig = GenerationConfig(
         maxTokens.coerceIn(1, MAX_OUTPUT_TOKENS),
         emptyArray(),
@@ -451,8 +510,8 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
         0,
         emptyArray(),
         0,
-        false,
-        0,
+        true,
+        SLIDING_WINDOW_KEEP,
     )
 
     private fun qairtModelConfig(): ModelConfig = ModelConfig().apply {
@@ -482,7 +541,11 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
         const val BACKEND = "geniex-qairt-npu"
         const val GENIEX_VERSION = "0.3.17"
         const val CONTEXT_SIZE = 4096
-        const val MAX_OUTPUT_TOKENS = 256
+        const val MAX_OUTPUT_TOKENS = 1024
+        /** Tokens pinned at the head of the context when the window slides. */
+        private const val SLIDING_WINDOW_KEEP = 384
+        /** Messages kept when a turn is retried on a shorter context. */
+        private const val RETRY_TURNS = 3
         private const val MODEL_ID = "qwen3_4b_instruct_2507"
         private const val GENIE_CONFIG_FILE = "genie_config.json"
         private const val MODEL_METADATA_FILE = "metadata.json"

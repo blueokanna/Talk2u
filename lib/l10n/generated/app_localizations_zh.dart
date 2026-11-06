@@ -795,5 +795,11 @@ class AppLocalizationsZh extends AppLocalizations {
   String get live2dInvalidStatus => 'Live2D 返回了无效状态';
 
   @override
+  String get callFullDuplex => '免提 · 硬件回声消除（可直接打断）';
+
+  @override
+  String get callHalfDuplex => '免提 · 半双工（播放时暂停收音）';
+
+  @override
   String get diagnosticsInvalidJson => '诊断结果不是 JSON 对象';
 }

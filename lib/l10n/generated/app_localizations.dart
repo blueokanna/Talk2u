@@ -1514,6 +1514,18 @@ abstract class AppLocalizations {
   /// **'Live2D returned an invalid status'**
   String get live2dInvalidStatus;
 
+  /// No description provided for @callFullDuplex.
+  ///
+  /// In en, this message translates to:
+  /// **'Hands-free ? hardware AEC (interrupt anytime)'**
+  String get callFullDuplex;
+
+  /// No description provided for @callHalfDuplex.
+  ///
+  /// In en, this message translates to:
+  /// **'Hands-free ? half duplex (mic paused during playback)'**
+  String get callHalfDuplex;
+
   /// No description provided for @diagnosticsInvalidJson.
   ///
   /// In en, this message translates to:

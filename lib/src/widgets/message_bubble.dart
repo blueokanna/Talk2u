@@ -599,6 +599,17 @@ class _MessageBubbleState extends State<MessageBubble> {
                           height: 1.5,
                         ),
                       )
+                    // Re-parsing the full Markdown AST on every token delta is
+                    // quadratic for long replies. Streaming shows plain text;
+                    // the completed message is rendered as Markdown once.
+                    : widget.isStreaming
+                    ? SelectableText(
+                        widget.content,
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: textColor,
+                          height: 1.5,
+                        ),
+                      )
                     : MarkdownBody(
                         data: widget.content,
                         selectable: true,

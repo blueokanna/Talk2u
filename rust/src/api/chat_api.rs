@@ -5,6 +5,8 @@ use tokio::sync::watch;
 
 use super::chat_engine::ChatEngine;
 use super::config_manager::ConfigManager;
+use super::error_handler::ChatError;
+use super::network_diagnosis::{diagnose, EndpointDiagnosis};
 use super::conversation_store::ConversationStore;
 use super::data_models::*;
 use super::knowledge_store::KnowledgeStore;
@@ -41,6 +43,45 @@ fn register_generation(conversation_id: &str) -> (String, watch::Receiver<bool>)
         }
     }
     (request_id, receiver)
+}
+
+/// Persists whatever the user actually saw before pressing "stop".
+///
+/// Without this, cancelling a streaming reply silently discarded the partial
+/// answer: the conversation looked as if the assistant had never spoken, and a
+/// retry had no record of what was already on screen. The guard against a
+/// trailing assistant message avoids racing with the engine's own save.
+fn persist_interrupted_reply(
+    conversation_id: &str,
+    model: &str,
+    content: &str,
+    thinking: &str,
+) {
+    let content = content.trim();
+    if content.is_empty() {
+        return;
+    }
+    let store = get_conversation_store();
+    let Ok(conversation) = store.load_conversation(conversation_id) else {
+        return;
+    };
+    if conversation
+        .messages
+        .last()
+        .is_some_and(|message| message.role != MessageRole::User)
+    {
+        return;
+    }
+    let message = Message {
+        id: uuid::Uuid::new_v4().to_string(),
+        role: MessageRole::Assistant,
+        content: content.to_string(),
+        thinking_content: (!thinking.trim().is_empty()).then(|| thinking.to_string()),
+        model: model.to_string(),
+        timestamp: crate::api::clock::now_millis(),
+        message_type: MessageType::Say,
+    };
+    let _ = store.add_message(conversation_id, message);
 }
 
 fn unregister_generation(conversation_id: &str, request_id: &str) {
@@ -148,7 +189,7 @@ pub fn add_system_message(conversation_id: String, content: String) -> bool {
         content,
         thinking_content: None,
         model: "system".to_string(),
-        timestamp: chrono::Utc::now().timestamp_millis(),
+        timestamp: crate::api::clock::now_millis(),
         message_type: MessageType::Say,
     };
     get_conversation_store()
@@ -163,7 +204,7 @@ pub fn add_assistant_message(conversation_id: String, content: String) -> bool {
         content,
         thinking_content: None,
         model: "glm-4.7".to_string(),
-        timestamp: chrono::Utc::now().timestamp_millis(),
+        timestamp: crate::api::clock::now_millis(),
         message_type: MessageType::Say,
     };
     get_conversation_store()
@@ -229,7 +270,7 @@ pub fn add_user_message(conversation_id: String, content: String, model: String)
         content,
         thinking_content: None,
         model,
-        timestamp: chrono::Utc::now().timestamp_millis(),
+        timestamp: crate::api::clock::now_millis(),
         message_type: MessageType::Say,
     };
     get_conversation_store()
@@ -248,7 +289,7 @@ pub fn add_assistant_message_with_model(
         content,
         thinking_content: None,
         model,
-        timestamp: chrono::Utc::now().timestamp_millis(),
+        timestamp: crate::api::clock::now_millis(),
         message_type: MessageType::Say,
     };
     get_conversation_store()
@@ -309,6 +350,7 @@ pub async fn validate_api_key(
         "max_tokens": 16
     });
 
+    let api_url = provider.api_url.clone();
     match tokio::time::timeout(
         std::time::Duration::from_secs(45),
         StreamingHandler::stream_chat(&provider, request, |_| {}),
@@ -321,34 +363,38 @@ pub async fn validate_api_key(
             Ok(format!("{model} 连接成功"))
         }
         Ok(Ok(_)) => Err(format!("{model} 返回了空响应")),
-        Ok(Err(error)) => Err(error.to_string()),
+        Ok(Err(error)) => {
+            let message = error.to_string();
+            if matches!(error, ChatError::NetworkError { .. }) {
+                if let Some(hint) = diagnose(&api_url)
+                    .await
+                    .and_then(EndpointDiagnosis::into_hint)
+                {
+                    return Err(format!("{message}；{hint}"));
+                }
+            }
+            Err(message)
+        }
         Err(_) => Err(format!("{model} 连接测试超过 45 秒，请检查网络或稍后重试")),
     }
 }
 
 pub fn get_available_models() -> Vec<ModelInfo> {
+    // `supports_thinking` is "this model reasons", taken from the vendor
+    // capability registry instead of being asserted here. GLM-4.7-Flash always
+    // reasons, so the old hard-coded `false` advertised the opposite of what the
+    // model does.
+    let model = |id: &str, name: &str, context_tokens: usize, max_output_tokens: usize| ModelInfo {
+        id: id.to_string(),
+        name: name.to_string(),
+        context_tokens,
+        max_output_tokens,
+        supports_thinking: crate::api::model_policy::can_reason(id),
+    };
     vec![
-        ModelInfo {
-            id: "glm-4.7".to_string(),
-            name: "GLM-4.7（对话+思考）".to_string(),
-            context_tokens: 128000,
-            max_output_tokens: 131072,
-            supports_thinking: true,
-        },
-        ModelInfo {
-            id: "glm-4-air".to_string(),
-            name: "GLM-4-Air（深度推理）".to_string(),
-            context_tokens: 128000,
-            max_output_tokens: 4095,
-            supports_thinking: true,
-        },
-        ModelInfo {
-            id: "glm-4.7-flash".to_string(),
-            name: "GLM-4.7-Flash（快速）".to_string(),
-            context_tokens: 128000,
-            max_output_tokens: 131072,
-            supports_thinking: false,
-        },
+        model("glm-4.7", "GLM-4.7（对话+思考）", 128_000, 131_072),
+        model("glm-4-air", "GLM-4-Air（深度推理）", 128_000, 4_095),
+        model("glm-4.7-flash", "GLM-4.7-Flash（快速）", 128_000, 131_072),
     ]
 }
 
@@ -378,6 +424,8 @@ pub async fn send_message(
     let (request_id, mut cancel) = register_generation(&conversation_id);
 
     let done_sent = std::sync::atomic::AtomicBool::new(false);
+    let partial_content = std::sync::Mutex::new(String::new());
+    let partial_thinking = std::sync::Mutex::new(String::new());
 
     let pipeline_result = tokio::select! {
         result = engine.send_message(
@@ -387,8 +435,21 @@ pub async fn send_message(
             &thinking_model,
             use_thinking_pipeline,
             |event| {
-                if let ChatStreamEvent::Done = &event {
-                    done_sent.store(true, std::sync::atomic::Ordering::Release);
+                match &event {
+                    ChatStreamEvent::ContentDelta(delta) => {
+                        if let Ok(mut buffer) = partial_content.lock() {
+                            buffer.push_str(delta);
+                        }
+                    }
+                    ChatStreamEvent::ThinkingDelta(delta) => {
+                        if let Ok(mut buffer) = partial_thinking.lock() {
+                            buffer.push_str(delta);
+                        }
+                    }
+                    ChatStreamEvent::Done => {
+                        done_sent.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                    ChatStreamEvent::Error(_) => {}
                 }
                 let _ = sink.add(event);
             },
@@ -405,6 +466,15 @@ pub async fn send_message(
             }
         }
         None => {
+            let interrupted = partial_content
+                .lock()
+                .map(|value| value.clone())
+                .unwrap_or_default();
+            let thinking = partial_thinking
+                .lock()
+                .map(|value| value.clone())
+                .unwrap_or_default();
+            persist_interrupted_reply(&conversation_id, &chat_model, &interrupted, &thinking);
             let _ = sink.add(ChatStreamEvent::Error(
                 "__GENERATION_CANCELLED__".to_string(),
             ));
@@ -443,6 +513,8 @@ pub async fn regenerate_response(
     let (request_id, mut cancel) = register_generation(&conversation_id);
 
     let done_sent = std::sync::atomic::AtomicBool::new(false);
+    let partial_content = std::sync::Mutex::new(String::new());
+    let partial_thinking = std::sync::Mutex::new(String::new());
 
     let pipeline_result = tokio::select! {
         result = engine.regenerate_response(
@@ -451,8 +523,21 @@ pub async fn regenerate_response(
             &thinking_model,
             use_thinking_pipeline,
             |event| {
-                if let ChatStreamEvent::Done = &event {
-                    done_sent.store(true, std::sync::atomic::Ordering::Release);
+                match &event {
+                    ChatStreamEvent::ContentDelta(delta) => {
+                        if let Ok(mut buffer) = partial_content.lock() {
+                            buffer.push_str(delta);
+                        }
+                    }
+                    ChatStreamEvent::ThinkingDelta(delta) => {
+                        if let Ok(mut buffer) = partial_thinking.lock() {
+                            buffer.push_str(delta);
+                        }
+                    }
+                    ChatStreamEvent::Done => {
+                        done_sent.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                    ChatStreamEvent::Error(_) => {}
                 }
                 let _ = sink.add(event);
             },
@@ -469,6 +554,15 @@ pub async fn regenerate_response(
             }
         }
         None => {
+            let interrupted = partial_content
+                .lock()
+                .map(|value| value.clone())
+                .unwrap_or_default();
+            let thinking = partial_thinking
+                .lock()
+                .map(|value| value.clone())
+                .unwrap_or_default();
+            persist_interrupted_reply(&conversation_id, &chat_model, &interrupted, &thinking);
             let _ = sink.add(ChatStreamEvent::Error(
                 "__GENERATION_CANCELLED__".to_string(),
             ));

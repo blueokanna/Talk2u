@@ -1265,7 +1265,7 @@ impl MemoryEngine {
             core_facts: merged_facts,
             turn_range_start: turn_start,
             turn_range_end: turn_end,
-            created_at: chrono::Utc::now().timestamp_millis(),
+            created_at: crate::api::clock::now_millis(),
             keywords: merged_keywords,
             compression_generation: merge_gen,
             context_card: Some(merged_card),
@@ -1495,6 +1495,7 @@ impl MemoryEngine {
         conversation_id: &str,
         summaries: &[MemorySummary],
     ) -> Result<(), ChatError> {
+        super::storage_path::validate_storage_id(conversation_id)?;
         let dir = self.memory_dir()?;
         let path = dir.join(format!("{}.json", conversation_id));
         let json =
@@ -1510,6 +1511,7 @@ impl MemoryEngine {
         &self,
         conversation_id: &str,
     ) -> Result<Vec<MemorySummary>, ChatError> {
+        super::storage_path::validate_storage_id(conversation_id)?;
         let dir = self.memory_dir()?;
         let path = dir.join(format!("{}.json", conversation_id));
         if !path.exists() {
@@ -1524,6 +1526,7 @@ impl MemoryEngine {
     }
 
     pub fn delete_memory_index(&self, conversation_id: &str) -> Result<(), ChatError> {
+        super::storage_path::validate_storage_id(conversation_id)?;
         let dir = self.memory_dir()?;
         let path = dir.join(format!("{}.json", conversation_id));
         if path.exists() {
@@ -1539,6 +1542,7 @@ impl MemoryEngine {
         &self,
         conversation_id: &str,
     ) -> Result<Option<DistilledSystemState>, ChatError> {
+        super::storage_path::validate_storage_id(conversation_id)?;
         let dir = self.memory_dir()?;
         let path = dir.join(format!("{}_distilled.json", conversation_id));
         if !path.exists() {
@@ -1559,6 +1563,7 @@ impl MemoryEngine {
         conversation_id: &str,
         state: &DistilledSystemState,
     ) -> Result<(), ChatError> {
+        super::storage_path::validate_storage_id(conversation_id)?;
         let dir = self.memory_dir()?;
         let path = dir.join(format!("{}_distilled.json", conversation_id));
         let json = serde_json::to_string_pretty(state).map_err(|e| ChatError::StorageError {
@@ -1570,6 +1575,7 @@ impl MemoryEngine {
     }
 
     pub fn delete_distilled_state(&self, conversation_id: &str) -> Result<(), ChatError> {
+        super::storage_path::validate_storage_id(conversation_id)?;
         let dir = self.memory_dir()?;
         let path = dir.join(format!("{}_distilled.json", conversation_id));
         if path.exists() {
