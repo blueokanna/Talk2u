@@ -15,7 +15,7 @@ This document describes the implemented behavior and its verification boundary. 
 | DeepSeek, OpenAI, Kimi, Qwen | Implemented | OpenAI-compatible streaming adapters |
 | Anthropic | Implemented | Messages API headers, request conversion, and Anthropic SSE |
 | Local memory and knowledge | Implemented | Rust local storage, recent context, summaries, and fact retrieval; durable system blocks are kept within a token budget |
-| Android local LLM | Implemented | `Qwen/Qwen3-4B-Instruct-2507` Q4_K_M through llama.cpp; the 4096-token window is budgeted by tokens and the output cap is 1024 tokens |
+| Android local LLM | Implemented | `ai-hub-models/Qwen3-4B-Instruct-2507` QAIRT `w4a16` through GenieX SDK 0.3.17; QNN HTP/NPU execution, 4096-token window budgeted by tokens, 1024-token output cap |
 | Offline STT | Implemented | sherpa-onnx SenseVoice 2024-07-17 INT8 QNN context on SM8850, preserving ASR/LID/SER/AED results |
 | Continuous voice call | Conditional on Android | `CallSession` state machine; full duplex when the platform confirms hardware AEC, half duplex otherwise; reference-anchored double-talk detection plus lexical self-echo rejection; voice or tap interruption |
 | Regenerate | Implemented | The rejected reply is excluded from the new prompt, an explicit anti-repetition directive is added, sampling uses temperature/top_p 0.95, and the old message is replaced in place |
@@ -66,7 +66,7 @@ Flutter UI
   |-- chat, characters, memory, and provider selection
   |-- Android GLSurfaceView / Native C++ Cubism OpenGL ES
   |-- Windows WebView2 / Linux CEF Live2D host
-  |-- Android llama.cpp/Vulkan Qwen3-4B-Instruct-2507 (Adreno GPU)
+  |-- Android GenieX SDK -> QAIRT QNN HTP/NPU -> Qwen3-4B-Instruct-2507 w4a16
   |-- sherpa-onnx Kotlin/JNI SenseVoice QNN STT (SM8850 HTP)
   |-- Native MOSS JNI: QNN HTP prefill/decode/codec + ORT CPU sampler
   `-- Flutter platform channel for MOSS package import and synthesis
@@ -220,7 +220,9 @@ No OnePlus 15 or Huawei Mate 10 Pro real-device pass has been performed in this 
 
 ### Separate Local LLM Path
 
-MOSS acceleration does not accelerate the local Qwen LLM. Android downloads the pinned Qwen3-4B-Instruct-2507 Q4_K_M GGUF with resume support, verifies its exact 2,497,281,120-byte size and SHA-256, then atomically installs it in app-private storage. llama.cpp validates `general.architecture=qwen3` and 36 transformer layers. Embedding, sampling, and small operations remain on CPU; transformer layers, matrix multiplication, and attention run on Adreno Vulkan. JNI streams accumulated UTF-8 output to Flutter token by token.
+MOSS acceleration does not accelerate the local Qwen LLM. Android downloads `ai-hub-models/Qwen3-4B-Instruct-2507` (precision `w4a16`, about 2.9 GiB across four shards) through GenieX `ModelManagerWrapper.pullFlow` with a `chipset=SM8850` pull input, then validates `metadata.json`, the 4096-token `genie_config.json`, and the tokenizer files before creating an `LlmWrapper` session with `ComputeUnitValue.NPU`. Download, load, and generation failures map to `qwen3_download_*`, `qwen3_load_failed`, and `qwen3_generate_failed`.
+
+The prompt does not depend on the SDK's Jinja renderer: GenieX 0.3.17 returns an empty `applyChatTemplate` result for the AI Hub Qwen3 bundle, which used to fail every turn with "empty Qwen3 chat template". `Qwen3Prompt.kt` therefore builds the ChatML markup from the bundle's own `sample_prompt.txt` (`<|im_start|>role\ncontent<|im_end|>\n`, finished with `<|im_start|>assistant\n`), strips control tokens from user text so a turn cannot be injected, and is covered by `Qwen3PromptTest`. Tokens stream back to Flutter through `generateStreamFlow` and a method channel.
 
 ## Continuous Speech
 
@@ -325,7 +327,7 @@ Automated checks cannot prove: third-party account quotas, regional network, mod
 Real-device acceptance must include:
 
 - Verify the NNAPI device list does not classify a CPU device as acceleration.
-- Run one real Qwen generation and require verified `llama-vulkan` on an Adreno device; a loaded backend alone is insufficient.
+- Run one real Qwen generation and require `activeBackend=geniex-qairt-npu` with `activeBackendVerified=true`; a loaded backend alone is insufficient.
 - Run a real MOSS synthesis, require `QNN_HTP` with CPU EP fallback disabled, validate the WAV, and confirm playback.
 - Verify `女生：（哈哈大笑）你说的太好了！` speaks only the dialogue and triggers a happy cue.
 - Run at least 20 call turns, then end the call and confirm microphone capture and playback stop.
@@ -333,13 +335,15 @@ Real-device acceptance must include:
 - Test airplane-mode STT, TTS, LLM, and Cubism assets separately; each requires its local asset to be present.
 - Measure temperature, audio latency, memory, and battery drain on every release target.
 
+Measured on PLK110 on 2026-11-16: a cold start does not crash; the MOSS ZIP import validates all 13 files; MOSS synthesis returns `QNN_HTP(prefill,decode)+ORT_CPU(sampler,codec)`; Qwen3 reports `Qualcomm QNN HTP/NPU (verified)` after the first real generation, and English, Chinese, and regenerate turns all return non-empty text.
+
 ## Claims That Must Not Be Made
 
 - Do not claim QNN from an API symbol, library presence, or provider enumeration.
 - Do not claim that the default ONNX Runtime AAR contains QNN EP.
 - Do not claim direct Huawei HiAI DDK integration.
-- Do not claim real-device validation on OnePlus 15 or Huawei Mate 10 Pro until it is performed.
-- Do not label llama.cpp CPU execution as NPU or GPU execution.
+- Do not claim that OnePlus 15 has passed full device acceptance: only MOSS import/synthesis and Qwen3 generation/regeneration were measured. 16 KB pages (the device reports 4096), audio quality, thermals, battery, and long calls remain unverified. Huawei Mate 10 Pro has had no acceptance run.
+- Do not label QAIRT/NNAPI enumeration as execution proof.
 - Do not claim Windows/Linux offline TTS, continuous offline calls, or local LLM hardware acceleration.
 - Do not claim the native Vulkan probe is the actual Live2D renderer; Android currently uses Cubism Native OpenGL ES.
 - Do not claim that Cubism Core is legally bundled with the public repository.

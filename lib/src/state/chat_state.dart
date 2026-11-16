@@ -1141,7 +1141,11 @@ class ChatState extends ChangeNotifier with WidgetsBindingObserver {
           preserveError: true,
         );
         if (!applied || !isCurrent()) return;
-        _errorMessage = AppStrings.current.offlineGenerateFailed('$error');
+        // OfflineLlmFailure already carries a complete sentence; wrapping it again
+        // produced "generation failed: generation failed: ...".
+        _errorMessage = error is OfflineLlmFailure
+            ? '$error'
+            : AppStrings.current.offlineGenerateFailed('$error');
         notifyListeners();
       }
     }

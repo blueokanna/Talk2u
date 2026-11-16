@@ -20,7 +20,7 @@ Talk2U 是一个 Flutter + Rust 的本地角色聊天应用。聊天记录、角
 | 自定义 URL | 已实现 | OpenAI-compatible；API Key 可留空，支持 HTTP(S) 完整地址 |
 | 跨平台继续同一对话 | 已实现 | conversation 与供应商解耦，切换供应商不创建新会话 |
 | 本地记忆/知识检索 | 已实现 | Rust 本地文件存储、短期上下文、长期摘要、知识事实检索；system 上下文按 token 预算完整保留 |
-| Android 端侧 LLM | 已实现 | `Qwen/Qwen3-4B-Instruct-2507` Q4_K_M GGUF；4096 token 窗口内按 token 预算裁剪历史，单次输出上限 1024 token |
+| Android 端侧 LLM | 已实现 | `ai-hub-models/Qwen3-4B-Instruct-2507`（QAIRT w4a16，GenieX SDK 0.3.17）；QNN HTP/NPU 执行，4096 token 窗口内按 token 预算裁剪历史，单次输出上限 1024 token |
 | 离线 STT | 已实现 | Android SM8850 上使用 sherpa-onnx + SenseVoice 2024-07-17 INT8 QNN context，提供 ASR/LID/SER/AED |
 | 持续语音通话 | Android 有条件实现 | `CallSession` 状态机；确认硬件 AEC 后全双工，否则半双工；参考信号双讲检测 + 文本自回音过滤；可语音/点按打断 |
 | 重新生成 | 已实现 | 旧回复不进入新 prompt，附带“禁止复用开头/句式/收尾”的显式指令，并以 temperature/top_p 0.95 重新采样；成功后原位替换旧消息 |
@@ -82,7 +82,7 @@ Flutter UI
   ├─ 默认全屏 Live2D；对话记录按需展开；文字输入常驻
   ├─ AndroidView -> GLSurfaceView -> Cubism Native C++/OpenGL ES
   ├─ Windows -> WebView2；Linux -> CEF
-  ├─ Android llama.cpp/Vulkan -> Qwen3-4B-Instruct-2507 Q4_K_M（Adreno GPU）
+  ├─ Android GenieX SDK -> QAIRT QNN HTP/NPU -> Qwen3-4B-Instruct-2507 w4a16
   ├─ sherpa-onnx Kotlin/JNI + SenseVoice QNN -> SM8850 HTP 端侧 STT
   ├─ MOSS-TTS Native JNI -> QNN HTP(prefill/decode/codec) + ORT CPU(sampler)
   └─ MethodChannel -> MOSS 部署包导入、QNN 探测与 WAV 合成
@@ -359,28 +359,30 @@ http://192.168.1.20:11434/v1/chat/completions
 
 ## 端侧离线 AI 与语音模型
 
-模型权重不打入 APK。SenseVoice 与 Qwen3-4B-Instruct-2507 由应用按需断点下载并校验；MOSS 使用经过验证的 HTP v81 目录，由 Android 目录选择器导入并逐文件校验。
+模型权重不打入 APK。SenseVoice 与 Qwen3-4B-Instruct-2507 由应用按需下载并校验；MOSS 使用经过验证的 HTP v81 目录，由 Android 目录选择器导入并逐文件校验。
 
 | 用途 | 平台 | 模型 | 下载大小 |
 | --- | --- | --- | ---: |
-| 离线对话 | Android ARM64 | Qwen3-4B-Instruct-2507 Q4_K_M GGUF | 2,497,281,120 B |
+| 离线对话 | Android SM8850/SM8750 | `ai-hub-models/Qwen3-4B-Instruct-2507` QAIRT w4a16（4 个分片 + tokenizer） | 约 2.9 GiB |
 | 离线 STT | Android SM8850/HTP v81 | SenseVoice 2024-07-17 INT8 QNN 10 秒 context | 162,023,574 B |
-| 离线 TTS | Android SM8850/HTP v81 | MOSS-TTS-Nano 100M QNN 部署包 + Audio Tokenizer | 取决于准备结果 |
+| 离线 TTS | Android SM8850/HTP v81 | MOSS-TTS-Nano 100M QNN 部署包 + Audio Tokenizer | 684.4 MiB（13 文件） |
 
-Qwen3-4B-Instruct-2507 模型卡声明 Apache-2.0；GGUF 固定到 `unsloth/Qwen3-4B-Instruct-2507-GGUF@a06e946b`。`sherpa-onnx` 与 MOSS 模型也需分别遵守各自许可。QAIRT/QNN 二进制受 Qualcomm SDK 条款约束，不由仓库重新分发。
+Qwen3-4B-Instruct-2507 模型卡声明 Apache-2.0，权重由 Qualcomm AI Hub 的 `ai-hub-models/Qwen3-4B-Instruct-2507` 提供，精度 `w4a16`；`sherpa-onnx` 与 MOSS 模型也需分别遵守各自许可。QAIRT/QNN 二进制受 Qualcomm SDK 条款约束，不由仓库重新分发。
 
 ### 端侧 LLM 硬件后端
 
 | 平台/芯片 | 当前推理后端 | 当前状态 |
 | --- | --- | --- |
-| Android SM8850 | llama.cpp Vulkan/Adreno | 卸载 36 个 transformer block 与输出矩阵；首轮非空生成成功后才显示为已验证 |
-| 其他 Android ARM64 | llama.cpp Vulkan 或 ARM64 CPU | Vulkan 不可用时明确显示 CPU/NEON，不伪报 GPU/NPU |
+| Android SM8850/SM8750 | GenieX SDK → QAIRT QNN HTP/NPU | 首次生成成功后 `activeBackendVerified=true` 才显示为已验证 |
+| 其他 Android SoC | 无端侧 LLM 后端 | 芯片代号无法映射到 AI Hub 目标时直接报错，不退化成 CPU 伪报 |
 | iPhone/iPad | 无端侧 LLM 后端 | 当前接入只覆盖 Android |
 | Windows x64/ARM64 | 无端侧 LLM 后端 | 未实现 DirectML/CUDA/Vulkan/CPU 本地推理，当前只能使用联网平台 |
 | Linux x64/ARM64 | 无端侧 LLM 后端 | 未实现 CUDA/Vulkan/ROCm/CPU 本地推理，当前只能使用联网平台 |
 | macOS | 无端侧 LLM 后端 | 当前只能使用联网平台 |
 
-Android 设置页会断点下载固定版本 GGUF，校验精确大小和 SHA-256 后原子安装到应用私有目录。运行时再次校验清单、文件大小、`general.architecture=qwen3` 和 36 层结构；输入 embedding、采样与小算子留在 CPU，transformer、矩阵乘和 attention 由 Adreno Vulkan 执行。逐 token 结果通过 JNI/MethodChannel 流式送回 Flutter。
+Android 设置页通过 GenieX `ModelManagerWrapper.pullFlow` 断点下载固定版本部署包（`ModelPullInput` 带 `chipset=SM8850`，精度 `w4a16`），安装后由应用校验 `metadata.json` 的精度、`genie_config.json` 的 4096 上下文与 tokenizer 文件，再用 `LlmWrapper` 以 `ComputeUnitValue.NPU` 创建会话。下载/加载/生成分别映射为 `qwen3_download_*`、`qwen3_load_failed`、`qwen3_generate_failed` 错误码。
+
+提示词不依赖 SDK 的 Jinja 渲染：GenieX 0.3.17 对 AI Hub 的 Qwen3 包调用 `applyChatTemplate` 会返回空串（旧版本每轮都失败为 `empty Qwen3 chat template`），因此 `Qwen3Prompt.kt` 直接按模型自带 `sample_prompt.txt` 的 ChatML 格式构造 `<|im_start|>role\ncontent<|im_end|>\n` 并以 `<|im_start|>assistant\n` 结尾，同时剥离用户输入里的控制标记，避免越权插入轮次；`Qwen3PromptTest` 固定这四种行为。逐 token 结果通过 `generateStreamFlow` 经 MethodChannel 流式送回 Flutter。
 
 Android 不调用系统 on-device STT/TTS。MOSS 仅从带完整清单的 SM8850/HTP v81 包创建原生 session。SenseVoice 使用官方 SM8850 QNN context binary，通过 sherpa-onnx Kotlin/JNI API 的 `provider=qnn` 和 `QnnConfig` 加载；初始化或 HTP 执行失败会直接报错，不回退并伪报 QNN。
 
@@ -442,9 +444,9 @@ python tools/check_moss_package.py C:\Downloads\moss-qnn-v81-streaming.zip `
 
 同一台机器上仍未验证的项目：16 KB 页面大小（该机为 4096，只能在 16384 设备上验证）、听感主观评价、长时间通话温升与功耗。不要把这些写成已通过。
 
-华为 Mate 10 Pro 当前不接入许可受限的 HiAI DDK 二进制，也不使用通用 NNAPI 代替 Qualcomm QNN，因此 MOSS 在该设备上不可用。仓库没有在一加 15 或 Mate 10 Pro 上完成 MOSS 真机验收，不能把可构建路径写成真机已通过。
+华为 Mate 10 Pro 当前不接入许可受限的 HiAI DDK 二进制，也不使用通用 NNAPI 代替 Qualcomm QNN，因此 MOSS 在该设备上不可用。
 
-端侧 Qwen LLM 是独立的 llama.cpp Vulkan 推理链路，不会因为 MOSS-TTS 使用 QNN HTP 就继承其 NPU 状态。Windows/Linux 尚未接入本项目的端侧 LLM 后端。
+端侧 Qwen LLM 使用独立的 GenieX/QAIRT 会话：它与 MOSS 共用 QNN HTP 运行时，但不共享 session，也不会因为 MOSS 合成成功就继承"已验证"状态。两者的验证证据分别来自 `activeBackend=geniex-qairt-npu` + `activeBackendVerified=true`，以及 MOSS 的 `provider=QNN_HTP(prefill,decode)+ORT_CPU(sampler,codec)` 实际合成。Windows/Linux 尚未接入本项目的端侧 LLM 后端。
 
 ## Live2D Cubism 5 模型与 Core
 
@@ -561,7 +563,7 @@ Android Live2D 的实际 renderer 是 Cubism Native OpenGL ES，不经过 WebVie
 
 诊断中的 Vulkan/OpenGL 预检只说明设备 API 能否初始化。当前 Live2D 画面的证据来自同一 Native renderer 报告的 `Cubism Native OpenGL ES`、实际 GL renderer 字符串和递增的 `frameCount`。设备即使通过 Vulkan 预检，Live2D 也仍是 OpenGL ES；当前没有 Cubism Vulkan renderer，不能把预检结果写成实际 Vulkan 渲染。
 
-本次真机验收设备为 PLK110、SM8850、Android API 36、Adreno 840。Mao 已实际显示并持续动画；两张采样截图的舞台像素有 18.113% 变化，图形统计为 653 帧、0.46% jank、GPU median 3 ms。该结果只证明这台设备和当前构建，不自动覆盖其他 ROM、GPU 驱动或第三方模型。
+本次真机验收设备为 PLK110、SM8850、Android 17（API 37）、Adreno 840、4096 字节页。Mao 已实际显示并持续动画；两张采样截图的舞台像素有 18.113% 变化，图形统计为 653 帧、0.46% jank、GPU median 3 ms。该结果只证明这台设备和当前构建，不自动覆盖其他 ROM、GPU 驱动或第三方模型。
 
 ### LipSync 是怎样工作的
 
@@ -913,6 +915,8 @@ tar -tf .\build\app\outputs\apk\debug\app-debug.apk
 - [ ] 连续打断三轮后仍能正常进入下一轮，且被打断的部分回复保留在记录中。
 - [ ] 连续发送两次（或通话中重复触发发送）只产生一条用户消息和一个回复。
 
+在 PLK110 上已勾选的项（2026-11-16，当前构建）：冷启动不崩溃；MOSS ZIP 导入逐文件校验通过；MOSS 真实合成返回 `QNN_HTP(prefill,decode)+ORT_CPU(sampler,codec)`；Qwen3 首轮生成后状态为 `Qualcomm QNN HTP/NPU（已验证）`；英文与中文两轮生成、以及"重写"路径都返回非空文本。其余条目仍需在目标设备上逐项执行。
+
 观察崩溃和原生日志：
 
 ```powershell
@@ -1006,7 +1010,8 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 - 不能宣称大型 `Custom_Suiika` 一定能在任意 Android 设备加载。
 - 不能宣称 Windows WebView2 或 Linux CEF Web 宿主等同于 Live2D 原生宿主；iOS/macOS 当前没有 Live2D 宿主。
 - 不能仅凭库存在、provider 枚举或 NNAPI 设备枚举宣称 MOSS 已使用 NPU；必须有禁用 CPU EP 回退的真实合成结果 `QNN_HTP`。
-- 不能宣称仓库默认 ONNX Runtime AAR 已包含 QNN EP，不能宣称已直接接入华为 HiAI DDK，也不能宣称一加 15 或 Mate 10 Pro 已实机通过。
+- 不能宣称仓库默认 ONNX Runtime AAR 已包含 QNN EP，不能宣称已直接接入华为 HiAI DDK。
+- 一加 15（PLK110）上已实测的只有：MOSS 部署包导入与校验、MOSS 在 `QNN_HTP(prefill,decode)+ORT_CPU(sampler,codec)` 下的真实合成、Qwen3 在 `geniex-qairt-npu` 下的真实生成与重写。不能据此宣称该机型已完成全部真机验收：16 KB 页（该机为 4096）、听感、温升/功耗、长时通话仍未验证；Mate 10 Pro 未做任何验收。
 - 不能宣称 Windows/Linux 已完成端侧 TTS、持续离线通话或端侧 LLM 硬件加速。
 - 不能宣称当前文件存储支持多进程或多设备并发写入。
 - 不能宣称摄像头人脸检测等于真人、活体或身份认证；它只是本地的人脸存在与位置检测。

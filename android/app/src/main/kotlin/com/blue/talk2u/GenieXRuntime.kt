@@ -281,8 +281,8 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
             checkGenerationActive()
             check(active.reset() == GENIEX_SUCCESS) { "Unable to reset the GenieX Qwen3 session" }
             checkGenerationActive()
-            val prompt = active.applyChatTemplate(chat, "", false, true).getOrThrow().formattedText
-            check(prompt.isNotBlank()) { "GenieX returned an empty Qwen3 chat template" }
+            val prompt = Qwen3Prompt.build(chat.map { it.role to it.content })
+            check(prompt.isNotBlank()) { "Qwen3 prompt construction produced no text" }
             Log.i(
                 "Talk2U/LLM",
                 "turn.start messages=${chat.size} promptChars=${prompt.length} keep=$SLIDING_WINDOW_KEEP",
