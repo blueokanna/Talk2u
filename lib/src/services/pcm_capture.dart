@@ -129,6 +129,9 @@ class FullDuplexPcmCapture implements PcmCapture {
   StreamSubscription<dynamic>? _subscription;
   AudioCaptureCapabilities _capabilities = const AudioCaptureCapabilities();
   bool _disposed = false;
+  bool _started = false;
+  Future<AudioCaptureCapabilities>? _startOperation;
+  Future<void>? _stopOperation;
 
   @override
   Stream<Uint8List> get frames => _controller.stream;
@@ -153,22 +156,70 @@ class FullDuplexPcmCapture implements PcmCapture {
   @override
   Future<AudioCaptureCapabilities> start() async {
     if (_disposed) throw StateError('full-duplex capture 已释放');
-    _subscription ??= _frames.receiveBroadcastStream().listen((event) {
-      if (event is Uint8List) {
-        _controller.add(event);
-      } else if (event is List<int>) {
-        _controller.add(Uint8List.fromList(event));
-      }
-    });
-    final value = await _channel.invokeMapMethod<dynamic, dynamic>('start');
-    _capabilities = value == null
-        ? const AudioCaptureCapabilities()
-        : AudioCaptureCapabilities.fromMap(value);
-    return _capabilities;
+    final stopping = _stopOperation;
+    if (stopping != null) await stopping;
+    if (_disposed) throw StateError('full-duplex capture 已释放');
+    final starting = _startOperation;
+    if (starting != null) return starting;
+    if (_started) return _capabilities;
+    final operation = _startOnce();
+    _startOperation = operation;
+    try {
+      return await operation;
+    } finally {
+      if (identical(_startOperation, operation)) _startOperation = null;
+    }
+  }
+
+  Future<AudioCaptureCapabilities> _startOnce() async {
+    _subscription = _frames.receiveBroadcastStream().listen(
+      (event) {
+        if (_disposed || _controller.isClosed) return;
+        if (event is Uint8List) {
+          _controller.add(event);
+        } else if (event is List<int>) {
+          _controller.add(Uint8List.fromList(event));
+        }
+      },
+      onError: (Object error, StackTrace stack) {
+        if (!_disposed && !_controller.isClosed) {
+          _controller.addError(error, stack);
+        }
+      },
+    );
+    try {
+      final value = await _channel.invokeMapMethod<dynamic, dynamic>('start');
+      _started = true;
+      _capabilities = value == null
+          ? const AudioCaptureCapabilities()
+          : AudioCaptureCapabilities.fromMap(value);
+      return _capabilities;
+    } catch (_) {
+      await _subscription?.cancel();
+      _subscription = null;
+      rethrow;
+    }
   }
 
   @override
-  Future<void> stop() async {
+  Future<void> stop() {
+    final stopping = _stopOperation;
+    if (stopping != null) return stopping;
+    final operation = _stopOnce();
+    _stopOperation = operation;
+    return operation.whenComplete(() {
+      if (identical(_stopOperation, operation)) _stopOperation = null;
+    });
+  }
+
+  Future<void> _stopOnce() async {
+    try {
+      await _startOperation;
+    } catch (_) {
+      // Failed startup already removed its event subscription.
+    }
+    if (!_started) return;
+    _started = false;
     try {
       await _channel.invokeMethod<void>('stop');
     } on PlatformException {

@@ -1,3 +1,5 @@
+import com.android.build.api.artifact.SingleArtifact
+import org.gradle.process.CommandLineArgumentProvider
 import java.security.MessageDigest
 import java.util.zip.ZipFile
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
@@ -349,6 +351,7 @@ android {
                 cppFlags += listOf("-std=c++20", "-fexceptions", "-frtti")
                 arguments += "-DTALK2U_CUBISM_SDK_ROOT=${cubismSdkRoot.invariantSeparatorsPath}"
                 arguments += "-DANDROID_STL=c++_shared"
+                arguments += "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
             }
         }
     }
@@ -374,6 +377,10 @@ android {
 
     packaging {
         jniLibs {
+            // QAIRT/GenieX DSP loading requires files in nativeLibraryDir.
+            // Extracted/compressed JNI packaging is supported on 16KB Android;
+            // ELF alignment is still mandatory and verified below. Any stored
+            // library in the final APK must also pass the ZIP-offset check.
             useLegacyPackaging = true
             excludes += setOf(
                 "**/libcdsprpc.so",
@@ -385,7 +392,9 @@ android {
     }
 
     androidResources {
-        noCompress += listOf("onnx", "data", "model", "bin", "so")
+        // Do not add "so": that overrides legacy JNI compression and creates
+        // stored libraries with only 4-byte ZIP alignment under this layout.
+        noCompress += listOf("onnx", "data", "model", "bin")
     }
 
     buildTypes {
@@ -427,4 +436,62 @@ tasks.named("preBuild").configure {
     if (qnnSdkRoot != null) {
         dependsOn(prepareQnnSdkJni, prepareQnnSdkAssets)
     }
+}
+
+// Inspect real outputs, including Flutter/plugin/Rust/prebuilt libraries. Linking
+// flags alone cannot fix an incompatible dependency. Python 3 uses stdlib only.
+val nativeVerifier = rootProject.file("../tools/verify_android_native.py")
+val nativeVerifierPython = providers.gradleProperty("talk2u.python")
+    .orElse(providers.environmentVariable("TALK2U_PYTHON"))
+    .getOrElse("python")
+androidComponents.onVariants { variant ->
+    val capitalized = variant.name.replaceFirstChar { it.uppercase() }
+    val mergedTasks = tasks.matching { it.name == "merge${capitalized}NativeLibs" }
+    val verifyMerged = tasks.register<Exec>("verify${capitalized}Native16Kb") {
+        group = "verification"
+        description = "Check every merged native ELF before packaging"
+        dependsOn(mergedTasks)
+        inputs.file(nativeVerifier)
+        inputs.files(mergedTasks)
+        commandLine(nativeVerifierPython, nativeVerifier.absolutePath)
+        argumentProviders.add(CommandLineArgumentProvider {
+            listOf("--report", layout.buildDirectory.file(
+                "reports/native-page-size/${variant.name}-merged.json",
+            ).get().asFile.absolutePath) + mergedTasks.flatMap { task ->
+                task.outputs.files.files.map { it.absolutePath }
+            }
+        })
+    }
+    tasks.matching { it.name == "strip${capitalized}DebugSymbols" ||
+        it.name == "package$capitalized" }.configureEach {
+        dependsOn(verifyMerged)
+    }
+    val apkDirectory = variant.artifacts.get(SingleArtifact.APK)
+    val verifyApk = tasks.register<Exec>("verify${capitalized}Apk16Kb") {
+        group = "verification"
+        description = "Check packaged ELF segments and uncompressed APK ZIP offsets"
+        inputs.file(nativeVerifier)
+        inputs.dir(apkDirectory)
+        commandLine(nativeVerifierPython, nativeVerifier.absolutePath)
+        argumentProviders.add(CommandLineArgumentProvider {
+            listOf(apkDirectory.get().asFile.absolutePath, "--report",
+                layout.buildDirectory.file("reports/native-page-size/${variant.name}-apk.json")
+                    .get().asFile.absolutePath)
+        })
+    }
+    val bundleFile = variant.artifacts.get(SingleArtifact.BUNDLE)
+    val verifyBundle = tasks.register<Exec>("verify${capitalized}Bundle16Kb") {
+        group = "verification"
+        description = "Check AAB ELF segments (generated APK ZIP checks remain required)"
+        inputs.file(nativeVerifier)
+        inputs.file(bundleFile)
+        commandLine(nativeVerifierPython, nativeVerifier.absolutePath)
+        argumentProviders.add(CommandLineArgumentProvider {
+            listOf(bundleFile.get().asFile.absolutePath, "--report",
+                layout.buildDirectory.file("reports/native-page-size/${variant.name}-bundle.json")
+                    .get().asFile.absolutePath)
+        })
+    }
+    tasks.matching { it.name == "assemble$capitalized" }.configureEach { dependsOn(verifyApk) }
+    tasks.matching { it.name == "bundle$capitalized" }.configureEach { dependsOn(verifyBundle) }
 }

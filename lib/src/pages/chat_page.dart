@@ -12,6 +12,8 @@ import 'package:talk2u/src/pages/conversation_list_page.dart';
 import 'package:talk2u/src/pages/character_list_page.dart';
 import 'package:talk2u/src/pages/settings_page.dart';
 import 'package:talk2u/src/services/call_session.dart';
+import 'package:talk2u/src/services/camera_observation_service.dart';
+import 'package:talk2u/src/rendering/motion_policy.dart';
 import 'package:talk2u/src/services/offline_speech_service.dart';
 import 'package:talk2u/src/services/live2d_model_importer.dart';
 import 'package:talk2u/src/services/moss_tts_service.dart';
@@ -36,14 +38,62 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   ChatState? _chatState;
   int _handledResponseRevision = 0;
   CallSession? _callSession;
+  CallPhase? _lastAvatarCallPhase;
   bool _lastStreamingState = false;
   bool _autoFollow = true;
   bool _autoScrollScheduled = false;
   final _avatarController = Live2dAvatarController();
+  final _camera = CameraObservationService();
+  final _cameraState = ValueNotifier(
+    const CameraObservationState(status: 'idle'),
+  );
+  StreamSubscription<CameraObservationState>? _cameraSubscription;
+  bool _routeVisible = true;
+  String? _observedConversationId;
+
+  void _handleCameraState(CameraObservationState state) {
+    if (!mounted) return;
+    _cameraState.value = state;
+    final face = state.primaryFace;
+    if (state.isObserving && face != null) {
+      _avatarController.lookAt(face.centerX * 2 - 1, face.centerY * 2 - 1);
+    } else {
+      _avatarController.clearGaze();
+    }
+  }
+
+  Future<void> _toggleCameraObservation() async {
+    final state = _camera.latest;
+    if (state.isObserving || state.isStarting) {
+      await _camera.stop();
+      return;
+    }
+    final strings = AppLocalizations.of(context);
+    final enabled = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(strings.cameraObservationStart),
+        content: Text(strings.cameraObservationDescription),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text(strings.cancel),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(strings.cameraObservationEnable),
+          ),
+        ],
+      ),
+    );
+    if (enabled != true || !mounted) return;
+    await _camera.start();
+  }
 
   @override
   void initState() {
     super.initState();
+    _cameraSubscription = _camera.states.listen(_handleCameraState);
     _fabController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 200),
@@ -57,10 +107,14 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    final visible = ModalRoute.of(context)?.isCurrent ?? true;
+    if (_routeVisible && !visible) unawaited(_camera.stop());
+    _routeVisible = visible;
     final chatState = context.read<ChatState>();
     if (identical(_chatState, chatState)) return;
     _chatState?.removeListener(_handleChatStateChanged);
     _chatState = chatState;
+    _observedConversationId = chatState.currentConversationId;
     _handledResponseRevision = chatState.completedResponseRevision;
     chatState.addListener(_handleChatStateChanged);
     _callSession ??= CallSession(
@@ -73,12 +127,15 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   void _handleCallPhaseChanged() {
     final session = _callSession;
     if (session == null) return;
-    _avatarController.perform(switch (session.phase) {
-      CallPhase.listening => 'listening',
-      CallPhase.thinking => 'thinking',
-      CallPhase.speaking => 'talking',
-      CallPhase.idle || CallPhase.halted => 'calm',
-    });
+    if (_lastAvatarCallPhase != session.phase) {
+      _lastAvatarCallPhase = session.phase;
+      _avatarController.perform(switch (session.phase) {
+        CallPhase.listening => 'listening',
+        CallPhase.thinking => 'thinking',
+        CallPhase.speaking => 'talking',
+        CallPhase.idle || CallPhase.halted => 'calm',
+      });
+    }
     if (!mounted) return;
     setState(() {});
     final error = session.lastError;
@@ -96,6 +153,17 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   void _handleChatStateChanged() {
     final chatState = _chatState;
     if (chatState == null) return;
+    if (_observedConversationId != chatState.currentConversationId) {
+      final previousId = _observedConversationId;
+      _observedConversationId = chatState.currentConversationId;
+      _handledResponseRevision = chatState.completedResponseRevision;
+      // Creating the first conversation during a call is normal. Switching
+      // an existing conversation must not carry its microphone turn forward.
+      if (previousId != null) {
+        unawaited(_callSession?.stop());
+        unawaited(_camera.stop());
+      }
+    }
 
     if (chatState.isStreaming != _lastStreamingState) {
       _lastStreamingState = chatState.isStreaming;
@@ -162,6 +230,9 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
 
   @override
   void dispose() {
+    unawaited(_cameraSubscription?.cancel());
+    unawaited(_camera.dispose());
+    _cameraState.dispose();
     final session = _callSession;
     _callSession = null;
     if (session != null) {
@@ -944,14 +1015,21 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
           return Stack(
             fit: StackFit.expand,
             children: [
-              Live2dAvatar(
-                key: ValueKey(modelPath),
-                modelPath: modelPath,
-                controller: _avatarController,
-                onTap: _handleAvatarTap,
+              TickerMode(
+                enabled: _routeVisible,
+                child: RepaintBoundary(
+                  child: Live2dAvatar(
+                    key: ValueKey(modelPath),
+                    modelPath: modelPath,
+                    controller: _avatarController,
+                    onTap: _handleAvatarTap,
+                  ),
+                ),
               ),
               AnimatedPadding(
-                duration: const Duration(milliseconds: 160),
+                duration: AppMotionPolicy.of(
+                  context,
+                ).duration(const Duration(milliseconds: 160)),
                 curve: Curves.easeOutCubic,
                 padding: EdgeInsets.only(bottom: keyboardInset),
                 child: Column(
@@ -1009,35 +1087,85 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                                           : Icons.call_outlined,
                                     ),
                                   ),
+                                  if (Theme.of(context).platform ==
+                                      TargetPlatform.android) ...[
+                                    const SizedBox(width: 8),
+                                    ValueListenableBuilder<
+                                      CameraObservationState
+                                    >(
+                                      valueListenable: _cameraState,
+                                      builder: (context, state, _) =>
+                                          IconButton.filledTonal(
+                                            tooltip:
+                                                state.isObserving ||
+                                                    state.isStarting
+                                                ? strings.cameraObservationStop
+                                                : strings
+                                                      .cameraObservationStart,
+                                            onPressed: _toggleCameraObservation,
+                                            icon: Icon(
+                                              state.isObserving ||
+                                                      state.isStarting
+                                                  ? Icons.videocam_off_outlined
+                                                  : Icons.videocam_outlined,
+                                            ),
+                                          ),
+                                    ),
+                                  ],
                                 ],
                               ),
                             ),
                           ),
-                          if (_showTranscript)
-                            Align(
-                              alignment: Alignment.bottomCenter,
-                              child: LayoutBuilder(
-                                builder: (context, constraints) {
-                                  final factor = keyboardVisible ? 0.46 : 0.58;
-                                  final minimum = keyboardVisible
-                                      ? 104.0
-                                      : 180.0;
-                                  final scaledHeight =
-                                      constraints.maxHeight * factor;
-                                  final targetHeight = scaledHeight < minimum
-                                      ? minimum
-                                      : scaledHeight;
-                                  final panelHeight = targetHeight
-                                      .clamp(0.0, constraints.maxHeight)
-                                      .toDouble();
-                                  return SizedBox(
-                                    width: double.infinity,
-                                    height: panelHeight,
-                                    child: _buildTranscriptPanel(chatState),
-                                  );
-                                },
-                              ),
-                            ),
+                          AnimatedSwitcher(
+                            duration: AppMotionPolicy.of(
+                              context,
+                            ).duration(const Duration(milliseconds: 240)),
+                            switchInCurve: Curves.easeOutCubic,
+                            switchOutCurve: Curves.easeInCubic,
+                            transitionBuilder: (child, animation) =>
+                                FadeTransition(
+                                  opacity: animation,
+                                  child: SlideTransition(
+                                    position: Tween<Offset>(
+                                      begin: const Offset(0, 0.04),
+                                      end: Offset.zero,
+                                    ).animate(animation),
+                                    child: child,
+                                  ),
+                                ),
+                            child: !_showTranscript
+                                ? const SizedBox.shrink(key: ValueKey('hidden'))
+                                : Align(
+                                    key: const ValueKey('transcript'),
+                                    alignment: Alignment.bottomCenter,
+                                    child: LayoutBuilder(
+                                      builder: (context, constraints) {
+                                        final factor = keyboardVisible
+                                            ? 0.46
+                                            : 0.58;
+                                        final minimum = keyboardVisible
+                                            ? 104.0
+                                            : 180.0;
+                                        final scaledHeight =
+                                            constraints.maxHeight * factor;
+                                        final targetHeight =
+                                            scaledHeight < minimum
+                                            ? minimum
+                                            : scaledHeight;
+                                        final panelHeight = targetHeight
+                                            .clamp(0.0, constraints.maxHeight)
+                                            .toDouble();
+                                        return SizedBox(
+                                          width: double.infinity,
+                                          height: panelHeight,
+                                          child: _buildTranscriptPanel(
+                                            chatState,
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                  ),
+                          ),
                           if (_showScrollToBottom && _showTranscript)
                             Positioned(
                               right: 16,
@@ -1053,6 +1181,51 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                             ),
                         ],
                       ),
+                    ),
+                    ValueListenableBuilder<CameraObservationState>(
+                      valueListenable: _cameraState,
+                      builder: (context, state, _) {
+                        final label = switch (state.status) {
+                          'starting' || 'requestingPermission' =>
+                            strings.cameraObservationStarting,
+                          'observing' =>
+                            state.faceDetected
+                                ? strings.cameraObservationDetected
+                                : strings.cameraObservationSearching,
+                          'permissionDenied' => strings.cameraObservationDenied,
+                          'unsupported' => strings.cameraObservationUnsupported,
+                          'error' => strings.cameraObservationFailed,
+                          'stopped'
+                              when state.reason == 'background' ||
+                                  state.reason ==
+                                      'permission_granted_tap_to_start' =>
+                            strings.cameraObservationRestart,
+                          _ => null,
+                        };
+                        if (label == null) return const SizedBox.shrink();
+                        return Material(
+                          color: theme.colorScheme.surfaceContainer,
+                          child: Row(
+                            children: [
+                              const SizedBox(width: 12),
+                              const Icon(Icons.videocam_outlined, size: 18),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  label,
+                                  maxLines: 3,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              IconButton(
+                                tooltip: strings.cameraObservationClose,
+                                onPressed: () => unawaited(_camera.stop()),
+                                icon: const Icon(Icons.close, size: 18),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
                     ),
                     _buildExecutionStatus(chatState),
                     if (chatState.errorMessage != null)
@@ -1453,7 +1626,18 @@ class _AnimatedMessageItemState extends State<_AnimatedMessageItem>
       begin: const Offset(0, 0.15),
       end: Offset.zero,
     ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic));
-    _controller.forward();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (AppMotionPolicy.of(context).animate) {
+      if (_controller.value < 1 && !_controller.isAnimating) {
+        _controller.forward();
+      }
+    } else {
+      _controller.value = 1;
+    }
   }
 
   @override
@@ -1486,7 +1670,18 @@ class _TypingDotsState extends State<_TypingDots>
     _controller = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1200),
-    )..repeat();
+    );
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (AppMotionPolicy.of(context).animate) {
+      if (!_controller.isAnimating) _controller.repeat();
+    } else {
+      _controller.stop();
+      _controller.value = 0.5;
+    }
   }
 
   @override

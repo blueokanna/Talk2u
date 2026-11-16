@@ -10,6 +10,8 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:talk2u/l10n/generated/app_localizations.dart';
 import 'package:talk2u/src/services/accelerator_telemetry_service.dart';
+import 'package:talk2u/src/rendering/motion_policy.dart';
+import 'package:talk2u/src/rendering/avatar_frame_gate.dart';
 import 'package:talk2u/src/services/offline_speech_service.dart';
 import 'package:webview_cef/webview_cef.dart';
 import 'package:webview_windows/webview_windows.dart' as windows_webview;
@@ -45,9 +47,24 @@ class Live2dAvatarController extends ChangeNotifier {
 
   String get cue => _cue;
   int get revision => _revision;
+  Offset _gaze = Offset.zero;
+  Offset get gaze => _gaze;
+
+  /// Normalized mirrored screen coordinates: left/top -1, right/bottom +1.
+  void lookAt(double x, double y) {
+    final next = Offset(
+      x.isFinite ? x.clamp(-1.0, 1.0) : 0,
+      y.isFinite ? y.clamp(-1.0, 1.0) : 0,
+    );
+    if ((next - _gaze).distanceSquared < 0.0001) return;
+    _gaze = next;
+    notifyListeners();
+  }
+
+  void clearGaze() => lookAt(0, 0);
 
   void perform(String cue) {
-    if (cue.isEmpty || cue == _cue) return;
+    if (cue.isEmpty) return;
     _cue = cue;
     _revision++;
     notifyListeners();
@@ -59,18 +76,53 @@ class Live2dAvatar extends StatefulWidget {
   final Live2dAvatarController? controller;
   final VoidCallback? onTap;
 
+  /// Set false for hidden IndexedStack/Offstage children. Route visibility also
+  /// follows TickerMode; paint occlusion cannot be inferred by a platform view.
+  final bool visible;
+
   const Live2dAvatar({
     super.key,
     required this.modelPath,
     this.controller,
     this.onTap,
+    this.visible = true,
   });
 
   @override
   State<Live2dAvatar> createState() => _Live2dAvatarState();
 }
 
-class _Live2dAvatarState extends State<Live2dAvatar> {
+class _Live2dAvatarState extends State<Live2dAvatar>
+    with WidgetsBindingObserver {
+  bool _rendererReady = false;
+  bool _foreground = true;
+  bool _tickerEnabled = true;
+  bool _reducedMotion = false;
+  bool get _active => _foreground && _tickerEnabled && widget.visible;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final policy = AppMotionPolicy.of(context);
+    _tickerEnabled = policy.active;
+    _reducedMotion = policy.reducedMotion;
+    _syncRenderPolicy();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _foreground = state == AppLifecycleState.resumed;
+    _syncRenderPolicy();
+  }
+
+  void _syncRenderPolicy() {
+    _invoke('setRenderPolicy', {
+      'active': _active,
+      'reducedMotion': _reducedMotion,
+    });
+    if (_active && _rendererReady) _pushSpeechState();
+  }
+
   MethodChannel? _channel;
   WebViewController? _desktopController;
   windows_webview.WebviewController? _windowsController;
@@ -79,6 +131,7 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
   bool _wasSpeaking = false;
   int _lastCueRevision = -1;
   int _lastControllerRevision = -1;
+  Offset? _lastGaze;
   String? _error;
   Map<String, dynamic>? _readyDetails;
   bool _diagnosticsLoading = false;
@@ -90,6 +143,10 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _foreground =
+        WidgetsBinding.instance.lifecycleState == null ||
+        WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
     OfflineSpeechService.instance.addListener(_syncMouth);
     widget.controller?.addListener(_syncController);
     _lastControllerRevision = widget.controller?.revision ?? -1;
@@ -108,18 +165,31 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
   @override
   void didUpdateWidget(covariant Live2dAvatar oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.controller == widget.controller) return;
-    oldWidget.controller?.removeListener(_syncController);
-    widget.controller?.addListener(_syncController);
-    _lastControllerRevision = widget.controller?.revision ?? -1;
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller?.removeListener(_syncController);
+      widget.controller?.addListener(_syncController);
+      _lastControllerRevision = widget.controller?.revision ?? -1;
+    }
+    if (oldWidget.modelPath != widget.modelPath) {
+      _restartRenderer();
+    } else if (oldWidget.visible != widget.visible) {
+      _syncRenderPolicy();
+    }
   }
 
   void _syncController({bool force = false}) {
     final controller = widget.controller;
-    if (controller == null) return;
+    if (controller == null || !_rendererReady) return;
+    if (_active && !_reducedMotion && controller.gaze != _lastGaze) {
+      _lastGaze = controller.gaze;
+      _invoke('setGaze', {'x': controller.gaze.dx, 'y': controller.gaze.dy});
+    }
     if (!force && controller.revision == _lastControllerRevision) return;
     _lastControllerRevision = controller.revision;
-    if (controller.cue.isNotEmpty) {
+    if (_rendererReady &&
+        _active &&
+        !_reducedMotion &&
+        controller.cue.isNotEmpty) {
       _invoke('perform', {'cue': controller.cue});
     }
   }
@@ -134,12 +204,10 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
   }
 
   void _pushSpeechState({bool force = false}) {
+    if (!_rendererReady || !_active) return;
     final speech = OfflineSpeechService.instance;
     if (force || speech.speaking != _wasSpeaking) {
       _invoke('setSpeaking', {'value': speech.speaking});
-      if (speech.speaking && speech.speechEmotion != 'neutral') {
-        _invoke('perform', {'cue': speech.speechEmotion});
-      }
       if (!speech.speaking && !speech.generating) {
         _invoke('setMouth', {'value': 0.0});
         _invoke('resetExpression', const {});
@@ -148,7 +216,9 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
     }
     if (speech.speaking &&
         (force || speech.animationCueRevision != _lastCueRevision)) {
-      _invoke('perform', {'cue': speech.animationCue});
+      if (!_reducedMotion) {
+        _invoke('perform', {'cue': speech.animationCue});
+      }
       _lastCueRevision = speech.animationCueRevision;
     }
     _wasSpeaking = speech.speaking;
@@ -160,7 +230,11 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
 
   void _invoke(String method, Map<String, Object> arguments) {
     _channel?.invokeMethod<void>(method, arguments).catchError((_) {});
-    final script = switch (method) {
+    var script = switch (method) {
+      'setRenderPolicy' =>
+        'window.Talk2UFrameGate?.setPolicy(${jsonEncode(arguments)})',
+      'setGaze' =>
+        'Talk2UAvatar.setGaze?.(${jsonEncode(arguments['x'])}, ${jsonEncode(arguments['y'])})',
       'setMouth' => 'Talk2UAvatar.setMouth(${jsonEncode(arguments['value'])})',
       'setSpeaking' =>
         'Talk2UAvatar.setSpeaking(${jsonEncode(arguments['value'])})',
@@ -169,6 +243,9 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
       _ => null,
     };
     if (script == null) return;
+    if (method != 'setRenderPolicy') {
+      script = '$script; window.Talk2UFrameGate?.invalidate()';
+    }
     final desktop = _desktopController;
     if (desktop != null && desktop.value) {
       desktop.executeJavaScript(script).catchError((_) {});
@@ -203,9 +280,33 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
     _desktopAssetPath('assets/live2d/index.html'),
   ).replace(queryParameters: {'model': _desktopModelUri()}).toString();
 
+  /// Desktop renderers load a Web host from bundled assets. Cubism Core for Web
+  /// is licensed and cannot ship here, so a build without the host files has no
+  /// renderer at all; reporting that precisely beats a failed WebView page.
+  Future<bool> _desktopHostInstalled() async {
+    try {
+      final host = await rootBundle.load('assets/live2d/index.html');
+      return host.lengthInBytes > 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> _ensureDesktopHost() async {
+    if (await _desktopHostInstalled()) return true;
+    if (!mounted) return false;
+    setState(() {
+      _error = AppLocalizations.of(context).live2dDesktopHostMissing;
+      _recoverableError = false;
+    });
+    return false;
+  }
+
   Future<void> _initializeWindowsRenderer() async {
+    if (!await _ensureDesktopHost()) return;
     final generation = _viewGeneration;
     final controller = windows_webview.WebviewController();
+    StreamSubscription<dynamic>? subscription;
     try {
       await controller.initialize();
       if (!mounted || generation != _viewGeneration) {
@@ -227,6 +328,13 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
           windows_webview.WebviewHostResourceAccessKind.allow,
         );
       }
+      await controller.addScriptToExecuteOnDocumentCreated(
+        avatarFrameGateScript(active: _active, reducedMotion: _reducedMotion),
+      );
+      if (!mounted || generation != _viewGeneration) {
+        controller.dispose();
+        return;
+      }
       await controller.addScriptToExecuteOnDocumentCreated('''
         window.Talk2uNative = {
           postMessage: message => window.chrome.webview.postMessage(message),
@@ -240,34 +348,41 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
           })
         };
       ''');
-      await _windowsMessageSubscription?.cancel();
-      _windowsMessageSubscription = controller.webMessage.listen((message) {
+      if (!mounted || generation != _viewGeneration) {
+        controller.dispose();
+        return;
+      }
+      subscription = controller.webMessage.listen((message) {
+        if (!mounted || generation != _viewGeneration) return;
         if (message is String) {
           _handleStatus(message);
         } else if (message != null) {
           _handleStatus(jsonEncode(message));
         }
       });
+      _windowsMessageSubscription = subscription;
       _windowsController = controller;
       final page = Uri.https('talk2u.assets', '/assets/live2d/index.html', {
         'model': modelMapping.url,
       }).toString();
       await controller.loadUrl(page);
       if (!mounted || generation != _viewGeneration) {
-        await _windowsMessageSubscription?.cancel();
-        _windowsMessageSubscription = null;
-        controller.dispose();
-        return;
+        await subscription.cancel();
+        return; // Restart/dispose already released this assigned controller.
       }
+      _syncRenderPolicy();
       setState(() {});
     } catch (error) {
-      await _windowsMessageSubscription?.cancel();
-      _windowsMessageSubscription = null;
+      await subscription?.cancel();
+      if (!mounted || generation != _viewGeneration) {
+        if (subscription == null) controller.dispose();
+        return;
+      }
       if (identical(_windowsController, controller)) {
         _windowsController = null;
+        _windowsMessageSubscription = null;
       }
       controller.dispose();
-      if (!mounted || generation != _viewGeneration) return;
       final strings = AppLocalizations.of(context);
       setState(() {
         _error = strings.live2dRuntimeFailed('$error');
@@ -315,19 +430,32 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
   }
 
   Future<void> _initializeDesktopRenderer() async {
+    if (!await _ensureDesktopHost()) return;
     final generation = _viewGeneration;
     try {
       await _initializeDesktopCef();
       if (!mounted || generation != _viewGeneration) return;
       final controller = WebviewManager().createWebView(
         loading: const Center(child: CircularProgressIndicator()),
-        injectUserScripts: InjectUserScripts(),
+        injectUserScripts: InjectUserScripts()
+          ..add(
+            UserScript(
+              avatarFrameGateScript(
+                active: _active,
+                reducedMotion: _reducedMotion,
+              ),
+              ScriptInjectTime.LOAD_START,
+            ),
+          ),
       );
       _desktopController = controller;
       controller.setWebviewListener(
         WebviewEventsListener(
           onConsoleMessage: (level, message, source, line) {
-            if (level >= 4 && mounted && _error == null) {
+            if (level >= 4 &&
+                mounted &&
+                generation == _viewGeneration &&
+                _error == null) {
               final strings = AppLocalizations.of(context);
               setState(() => _error = strings.live2dScriptFailed(message));
             }
@@ -335,18 +463,22 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
         ),
       );
       await controller.initialize(_desktopPageUri());
-      if (!mounted || generation != _viewGeneration) {
-        controller.dispose();
-        return;
-      }
+      if (!mounted || generation != _viewGeneration) return;
       await controller.setJavaScriptChannels({
         JavascriptChannel(
           name: 'Talk2uNative',
-          onMessageReceived: (message) => _handleStatus(message.message),
+          onMessageReceived: (message) {
+            if (mounted && generation == _viewGeneration) {
+              _handleStatus(message.message);
+            }
+          },
         ),
       });
+      if (!mounted || generation != _viewGeneration) return;
       await controller.executeJavaScript('window.flushTalk2uStatus?.()');
-      if (mounted) setState(() {});
+      if (!mounted || generation != _viewGeneration) return;
+      _syncRenderPolicy();
+      setState(() {});
     } catch (error) {
       if (!mounted || generation != _viewGeneration) return;
       final strings = AppLocalizations.of(context);
@@ -358,12 +490,19 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
   }
 
   void _onCreated(int viewId) {
+    final generation = _viewGeneration;
     final channel = MethodChannel('talk2u/live2d_$viewId');
+    _channel?.setMethodCallHandler(null);
     channel.setMethodCallHandler((call) async {
-      if (call.method != 'status' || call.arguments is! String) return;
+      if (generation != _viewGeneration ||
+          call.method != 'status' ||
+          call.arguments is! String) {
+        return;
+      }
       _handleStatus(call.arguments as String);
     });
     _channel = channel;
+    _syncRenderPolicy();
     if (mounted) {
       setState(() {
         _error = null;
@@ -372,7 +511,9 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
       });
     }
     channel.invokeMethod<String>('getStatus').then((status) {
-      if (status != null) _handleStatus(status);
+      if (mounted && generation == _viewGeneration && status != null) {
+        _handleStatus(status);
+      }
     }, onError: (_) {});
   }
 
@@ -389,9 +530,11 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
             status['type'] == 'error' && status['recoverable'] == true;
         if (status['type'] == 'ready') _readyDetails = status;
       });
-      if (status['type'] == 'ready') {
-        _pushSpeechState(force: true);
-        _syncController(force: true);
+      if (status['type'] == 'ready' && !_rendererReady) {
+        _rendererReady = true;
+        _syncRenderPolicy();
+        _pushSpeechState();
+        _syncController();
       }
       if (_recoverableError && _automaticRestarts < 1) {
         _automaticRestarts++;
@@ -415,6 +558,9 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
   }
 
   void _restartRenderer() {
+    _rendererReady = false;
+    _wasSpeaking = false;
+    _lastGaze = null;
     _channel?.setMethodCallHandler(null);
     _channel = null;
     _desktopController?.dispose();
@@ -555,6 +701,8 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
 
   @override
   void dispose() {
+    _viewGeneration++;
+    WidgetsBinding.instance.removeObserver(this);
     OfflineSpeechService.instance.removeListener(_syncMouth);
     widget.controller?.removeListener(_syncController);
     _channel?.setMethodCallHandler(null);
@@ -584,6 +732,8 @@ class _Live2dAvatarState extends State<Live2dAvatar> {
               layoutDirection: TextDirection.ltr,
               creationParams: {
                 'modelPath': widget.modelPath,
+                'active': _active,
+                'reducedMotion': _reducedMotion,
                 'backgroundColor': Theme.of(
                   context,
                 ).scaffoldBackgroundColor.toARGB32(),

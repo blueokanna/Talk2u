@@ -37,7 +37,8 @@ void main() {
     });
 
     test('hardware cancellation tightens the leak estimate', () {
-      final gate = ReferenceAnchoredEchoGate()..bindHardwareEchoCancellation(true);
+      final gate = ReferenceAnchoredEchoGate()
+        ..bindHardwareEchoCancellation(true);
       final withoutCanceller = ReferenceAnchoredEchoGate();
 
       final cancelled = gate.evaluate(
@@ -52,6 +53,30 @@ void main() {
       );
 
       expect(cancelled.threshold, lessThan(raw.threshold));
+    });
+
+    test('separated short bursts do not accumulate into interruption', () {
+      final gate = ReferenceAnchoredEchoGate();
+      for (var burst = 0; burst < 10; burst++) {
+        for (var frame = 0; frame < 4; frame++) {
+          expect(
+            gate
+                .evaluate(
+                  observedRms: 0.4,
+                  referenceAmplitude: 0,
+                  playbackActive: false,
+                )
+                .decision,
+            isNot(TurnTakingDecision.bargeIn),
+          );
+        }
+        gate.evaluate(
+          observedRms: 0,
+          referenceAmplitude: 0,
+          playbackActive: false,
+        );
+      }
+      expect(gate.last.voicedMilliseconds, 0);
     });
 
     test('silence keeps the noise floor low and stays quiet', () {

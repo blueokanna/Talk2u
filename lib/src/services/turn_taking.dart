@@ -144,7 +144,8 @@ class ReferenceAnchoredEchoGate {
           ? TurnTakingDecision.echo
           : TurnTakingDecision.quiet;
     } else {
-      _voicedMilliseconds = math.max(0, _voicedMilliseconds - _frameMilliseconds);
+      // The hold is continuous speech, not a leaky count of isolated bursts.
+      _voicedMilliseconds = 0;
       if (observedRms > expectedEcho * 0.6 && expectedEcho > minimumThreshold) {
         decision = TurnTakingDecision.echo;
         _echoHoldoffMilliseconds = 240;
@@ -221,9 +222,10 @@ class SelfEchoTranscriptFilter {
     return false;
   }
 
-  static String _normalize(String value) => value
-      .toLowerCase()
-      .replaceAll(RegExp(r'[\s\p{P}\p{S}]', unicode: true), '');
+  static String _normalize(String value) => value.toLowerCase().replaceAll(
+    RegExp(r'[\s\p{P}\p{S}]', unicode: true),
+    '',
+  );
 
   static double _dice(String left, String right) {
     final leftGrams = _bigrams(left);

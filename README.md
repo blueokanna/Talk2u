@@ -24,7 +24,7 @@ Talk2U 是一个 Flutter + Rust 的本地角色聊天应用。聊天记录、角
 | 离线 STT | 已实现 | Android SM8850 上使用 sherpa-onnx + SenseVoice 2024-07-17 INT8 QNN context，提供 ASR/LID/SER/AED |
 | 持续语音通话 | Android 有条件实现 | `CallSession` 状态机；确认硬件 AEC 后全双工，否则半双工；参考信号双讲检测 + 文本自回音过滤；可语音/点按打断 |
 | 重新生成 | 已实现 | 旧回复不进入新 prompt，附带“禁止复用开头/句式/收尾”的显式指令，并以 temperature/top_p 0.95 重新采样；成功后原位替换旧消息 |
-| 空闲资源占用 | 已实现 | 无 1 Hz 硬件遥测轮询、无全程 30 ms 流式定时器、非通话模式不自动合成语音 |
+| 空闲资源占用 | 已实现 | 启动只探测 MOSS/QNN 能力，首次朗读才加载 HTP 上下文；无 1 Hz 硬件遥测轮询、无全程 30 ms 流式定时器、非通话模式不自动合成语音；Live2D 在后台、离页或系统要求减少动画时停止持续渲染 |
 | Android/Windows/Linux Live2D | 有条件实现 | Android 使用 Cubism SDK for Native 5 R.5 + C++ + OpenGL ES；Windows 使用 WebView2，Linux 使用 CEF |
 | Cubism 5 moc3 | 已实现 | 导入时读取 `MOC3` 头并接受 moc3 版本 1-5；运行时拒绝 Core 4 |
 | `.cdi3.json` | 已实现 | 校验 Version 3，并用于发现 LipSync 参数 |
@@ -37,6 +37,8 @@ Talk2U 是一个 Flutter + Rust 的本地角色聊天应用。聊天记录、角
 | Android NNAPI 设备诊断 | 已实现 | 枚举设备名、版本、类型和 feature level；CPU 类型不会计为加速设备 |
 | 原生 Vulkan/OpenGL ES 预检 | 已实现 | NDK C++ 真实创建 Vulkan instance/device；失败时真实创建 EGL OpenGL ES 3/2 context |
 | Android Live2D GPU 渲染 | 已实现 | `GLSurfaceView` 托管 Native C++ Cubism renderer，实际使用硬件 OpenGL ES；首帧成功后才报告 ready |
+| Android 前置摄像头视线跟随 | 已实现，需用户主动开启 | Camera2 硬件人脸检测（SIMPLE/FULL 模式）；只读取每帧的人脸包围盒并立即释放，不保存、不上传图像；坐标经屏幕方向与镜像归一化后驱动 Live2D 视线，后台、切页或关闭立即释放摄像头 |
+| 真人/活体识别 | 未实现，且不声称 | 普通 RGB 人脸检测无法区分照片、屏幕或面具；代码中 `livenessVerified` 恒为 `false`，界面只表述“检测到人脸” |
 | 官方 Cubism Native SDK 5 渲染器 | 已集成，需外部 SDK | Gradle/CMake 从 `TALK2U_CUBISM_SDK_ROOT` 使用 Framework 与 Core；Core 不进入 Git 仓库 |
 | Discord | 已实现 | 独立 Rust 轮询桥接进程，共用对话、记忆和供应商层 |
 | iOS/macOS Live2D | 未实现 | 当前 Live2D 宿主只覆盖 Android、Windows 和 Linux |
@@ -49,7 +51,7 @@ Talk2U 是一个 Flutter + Rust 的本地角色聊天应用。聊天记录、角
 `docs/emotion_aware_rag_paper.tex` 的 AHCA 描述的是上下文层（身份锚定、分层记忆、W-RRF 检索、情绪衰减、多样性调节）。在这之上，本仓库实现了四个此前只存在于设计里的系统级机制，每一个都有可复现的代码路径，而不是概念图：
 
 1. **参考信号锚定的双讲检测（RATT）** — 助手自己合成音频，天然拥有回声参考。用 20 ms 振幅包络 + 180 ms 峰值保持把盲回声路径辨识降级为已知参考检测，从而与设备延迟解耦；再把平台 AEC 的 `enabled` 结果当作能力门控，决定全双工还是半双工。参见 `turn_taking.dart`、`call_session.dart`、`FullDuplexAudioCapture.kt`，推导与评测协议见 [docs/reference_anchored_turn_taking.tex](docs/reference_anchored_turn_taking.tex)。
-2. **反自启动的重生成** — 旧回复被排除在新 prompt 之外（消除 self-priming），旧回复的开头/结尾/段长被写成显式反重复约束，采样温度与 top-p 同时抬高，成功后原位替换消息 ID。这解决的是“重生成等于复读”，而不是“重生成等于再采样一次”。参见 `chat_engine.rs::regenerate_response`。
+2. **反自启动的重生成** — 旧回复被排除在新 prompt 之外（消除 self-priming），旧回复的开头/结尾/段长被写成显式反重复约束，采样温度与 top-p 同时抬高，成功后原位替换消息 ID。这解决的是“重生成等于复读”，而不是“重生成等于再采样一次”。参见 `chat_engine.rs::regenerate_response_with_snapshot`。
 3. **非语言情感转导** — MOSS 的 JNI 没有 emotion 参数，也没有 SSML。这里把 emoji 与 Markdown 结构映射为声码器可正确处理的停顿与标点，同时把同一批符号解析为主导情绪，驱动整段回复的初帧表情；纯 emoji 回复直接跳过合成。参见 `speech_text_normalizer.dart`。
 4. **播放进度锚定的表演时间轴** — 用实际 WAV 的振幅包络作为时间基准，把静音舞台指示、情绪词与 emoji 偏移映射到帧级 Live2D 动作，并在同一情绪家族内轮换等价表演以避免动作重复。参见 `offline_speech_service.dart` 与 `live2d_native_renderer.cpp`。
 
@@ -108,7 +110,7 @@ Rust core
 
 ```text
 android/                 Android 原生 TTS/STT、Live2D PlatformView
-assets/live2d/           Live2D HTML 宿主与可再分发 JS 依赖
+assets/live2d/           桌面 Web 宿主目录（需自行按许可放置 index.html 与 Core JS，仓库不提供）
 lib/                     Flutter UI、状态、角色与端侧服务
 model/Live2d/mao/runtime/       内置最小 Cubism 5 运行时模型
 model/Custom_Suiika/     可选外部参考模型；仓库不要求存在，也不打进 APK
@@ -210,6 +212,32 @@ tar -tf .\build\app\outputs\flutter-apk\app-debug.apk |
 ```
 
 第一条必须同时出现 `libflutter.so` 和 `librust_lib_talk2u.so`；第二条的 `native-code` 当前必须只有 `arm64-v8a`。
+
+### 16 KB 页大小兼容（Google Play 强制项）
+
+从 2025-11-01 起，面向 Android 15+ 的新提审与更新必须支持 16 KB 页。它对原生代码是两条独立的硬约束，只改一条不算通过：
+
+1. **ELF 可加载段对齐**：每个 `PT_LOAD` 的 `p_align ≥ 16384` 且为 2 的幂，`p_vaddr - p_offset` 按 16 KB 同余。
+2. **安装包内布局**：未压缩的 `lib/*.so` 在 ZIP 中的数据偏移必须 16 KB 对齐（`zipalign -P 16`）；一旦改为压缩打包（由系统解压到 `nativeLibraryDir`），约束落在解压后的 ELF 上。
+
+本仓库的落地方式：
+
+- `android/app/src/main/cpp/CMakeLists.txt` 用 `add_link_options` 给所有共享目标加 `-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384`，覆盖 MOSS/QNN/Live2D/探针等全部自建库。
+- Rust 侧同时写进 `rust/.cargo/config.toml` 与 Cargokit 的 `android_environment.dart`。后者必须改，因为 `CARGO_ENCODED_RUSTFLAGS` 会**整体覆盖** Cargo 配置文件中的 target rustflags；只写 config.toml 时 Flutter 构建出来的 `librust_lib_talk2u.so` 会是 4 KB 对齐。
+- 预编译依赖（QNN、ORT、sherpa-onnx AAR、GenieX AAR、Live2D Core）无法靠链接参数修正，必须在打包后检查真实文件。`tools/verify_android_native.py` 直接解析 ELF 程序头、ZIP 本地文件头与压缩方式；Hexagon DSP 固件（`e_machine=164`）单独归类，不冒充 Android 宿主 ELF。
+- Gradle 在 `merge*NativeLibs`、`assemble*`、`bundle*` 之后自动运行同一检查器，任何不合格的库都会让构建失败，而不是等上架被拒。
+
+实测与边界（2026-02 在当前工作区）：
+
+```powershell
+python tools/verify_android_native.py --help
+adb shell getconf PAGE_SIZE     # 当前测试机返回 4096，属于 4 KB 设备
+```
+
+- 现有预编译依赖中 49 个 Android 宿主 ELF 全部满足 16 KB；14 个 Hexagon DSP 文件单列。
+- 之前已安装的 `base.apk` 里 45 个 `lib/*.so` 是 STORED 且 ZIP 偏移仅 4 字节对齐。由于该包同时是 `extractNativeLibs=true`（系统解压后加载），这**不能单独判定它在 16 KB 设备上一定失败**；但它确实不满足“直接 mmap ZIP 内库”的路径。现在已从 `noCompress` 移除 `so`，走官方支持的“压缩 + 安装时解压”路径，并对最终包重新审计。
+- 上述结论都不等于“已在 16 KB 真机运行”。真正的验收必须找一台 `getconf PAGE_SIZE` 为 16384 的设备安装运行，本仓库不会用模拟器或 4 KB 机器伪造这条结论。
+
 
 也可以直接安装：
 
@@ -392,7 +420,7 @@ Android Gradle/CMake 只从 `TALK2U_CUBISM_SDK_ROOT` 指向的本机 SDK 读取�
 - Live2D Proprietary Software License Agreement：<https://www.live2d.com/eula/live2d-proprietary-software-license-agreement_en.html>
 - Live2D Open Software License Agreement：<https://www.live2d.com/eula/live2d-open-software-license-agreement_en.html>
 
-Windows/Linux Web 宿主需要合法取得的 Cubism Core for Web。仓库保留 Web host 与可再分发的 Pixi 依赖，但不包含 `live2dcubismcore.min.js`；离线桌面发布时需按许可自行提供。
+Windows/Linux Web 宿主需要合法取得的 Cubism Core for Web。**仓库不包含 Web 宿主页面本身**：`assets/live2d/index.html` 与 `assets/live2d/vendor/live2dcubismcore.min.js` 都必须由构建者自行提供并按许可放置；缺失时桌面端会直接给出“宿主资源未安装”的明确错误，而不是启动一个注定 404 的 WebView。Android Native 构建不使用这些 JavaScript 文件。
 
 ### 安装 Cubism Core 5 供 Windows/Linux Web 宿主离线使用
 
@@ -583,6 +611,29 @@ Native renderer 还会在标准参数存在时叠加一层轻量次级动态：�
 
 这些措施可以消除已知的资源和生命周期崩溃路径，但任何项目都不能诚实保证在所有厂商 ROM、驱动和任意第三方模型上“绝不闪退”。真机验收仍然必须执行。
 
+## 摄像头观察与视线跟随
+
+Live2D 的“观察”是一个可选的本地能力，不参与对话推理，也不做身份判断。入口在聊天页顶部：只有用户点击并确认说明后才会申请权限，订阅状态流本身不会打开摄像头。
+
+实现链路：
+
+```text
+Flutter: CameraObservationService (MethodChannel/EventChannel)
+  └─ Android: CameraObservation.kt (Camera2 + 前置 camera 的 SIMPLE/FULL face detect)
+       ├─ 仅在本地 ImageReader 上取人脸包围盒，帧立即释放
+       ├─ 200 ms 节流，输出 status / faceCount / primaryFace(归一化、镜像)
+       └─ 后台、离页、关闭、权限拒绝、销毁时释放 device/session/reader/线程
+  └─ Live2dAvatarController.lookAt(x, y) → Native 平滑视线目标（不叠加表演 cue）
+```
+
+几条刻意的设计边界：
+
+- **不做活体识别。** Camera2 的 `STATISTICS_FACE_DETECT_MODE_SIMPLE/FULL` 只能给出“画面里像人脸的区域”。照片、屏幕、海报与面具同样会触发。`CameraObservationState.livenessVerified` 恒为 `false`，界面文案只写“检测到人脸”，不写“真人已确认”。
+- **不保存、不上传。** 取帧只为读取元数据，像素被丢弃；没有截图、没有缓存文件、没有网络上传路径。应用进程退出即无残留。
+- **不自动恢复。** 授权弹窗可能触发 Activity pause，此时会安全取消启动，避免“用户点了拒绝却还在开摄像头”。返回应用后需要再次点击。
+- **硬件不支持就说 unsupported。** 没有前置摄像头、没有 `FACE_DETECT` 能力、或 5 秒内拿不到角色元数据时直接返回 `unsupported`，不用软件人脸检测冒充。
+- **与渲染策略一致。** 系统开启“减少动画”时，视线目标仍会更新，但非口型的平滑位移被收紧；离页或后台时 Live2D 与本能力同时停止。
+
 ## Android 应用内离线语音
 
 ### SenseVoice STT
@@ -710,12 +761,16 @@ Push-Location rust
 cargo test --all-targets
 Pop-Location
 
+cd rust; cargo build --release --target aarch64-linux-android; cd ..
+
 flutter test
 flutter analyze lib test
+python -m unittest discover -s tools -p test_verify_android_native.py -v
+node --test --test-isolation=none test/rendering/avatar_frame_gate_test.cjs
 flutter build apk --debug --target-platform android-arm64
 ```
 
-Rust 测试覆盖供应商鉴权/请求转换、Anthropic 和 OpenAI-compatible SSE、跨模型上下文、记忆、知识、错误重试和 Discord 分片。Flutter 测试覆盖聊天状态竞态与动作 cue 推断。
+Rust 测试覆盖供应商鉴权/请求转换、Anthropic 和 OpenAI-compatible SSE、跨模型上下文、记忆、知识、错误重试和 Discord 分片，并新增三类一致性回归：传输层 `Done` 不能被提前转发、取消后旧回复不能写入新轮次、并发写入只能有一个赢家。Flutter 测试覆盖聊天状态竞态、语音/MOSS 生命周期与取消、PCM 采集、摄像头观察竞态、动效策略和动作 cue 推断。Python 用例保证 16 KB 检查器在坏 ELF、4 KB 对齐、错误 ABI 和缺失输入上会失败关闭，而不是放行。
 
 ### 没有真实 Key 时的验收边界
 
@@ -759,6 +814,10 @@ tar -tf .\build\app\outputs\apk\debug\app-debug.apk
 - [ ] 开启飞行模式后，已安装的 SenseVoice 仍能识别中文和英文。
 - [ ] 导入超大模型时被明确拒绝，而不是应用闪退。
 - [ ] 切后台再返回，Live2D 和语音按钮仍可用。
+- [ ] 开启“视线跟随”后授权前置摄像头，屏幕出现人脸时角色视线跟随；注意这是人脸存在检测，照片与人脸照片同样可能触发。
+- [ ] 关闭摄像头、切到后台、打开设置页后，系统状态栏摄像头指示应立即消失；返回聊天页不会自动重开。
+- [ ] 连续打断三轮后仍能正常进入下一轮，且被打断的部分回复保留在记录中。
+- [ ] 连续发送两次（或通话中重复触发发送）只产生一条用户消息和一个回复。
 
 观察崩溃和原生日志：
 
@@ -856,5 +915,8 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 - 不能宣称仓库默认 ONNX Runtime AAR 已包含 QNN EP，不能宣称已直接接入华为 HiAI DDK，也不能宣称一加 15 或 Mate 10 Pro 已实机通过。
 - 不能宣称 Windows/Linux 已完成端侧 TTS、持续离线通话或端侧 LLM 硬件加速。
 - 不能宣称当前文件存储支持多进程或多设备并发写入。
+- 不能宣称摄像头人脸检测等于真人、活体或身份认证；它只是本地的人脸存在与位置检测。
+- 不能宣称仓库自带 Windows/Linux 的 Live2D Web 宿主；`assets/live2d/` 必须由构建者按许可补齐。
+- 不能宣称项目已在任意 16 KB 页设备上通过；当前环境只有 4 KB 设备，ELF 与打包布局通过不等于真机运行通过。
 
 这些限制会以错误、禁用状态或导入拒绝明确呈现，而不是通过占位动画、云端回退或静态图伪造成功。

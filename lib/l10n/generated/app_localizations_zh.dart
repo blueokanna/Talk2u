@@ -12,6 +12,47 @@ class AppLocalizationsZh extends AppLocalizations {
   String get appTitle => 'Talk2U';
 
   @override
+  String get cameraObservationStart => '开启视线跟随';
+
+  @override
+  String get cameraObservationStop => '关闭摄像头观察';
+
+  @override
+  String get cameraObservationDescription =>
+      '使用前置摄像头在本机检测人脸位置，让角色看向你。图像不保存、不上传。人脸检测可能被照片触发，不能验证真人或活体。离开页面或切到后台会关闭摄像头。';
+
+  @override
+  String get cameraObservationEnable => '开启摄像头';
+
+  @override
+  String get cameraObservationStarting => '正在开启摄像头';
+
+  @override
+  String get cameraObservationSearching => '摄像头已开启 · 等待人脸';
+
+  @override
+  String get cameraObservationDetected => '检测到人脸 · 视线跟随中';
+
+  @override
+  String get cameraObservationDenied => '未获得摄像头权限，请在系统设置中允许后重试。';
+
+  @override
+  String get cameraObservationUnsupported => '此设备未提供可用的前置摄像头硬件人脸检测。';
+
+  @override
+  String get cameraObservationFailed => '摄像头暂不可用，请关闭其它占用摄像头的应用后重试。';
+
+  @override
+  String get cameraObservationRestart => '摄像头已关闭，点击可重新开启。';
+
+  @override
+  String get cameraObservationClose => '关闭';
+
+  @override
+  String get live2dDesktopHostMissing =>
+      '桌面端 Live2D 宿主资源未安装：缺少 assets/live2d/index.html 与合法的 Cubism Core for Web。请按 README 的桌面渲染说明补齐后重新构建；Android 不受影响。';
+
+  @override
   String get settings => '设置';
 
   @override

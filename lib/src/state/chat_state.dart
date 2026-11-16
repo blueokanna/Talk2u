@@ -13,6 +13,20 @@ import 'package:talk2u/src/services/offline_llm_service.dart';
 typedef TestStreamSetup = void Function(Stream<ChatStreamEvent>, String);
 
 class ChatState extends ChangeNotifier {
+  ChatState({Future<Conversation?> Function(String)? readConversation})
+    : _readConversation =
+          readConversation ?? ((id) => rust_api.getConversation(id: id));
+
+  final Future<Conversation?> Function(String) _readConversation;
+  bool _disposed = false;
+  bool _preparingSend = false;
+  int _selectionToken = 0;
+
+  @override
+  void notifyListeners() {
+    if (!_disposed) super.notifyListeners();
+  }
+
   String? _currentConversationId;
   bool _enableThinking = true;
   bool _isStreaming = false;
@@ -143,7 +157,9 @@ class ChatState extends ChangeNotifier {
   }
 
   Future<void> setSelectedProvider(String providerId) async {
-    if (_selectedProviderId == providerId || _isStreaming) return;
+    if (_selectedProviderId == providerId || _isStreaming || _preparingSend) {
+      return;
+    }
     final provider = _providers.firstWhere((item) => item.id == providerId);
     _selectedProviderId = providerId;
     _selectedModel = provider.chatModel;
@@ -231,7 +247,9 @@ class ChatState extends ChangeNotifier {
   Future<void> createNewConversation() async {
     try {
       _abortActiveGeneration();
+      final selectionToken = _selectionToken;
       final conv = await rust_api.createConversation();
+      if (_disposed || selectionToken != _selectionToken) return;
       _currentConversationId = conv.id;
       _messages = [];
       _currentStreamingContent = '';
@@ -248,7 +266,9 @@ class ChatState extends ChangeNotifier {
   Future<void> startCharacterChat(Character character) async {
     try {
       _abortActiveGeneration();
+      final selectionToken = _selectionToken;
       final conv = await rust_api.createConversation();
+      if (_disposed || selectionToken != _selectionToken) return;
       _currentConversationId = conv.id;
       _messages = [];
       _currentStreamingContent = '';
@@ -272,6 +292,7 @@ class ChatState extends ChangeNotifier {
         );
       }
 
+      if (_disposed || selectionToken != _selectionToken) return;
       await loadConversation(conv.id);
       await refreshConversationList();
     } catch (e) {
@@ -292,20 +313,17 @@ class ChatState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<bool> loadConversation(
-    String id, {
-    bool preserveError = false,
-  }) async {
+  Future<bool> loadConversation(String id, {bool preserveError = false}) async {
     if (_currentConversationId != id) {
       _abortActiveGeneration();
     }
     final token = ++_loadToken;
     try {
       _regeneratingMessageId = null;
-      final conv = await rust_api.getConversation(id: id);
+      final conv = await _readConversation(id);
       // A newer load or a new generation started while this read was in
       // flight; applying it now would overwrite fresher UI state.
-      if (token != _loadToken) return false;
+      if (_disposed || token != _loadToken) return false;
       if (conv != null) {
         _currentConversationId = conv.id;
         _messages = conv.messages;
@@ -403,30 +421,45 @@ class ChatState extends ChangeNotifier {
   }
 
   Future<void> editAndResend(String messageId, String newContent) async {
-    if (_currentConversationId == null || _isStreaming) return;
+    if (_currentConversationId == null ||
+        _isStreaming ||
+        _preparingSend ||
+        _disposed) {
+      return;
+    }
     if (newContent.trim().isEmpty) return;
     final conversationId = _currentConversationId!;
+    final selectionToken = _selectionToken;
+    _preparingSend = true;
     try {
       await rust_api.rollbackToMessage(
         conversationId: conversationId,
         messageId: messageId,
       );
-      await loadConversation(conversationId);
-      await sendMessage(newContent);
-    } catch (e) {
-      debugPrint('Failed to edit and resend: $e');
-      if (_isStreaming) {
-        endStreaming();
+      if (_disposed || selectionToken != _selectionToken) return;
+      if (!await loadConversation(conversationId)) return;
+      if (_disposed || selectionToken != _selectionToken) return;
+    } catch (error) {
+      if (!_disposed && selectionToken == _selectionToken) {
+        setError('编辑重发失败: $error');
       }
-      await loadConversation(conversationId);
-      _errorMessage = '编辑重发失败: $e';
-      notifyListeners();
+      return;
+    } finally {
+      _preparingSend = false;
     }
+    await sendMessage(newContent);
   }
 
   Future<void> regenerateResponse(String assistantMessageId) async {
-    if (_currentConversationId == null || _isStreaming) return;
+    if (_currentConversationId == null ||
+        _isStreaming ||
+        _preparingSend ||
+        _disposed) {
+      return;
+    }
     final conversationId = _currentConversationId!;
+    final selectionToken = _selectionToken;
+    _preparingSend = true;
     try {
       final msgIndex = _messages.indexWhere((m) => m.id == assistantMessageId);
       if (msgIndex < 0) return;
@@ -445,7 +478,9 @@ class ChatState extends ChangeNotifier {
           conversationId: conversationId,
           messageId: assistantMessageId,
         );
-        await loadConversation(conversationId);
+        if (_disposed || selectionToken != _selectionToken) return;
+        if (!await loadConversation(conversationId)) return;
+        if (_disposed || selectionToken != _selectionToken) return;
       } else {
         _regeneratingMessageId = assistantMessageId;
       }
@@ -471,20 +506,27 @@ class ChatState extends ChangeNotifier {
       _listenToChatStream(stream, conversationId);
     } catch (e) {
       debugPrint('Failed to regenerate response: $e');
+      if (_disposed || selectionToken != _selectionToken) return;
       _regeneratingMessageId = null;
       if (_isStreaming) endStreaming();
       await loadConversation(conversationId, preserveError: true);
+    } finally {
+      _preparingSend = false;
     }
   }
 
   Future<void> restartStory() async {
-    if (_currentConversationId == null) return;
+    final conversationId = _currentConversationId;
+    if (conversationId == null || _disposed) return;
+    _abortActiveGeneration();
+    final selectionToken = _selectionToken;
     try {
       final success = await rust_api.restartStory(
-        conversationId: _currentConversationId!,
+        conversationId: conversationId,
       );
+      if (_disposed || selectionToken != _selectionToken) return;
       if (success) {
-        await loadConversation(_currentConversationId!);
+        await loadConversation(conversationId);
         await refreshConversationList();
       }
     } catch (e) {
@@ -505,15 +547,30 @@ class ChatState extends ChangeNotifier {
   }
 
   void _abortActiveGeneration() {
-    if (!_isStreaming) return;
+    _selectionToken++;
     _loadToken++;
+    _streamToken++;
+    _retryDoneTimer?.cancel();
+    final wasStreaming = _isStreaming;
     final previous = _currentConversationId;
     _generationWasCancelled = true;
     _cancelExistingSubscription();
-    if (previous != null) {
-      unawaited(rust_api.cancelGeneration(conversationId: previous));
+    if (wasStreaming && previous != null) {
+      unawaited(_cancelBackend(previous, usesAndroidOfflineProvider));
     }
-    endStreaming();
+    if (wasStreaming) endStreaming();
+  }
+
+  Future<void> _cancelBackend(String conversationId, bool offline) async {
+    try {
+      if (offline) {
+        await OfflineLlmService.instance.stopGeneration();
+      } else {
+        await rust_api.cancelGeneration(conversationId: conversationId);
+      }
+    } catch (error) {
+      debugPrint('[ChatState] Failed to cancel generation: $error');
+    }
   }
 
   void startStreaming() {
@@ -572,13 +629,19 @@ class ChatState extends ChangeNotifier {
     final streamToken = _streamToken;
     _streamSubscription = stream.listen(
       (event) {
-        if (streamToken != _streamToken) return;
+        if (_disposed || streamToken != _streamToken || _doneEventReceived) {
+          return;
+        }
         if (_currentConversationId != conversationId) return;
 
         try {
           event.when(
-            contentDelta: (delta) => appendStreamingContent(delta),
-            thinkingDelta: (delta) => appendThinkingContent(delta),
+            contentDelta: (delta) {
+              if (!_generationWasCancelled) appendStreamingContent(delta);
+            },
+            thinkingDelta: (delta) {
+              if (!_generationWasCancelled) appendThinkingContent(delta);
+            },
             done: () {
               _doneEventReceived = true;
               final wasCancelled = _generationWasCancelled;
@@ -588,7 +651,9 @@ class ChatState extends ChangeNotifier {
               loadConversation(conversationId, preserveError: true).then((
                 applied,
               ) {
-                if (!applied) return;
+                if (!applied || _disposed || streamToken != _streamToken) {
+                  return;
+                }
                 if (activeError != null && _errorMessage == null) {
                   _errorMessage = activeError;
                 }
@@ -666,9 +731,7 @@ class ChatState extends ChangeNotifier {
         '[ChatState] Stream closed without Done after 2s grace (conv=$conversationId)',
       );
       endStreaming();
-      loadConversation(conversationId, preserveError: true).then((
-        applied,
-      ) {
+      loadConversation(conversationId, preserveError: true).then((applied) {
         if (!applied) return;
         if (activeError != null && _errorMessage == null) {
           _errorMessage = activeError;
@@ -700,23 +763,41 @@ class ChatState extends ChangeNotifier {
   }
 
   Future<void> sendMessage(String content) async {
-    if (content.trim().isEmpty || _isStreaming) return;
-
+    if (content.trim().isEmpty || _isStreaming || _preparingSend || _disposed) {
+      return;
+    }
+    // Reserve the turn before the first await: two taps or an STT callback
+    // during provider initialization must never submit the same turn twice.
+    _preparingSend = true;
+    final selectionToken = _selectionToken;
     _cancelExistingSubscription();
     _regeneratingMessageId = null;
     _errorMessage = null;
     _lastFailedContent = null;
-
-    if (!await _ensureSelectedProviderReady()) return;
-
-    if (_currentConversationId == null) {
-      await createNewConversation();
+    try {
+      if (!await _ensureSelectedProviderReady()) return;
+      if (_disposed || selectionToken != _selectionToken) return;
+      if (_currentConversationId == null) {
+        final conversation = await rust_api.createConversation();
+        if (_disposed || selectionToken != _selectionToken) return;
+        _currentConversationId = conversation.id;
+        _messages = [];
+        _currentCharacter = null;
+      }
+    } catch (error) {
+      if (!_disposed && selectionToken == _selectionToken) {
+        setError('准备对话失败: $error', failedContent: content);
+      }
+      return;
+    } finally {
+      _preparingSend = false;
     }
 
     final conversationId = _currentConversationId;
-    if (conversationId == null) return;
+    if (conversationId == null || _disposed) return;
 
     startStreaming();
+    final streamToken = _streamToken;
 
     _messages = List.from(_messages)
       ..add(
@@ -738,6 +819,7 @@ class ChatState extends ChangeNotifier {
           content: content,
           model: _selectedModel,
         );
+        if (streamToken != _streamToken || _disposed) return;
         if (!saved) throw StateError('无法保存用户消息');
         await _generateOfflineAssistant(conversationId);
         return;
@@ -754,11 +836,12 @@ class ChatState extends ChangeNotifier {
       _listenToChatStream(stream, conversationId);
     } catch (e) {
       debugPrint('[ChatState] Failed to create stream: $e');
+      if (streamToken != _streamToken || _disposed) return;
       endStreaming();
-      loadConversation(conversationId).then((_) {
-        _errorMessage = e.toString();
-        notifyListeners();
-      });
+      final applied = await loadConversation(conversationId);
+      if (!applied || streamToken != _streamToken || _disposed) return;
+      _errorMessage = e.toString();
+      notifyListeners();
     }
   }
 
@@ -905,33 +988,40 @@ class ChatState extends ChangeNotifier {
     String conversationId, {
     String? avoidRepeat,
   }) async {
+    final streamToken = _streamToken;
+    final model = _selectedModel;
+    bool isCurrent() =>
+        !_disposed &&
+        streamToken == _streamToken &&
+        _currentConversationId == conversationId;
     try {
       final response = await OfflineLlmService.instance.generate(
         _buildOfflinePrompt(avoidRepeat: avoidRepeat),
         onText: (text) {
-          if (_currentConversationId == conversationId && _isStreaming) {
+          if (isCurrent() && _isStreaming && !_generationWasCancelled) {
             _replaceStreamingContent(text);
           }
         },
       );
+      if (!isCurrent() || _generationWasCancelled) return;
       final saved = await rust_api.addAssistantMessageWithModel(
         conversationId: conversationId,
         content: response,
-        model: _selectedModel,
+        model: model,
       );
       if (!saved) throw StateError('无法保存端侧 AI 回复');
 
-      if (_currentConversationId == conversationId) {
+      if (isCurrent() && !_generationWasCancelled) {
         _replaceStreamingContent(response);
         endStreaming();
         final applied = await loadConversation(conversationId);
-        if (!applied) return;
+        if (!applied || !isCurrent() || _generationWasCancelled) return;
         _completedResponseRevision++;
         await refreshConversationList();
       }
     } catch (error) {
       if (error is OfflineGenerationCancelled) {
-        if (_currentConversationId == conversationId) {
+        if (isCurrent()) {
           final partial = _currentStreamingContent.trim();
           _generationWasCancelled = true;
           endStreaming();
@@ -939,17 +1029,23 @@ class ChatState extends ChangeNotifier {
             await rust_api.addAssistantMessageWithModel(
               conversationId: conversationId,
               content: partial,
-              model: _selectedModel,
+              model: model,
             );
           }
-          await loadConversation(conversationId, preserveError: true);
+          if (isCurrent()) {
+            await loadConversation(conversationId, preserveError: true);
+          }
         }
         return;
       }
       debugPrint('[ChatState] Offline generation failed: $error');
-      if (_currentConversationId == conversationId) {
+      if (isCurrent()) {
         endStreaming();
-        await loadConversation(conversationId, preserveError: true);
+        final applied = await loadConversation(
+          conversationId,
+          preserveError: true,
+        );
+        if (!applied || !isCurrent()) return;
         _errorMessage = '端侧 AI 生成失败: $error';
         notifyListeners();
       }
@@ -1029,7 +1125,9 @@ class ChatState extends ChangeNotifier {
   }
 
   Future<void> stopGeneration() async {
+    _selectionToken++;
     if (!_isStreaming) return;
+    final streamToken = _streamToken;
     final conversationId = _currentConversationId;
     if (conversationId == null) return;
 
@@ -1042,9 +1140,14 @@ class ChatState extends ChangeNotifier {
       }
     } catch (error) {
       debugPrint('[ChatState] Failed to stop generation: $error');
-      _errorMessage = '停止生成失败: $error';
+      if (!_disposed && streamToken == _streamToken) {
+        _errorMessage = '停止生成失败: $error';
+      }
     } finally {
-      if (_currentConversationId == conversationId && _isStreaming) {
+      if (!_disposed &&
+          streamToken == _streamToken &&
+          _currentConversationId == conversationId &&
+          _isStreaming) {
         endStreaming();
       }
     }
@@ -1052,6 +1155,8 @@ class ChatState extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
+    _abortActiveGeneration();
     _cancelExistingSubscription();
     _streamFlushTimer?.cancel();
     _retryDoneTimer?.cancel();

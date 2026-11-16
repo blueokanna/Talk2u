@@ -69,7 +69,17 @@ class _MossPendingAudio {
 }
 
 class MossTtsService extends ChangeNotifier {
-  MossTtsService._() {
+  MossTtsService._({
+    AudioPlayer? player,
+    MethodChannel? channel,
+    bool? platformSupported,
+    Future<Directory> Function()? temporaryDirectory,
+    Future<Directory> Function()? supportDirectory,
+  }) : _player = player ?? AudioPlayer(),
+       _channel = channel ?? const MethodChannel('talk2u/moss_tts'),
+       _platformSupported = platformSupported,
+       _temporaryDirectory = temporaryDirectory ?? getTemporaryDirectory,
+       _supportDirectory = supportDirectory ?? getApplicationSupportDirectory {
     _completeSubscription = _player.onPlayerComplete.listen((_) {
       final completer = _playbackCompleter;
       if (completer != null && !completer.isCompleted) completer.complete();
@@ -85,13 +95,29 @@ class MossTtsService extends ChangeNotifier {
     });
   }
 
+  @visibleForTesting
+  factory MossTtsService.forTesting({
+    required AudioPlayer player,
+    required MethodChannel channel,
+    required Future<Directory> Function() directory,
+  }) => MossTtsService._(
+    player: player,
+    channel: channel,
+    platformSupported: true,
+    temporaryDirectory: directory,
+    supportDirectory: directory,
+  );
+
   static final instance = MossTtsService._();
   static const engineName = 'MOSS-TTS-Nano ONNX';
   static const engineLicense = 'Apache-2.0';
   static const modelName = 'MOSS-TTS-Nano 100M ONNX';
   static const amplitudeFrameMilliseconds = 20;
   static const modelBytes = 717414286;
-  static const _channel = MethodChannel('talk2u/moss_tts');
+  final MethodChannel _channel;
+  final bool? _platformSupported;
+  final Future<Directory> Function() _temporaryDirectory;
+  final Future<Directory> Function() _supportDirectory;
   static const _rootName = 'moss-tts-nano';
   static const _preferencesName = 'preferences.json';
 
@@ -121,7 +147,7 @@ class MossTtsService extends ChangeNotifier {
     MossVoice(id: 'Arisa', label: 'Arisa', locale: 'ja-JP', gender: 'female'),
   ];
 
-  final AudioPlayer _player = AudioPlayer();
+  final AudioPlayer _player;
   StreamSubscription<void>? _completeSubscription;
   StreamSubscription<Duration>? _durationSubscription;
   StreamSubscription<Duration>? _positionSubscription;
@@ -134,7 +160,11 @@ class MossTtsService extends ChangeNotifier {
   Duration _positionAnchor = Duration.zero;
   List<double> _amplitudeEnvelope = const [];
   File? _currentOutput;
-  final Set<File> _pendingOutputs = {};
+  final Map<File, int> _pendingOutputs = {};
+  Future<void>? _nativeInitializationFuture;
+  Future<void>? _stopFuture;
+  Future<void> _playerOperation = Future.value();
+  bool _disposed = false;
   double _segmentProgressStart = 0;
   double _segmentProgressEnd = 1;
   int _operation = 0;
@@ -159,7 +189,13 @@ class MossTtsService extends ChangeNotifier {
   bool _providerMeasured = false;
   Future<void>? _initializationFuture;
 
-  bool get supported => !kIsWeb && Platform.isAndroid;
+  bool get supported => _platformSupported ?? (!kIsWeb && Platform.isAndroid);
+
+  @override
+  void notifyListeners() {
+    if (!_disposed) super.notifyListeners();
+  }
+
   double get downloadProgress => totalDownloadBytes <= 0
       ? 0
       : (downloadedBytes / totalDownloadBytes).clamp(0, 1);
@@ -168,7 +204,7 @@ class MossTtsService extends ChangeNotifier {
   bool get hardwareAccelerationVerified =>
       _providerMeasured && _isQnnProvider(activeProvider);
   bool get hardwareRuntimeAvailable =>
-      runtimeReady && runtimeInitialized && runtimeProviders.isNotEmpty;
+      runtimeReady && runtimeProviders.isNotEmpty;
 
   String get accelerationLabel {
     if (hardwareAccelerationVerified && activeProvider.contains('ORT_CPU')) {
@@ -192,7 +228,7 @@ class MossTtsService extends ChangeNotifier {
   );
 
   Future<Directory> _rootDirectory() async {
-    final support = await getApplicationSupportDirectory();
+    final support = await _supportDirectory();
     return Directory('${support.path}${Platform.pathSeparator}$_rootName');
   }
 
@@ -205,7 +241,7 @@ class MossTtsService extends ChangeNotifier {
       initialized = true;
       return;
     }
-    if (runtimeInitialized || (initialized && !ready)) return;
+    if (initialized) return;
     final pending = _initializationFuture;
     if (pending != null) return pending;
     final future = _initializeInternal();
@@ -234,7 +270,7 @@ class MossTtsService extends ChangeNotifier {
         downloadedBytes = (model!['bytes'] as num).toInt();
         totalDownloadBytes = downloadedBytes;
       }
-      if (ready && runtimeReady) await _initializeNativeRuntime();
+      // Startup probes availability only. Load QNN contexts on first speech.
       await _cleanupAudioCache();
       lastError = runtimeReady ? null : 'Qualcomm QNN HTP 运行时不可用';
     } catch (error) {
@@ -248,7 +284,21 @@ class MossTtsService extends ChangeNotifier {
   }
 
   Future<void> _initializeNativeRuntime() async {
-    if (runtimeInitialized || initializing) return;
+    if (runtimeInitialized) return;
+    final pending = _nativeInitializationFuture;
+    if (pending != null) return pending;
+    final future = _initializeNativeRuntimeOnce();
+    _nativeInitializationFuture = future;
+    try {
+      await future;
+    } finally {
+      if (identical(_nativeInitializationFuture, future)) {
+        _nativeInitializationFuture = null;
+      }
+    }
+  }
+
+  Future<void> _initializeNativeRuntimeOnce() async {
     initializing = true;
     operationLabel = '正在初始化 QNN HTP 上下文';
     notifyListeners();
@@ -376,14 +426,24 @@ class MossTtsService extends ChangeNotifier {
     }
   }
 
-  Future<void> speak(String text) async {
+  Future<void> speak(String text) => _speak(text, toCompletion: false);
+
+  /// Captures this utterance's completion before startup can be superseded.
+  Future<void> speakToCompletion(String text) =>
+      _speak(text, toCompletion: true);
+
+  Future<void> _speak(String text, {required bool toCompletion}) async {
+    final normalized = SpeechTextNormalizer.clean(text);
+    // Empty / stage-direction-only input must not load a large model.
+    if (normalized.isEmpty || _disposed) return;
+    final operation = ++_operation;
+    await _stopCurrentSpeech();
+    if (operation != _operation || _disposed) return;
     await initialize();
+    if (operation != _operation || _disposed) return;
     if (!ready) throw StateError('请先导入 MOSS QNN HTP v81 部署包');
     if (!runtimeInitialized) await _initializeNativeRuntime();
-    final normalized = SpeechTextNormalizer.clean(text);
-    if (normalized.isEmpty) return;
-    await stopSpeaking();
-    final operation = ++_operation;
+    if (operation != _operation || _disposed) return;
     final startup = Completer<void>();
     _startupCompleter = startup;
     final completion = Completer<void>();
@@ -397,6 +457,7 @@ class MossTtsService extends ChangeNotifier {
     notifyListeners();
     unawaited(_runSpeech(normalized, operation, startup, completion));
     await startup.future;
+    if (toCompletion) await completion.future;
   }
 
   /// Resolves when the current utterance has finished playing (or was
@@ -459,6 +520,7 @@ class MossTtsService extends ChangeNotifier {
             Future<void>.delayed(const Duration(milliseconds: 250)),
           ]);
         }
+        if (operation != _operation) throw const _MossCancelled();
         if (!next.completed) {
           speaking = false;
           generating = true;
@@ -505,7 +567,24 @@ class MossTtsService extends ChangeNotifier {
         _speechDoneCompleter = null;
       }
       if (!completion.isCompleted) completion.complete();
-      await _deletePendingOutputs();
+      if (operation == _operation) {
+        generating = false;
+        speaking = false;
+        playbackAmplitude = 0;
+        _stopLipSyncClock();
+        notifyListeners();
+        if (operation == _operation && lastError != null) {
+          // Playback failure can leave the prefetched next chunk running.
+          // Invalidate it before cancelling so it cannot publish orphan audio.
+          _operation++;
+          try {
+            await _stopCurrentSpeech();
+          } on Object catch (_) {
+            // Preserve the original synthesis/playback failure.
+          }
+        }
+      }
+      await _deletePendingOutputs(operation: operation);
     }
   }
 
@@ -515,12 +594,13 @@ class MossTtsService extends ChangeNotifier {
     int index,
   ) async {
     if (operation != _operation) throw const _MossCancelled();
-    final cache = await getTemporaryDirectory();
+    final cache = await _temporaryDirectory();
+    if (operation != _operation) throw const _MossCancelled();
     var output = File(
       '${cache.path}${Platform.pathSeparator}talk2u-moss-$operation-$index-'
       '${DateTime.now().microsecondsSinceEpoch}.wav',
     );
-    _pendingOutputs.add(output);
+    _pendingOutputs[output] = operation;
     try {
       final response = await _channel
           .invokeMapMethod<dynamic, dynamic>('synthesize', {
@@ -545,7 +625,7 @@ class MossTtsService extends ChangeNotifier {
       if (generatedOutput.path != output.path) {
         _pendingOutputs.remove(output);
         output = generatedOutput;
-        _pendingOutputs.add(output);
+        _pendingOutputs[output] = operation;
       }
       if (!await isPlayableMossWav(output)) {
         throw StateError('MOSS-TTS-Nano 生成的音频文件无效');
@@ -576,8 +656,12 @@ class MossTtsService extends ChangeNotifier {
       ),
     );
     _positionAnchor = Duration.zero;
-    _playbackCompleter = Completer<void>();
-    await _player.play(DeviceFileSource(audio.file.path));
+    final playback = Completer<void>();
+    _playbackCompleter = playback;
+    await _queuePlayer(() async {
+      if (operation != _operation) throw const _MossCancelled();
+      await _player.play(DeviceFileSource(audio.file.path));
+    });
     if (operation != _operation) throw const _MossCancelled();
     speaking = true;
     playbackAmplitude = 0;
@@ -585,7 +669,9 @@ class MossTtsService extends ChangeNotifier {
     _startLipSyncClock();
     notifyListeners();
     if (!startup.isCompleted) startup.complete();
-    await _playbackCompleter!.future;
+    await playback.future;
+    if (operation != _operation) throw const _MossCancelled();
+    if (identical(_playbackCompleter, playback)) _playbackCompleter = null;
     _stopLipSyncClock();
     playbackAmplitude = 0;
     playbackProgress = _segmentProgressEnd;
@@ -630,14 +716,38 @@ class MossTtsService extends ChangeNotifier {
     _positionAnchor = Duration.zero;
   }
 
-  Future<void> stopSpeaking() async {
+  Future<void> _queuePlayer(Future<void> Function() action) {
+    final next = _playerOperation.then((_) => action());
+    _playerOperation = next.catchError((Object _) {});
+    return next;
+  }
+
+  Future<void> stopSpeaking() {
     _operation++;
+    return _stopCurrentSpeech();
+  }
+
+  Future<void> _stopCurrentSpeech() {
+    final pending = _stopFuture;
+    if (pending != null) return pending;
+    final future = _stopCurrentSpeechOnce();
+    _stopFuture = future;
+    return future.whenComplete(() {
+      if (identical(_stopFuture, future)) _stopFuture = null;
+    });
+  }
+
+  Future<void> _stopCurrentSpeechOnce() async {
+    final outputs = _pendingOutputs.keys.toList(growable: false);
     final startup = _startupCompleter;
     _startupCompleter = null;
     if (startup != null && !startup.isCompleted) startup.complete();
     final playback = _playbackCompleter;
     _playbackCompleter = null;
     if (playback != null && !playback.isCompleted) playback.complete();
+    final completion = _speechDoneCompleter;
+    _speechDoneCompleter = null;
+    if (completion != null && !completion.isCompleted) completion.complete();
     _stopLipSyncClock();
     if (supported) {
       try {
@@ -646,13 +756,15 @@ class MossTtsService extends ChangeNotifier {
         lastError = null;
       }
     }
-    await _player.stop();
+    await _queuePlayer(_player.stop);
     generating = false;
     speaking = false;
     playbackAmplitude = 0;
     playbackProgress = 0;
     _amplitudeEnvelope = const [];
-    await _deletePendingOutputs();
+    for (final output in outputs) {
+      await _deleteAudio(output);
+    }
     notifyListeners();
   }
 
@@ -678,18 +790,6 @@ class MossTtsService extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> _deleteCurrentOutput() async {
-    final output = _currentOutput;
-    _currentOutput = null;
-    if (output != null && await output.exists()) {
-      try {
-        await output.delete();
-      } on FileSystemException {
-        return;
-      }
-    }
-  }
-
   Future<void> _deleteAudio(File output) async {
     _pendingOutputs.remove(output);
     if (_currentOutput?.path == output.path) _currentOutput = null;
@@ -701,22 +801,18 @@ class MossTtsService extends ChangeNotifier {
     }
   }
 
-  Future<void> _deletePendingOutputs() async {
-    await _deleteCurrentOutput();
-    final outputs = _pendingOutputs.toList(growable: false);
-    _pendingOutputs.clear();
+  Future<void> _deletePendingOutputs({required int operation}) async {
+    final outputs = _pendingOutputs.entries
+        .where((entry) => entry.value == operation)
+        .map((entry) => entry.key)
+        .toList(growable: false);
     for (final output in outputs) {
-      if (!await output.exists()) continue;
-      try {
-        await output.delete();
-      } on FileSystemException {
-        continue;
-      }
+      await _deleteAudio(output);
     }
   }
 
   Future<void> _cleanupAudioCache() async {
-    final cache = await getTemporaryDirectory();
+    final cache = await _temporaryDirectory();
     await for (final entity in cache.list()) {
       if (entity is! File ||
           !entity.uri.pathSegments.last.startsWith('talk2u-moss-')) {
@@ -732,7 +828,10 @@ class MossTtsService extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
     _operation++;
+    final completion = _speechDoneCompleter;
+    if (completion != null && !completion.isCompleted) completion.complete();
     _stopLipSyncClock();
     final startup = _startupCompleter;
     if (startup != null && !startup.isCompleted) startup.complete();

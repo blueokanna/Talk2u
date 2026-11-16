@@ -9,6 +9,7 @@ import 'package:talk2u/src/rust/api/chat_api.dart' as rust_api;
 import 'package:talk2u/src/rust/frb_generated.dart';
 import 'package:talk2u/src/state/chat_state.dart';
 import 'package:talk2u/src/theme/app_theme.dart';
+import 'package:talk2u/src/rendering/motion_policy.dart';
 import 'package:talk2u/src/pages/chat_page.dart';
 import 'package:talk2u/src/services/offline_llm_service.dart';
 import 'package:talk2u/src/services/offline_speech_service.dart';
@@ -35,29 +36,35 @@ class Talk2UApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MultiProvider(
-      providers: [
-        ChangeNotifierProvider.value(value: preferences),
-        ChangeNotifierProvider(create: (_) => ChatState()),
-      ],
-      child: Consumer<UiPreferences>(
-        builder: (context, preferences, _) => MaterialApp(
-          onGenerateTitle: (context) => AppLocalizations.of(context).appTitle,
-          debugShowCheckedModeBanner: false,
-          localizationsDelegates: const [
-            AppLocalizations.delegate,
-            GlobalMaterialLocalizations.delegate,
-            GlobalWidgetsLocalizations.delegate,
-            GlobalCupertinoLocalizations.delegate,
-          ],
-          supportedLocales: AppLocalizations.supportedLocales,
-          locale: preferences.locale,
-          theme: AppTheme.build(Brightness.light, preferences.colorTheme),
-          darkTheme: AppTheme.build(Brightness.dark, preferences.colorTheme),
-          themeMode: preferences.themeMode,
-          themeAnimationDuration: const Duration(milliseconds: 300),
-          themeAnimationCurve: Curves.easeInOutCubicEmphasized,
-          home: const _StartupGate(),
+    return MediaQuery.fromView(
+      view: View.of(context),
+      child: MultiProvider(
+        providers: [
+          ChangeNotifierProvider.value(value: preferences),
+          ChangeNotifierProvider(create: (_) => ChatState()),
+        ],
+        child: Consumer<UiPreferences>(
+          builder: (context, preferences, _) => MaterialApp(
+            onGenerateTitle: (context) => AppLocalizations.of(context).appTitle,
+            debugShowCheckedModeBanner: false,
+            localizationsDelegates: const [
+              AppLocalizations.delegate,
+              GlobalMaterialLocalizations.delegate,
+              GlobalWidgetsLocalizations.delegate,
+              GlobalCupertinoLocalizations.delegate,
+            ],
+            supportedLocales: AppLocalizations.supportedLocales,
+            locale: preferences.locale,
+            theme: AppTheme.build(Brightness.light, preferences.colorTheme),
+            darkTheme: AppTheme.build(Brightness.dark, preferences.colorTheme),
+            themeMode: preferences.themeMode,
+            builder: (context, child) => AppMotionScope(child: child!),
+            themeAnimationDuration: MediaQuery.disableAnimationsOf(context)
+                ? Duration.zero
+                : const Duration(milliseconds: 300),
+            themeAnimationCurve: Curves.easeInOutCubicEmphasized,
+            home: const _StartupGate(),
+          ),
         ),
       ),
     );

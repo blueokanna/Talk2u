@@ -19,6 +19,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <unistd.h>
 
 namespace talk2u {
 namespace {
@@ -74,7 +75,9 @@ struct VulkanInterop::Impl {
     VkCommandPool commandPool = VK_NULL_HANDLE;
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
     VkSemaphore imageAvailable = VK_NULL_HANDLE;
-    VkSemaphore renderFinished = VK_NULL_HANDLE;
+    // Present waits may outlive the submission fence. Reuse each semaphore
+    // only after its swapchain image is acquired again.
+    std::vector<VkSemaphore> renderFinished;
     VkSemaphore importedEglFence = VK_NULL_HANDLE;
     VkFence frameFence = VK_NULL_HANDLE;
     VkQueryPool timestampQueryPool = VK_NULL_HANDLE;
@@ -152,9 +155,9 @@ struct VulkanInterop::Impl {
         description.height = height;
         description.layers = 1;
         description.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
+        // GPU_DATA_BUFFER is only valid with BLOB, not an RGBA image.
         description.usage = AHARDWAREBUFFER_USAGE_GPU_FRAMEBUFFER |
-            AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
-            AHARDWAREBUFFER_USAGE_GPU_DATA_BUFFER;
+            AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
         Require(AHardwareBuffer_allocate(&description, &hardwareBuffer) == 0 && hardwareBuffer != nullptr,
                 "AHardwareBuffer allocation failed");
         const EGLClientBuffer clientBuffer = getNativeClientBuffer(hardwareBuffer);
@@ -182,6 +185,12 @@ struct VulkanInterop::Impl {
     }
 
     void CreateVulkan() {
+        const auto enumerateVersion = reinterpret_cast<PFN_vkEnumerateInstanceVersion>(
+            vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateInstanceVersion"));
+        uint32_t loaderVersion = VK_API_VERSION_1_0;
+        Require(enumerateVersion != nullptr && enumerateVersion(&loaderVersion) == VK_SUCCESS &&
+                    loaderVersion >= VK_API_VERSION_1_1,
+                "AHardwareBuffer interop requires Vulkan 1.1");
         uint32_t instanceExtensionCount = 0;
         Require(vkEnumerateInstanceExtensionProperties(nullptr, &instanceExtensionCount, nullptr) == VK_SUCCESS,
                 "vkEnumerateInstanceExtensionProperties failed");
@@ -200,7 +209,9 @@ struct VulkanInterop::Impl {
         applicationInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
         applicationInfo.pEngineName = "Talk2U";
         applicationInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-        applicationInfo.apiVersion = VK_API_VERSION_1_0;
+        // Includes external memory/semaphore capabilities, dedicated allocation
+        // and YCbCr conversion dependencies required by Android AHB imports.
+        applicationInfo.apiVersion = VK_API_VERSION_1_1;
         VkInstanceCreateInfo instanceInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
         instanceInfo.pApplicationInfo = &applicationInfo;
         instanceInfo.enabledExtensionCount = 2;
@@ -217,15 +228,32 @@ struct VulkanInterop::Impl {
         Require(vkEnumeratePhysicalDevices(instance, &physicalCount, nullptr) == VK_SUCCESS && physicalCount > 0,
                 "No Vulkan physical device is available");
         std::vector<VkPhysicalDevice> physicalDevices(physicalCount);
-        vkEnumeratePhysicalDevices(instance, &physicalCount, physicalDevices.data());
-        const std::array<const char*, 5> requiredDeviceExtensions = {
+        Require(vkEnumeratePhysicalDevices(instance, &physicalCount, physicalDevices.data()) == VK_SUCCESS,
+                "Unable to enumerate Vulkan physical devices");
+        physicalDevices.resize(physicalCount);
+        const std::array<const char*, 4> requiredDeviceExtensions = {
             VK_KHR_SWAPCHAIN_EXTENSION_NAME,
             VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME,
-            VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
-            VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME,
             VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
+            VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME,
         };
+        const auto getSemaphoreProperties =
+            reinterpret_cast<PFN_vkGetPhysicalDeviceExternalSemaphoreProperties>(
+                vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceExternalSemaphoreProperties"));
+        Require(getSemaphoreProperties != nullptr, "External semaphore capability query is unavailable");
         for (VkPhysicalDevice candidate : physicalDevices) {
+            VkPhysicalDeviceProperties candidateProperties{};
+            vkGetPhysicalDeviceProperties(candidate, &candidateProperties);
+            if (candidateProperties.apiVersion < VK_API_VERSION_1_1 ||
+                candidateProperties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) continue;
+            VkPhysicalDeviceExternalSemaphoreInfo semaphoreInfo{
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO};
+            semaphoreInfo.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
+            VkExternalSemaphoreProperties semaphoreProperties{
+                VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES};
+            getSemaphoreProperties(candidate, &semaphoreInfo, &semaphoreProperties);
+            if ((semaphoreProperties.externalSemaphoreFeatures &
+                 VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT) == 0) continue;
             uint32_t queueCount = 0;
             vkGetPhysicalDeviceQueueFamilyProperties(candidate, &queueCount, nullptr);
             std::vector<VkQueueFamilyProperties> queues(queueCount);
@@ -256,18 +284,11 @@ struct VulkanInterop::Impl {
         queueInfo.queueFamilyIndex = queueFamily;
         queueInfo.queueCount = 1;
         queueInfo.pQueuePriorities = &priority;
-        const char* deviceExtensions[] = {
-            VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-            VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME,
-            VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
-            VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME,
-            VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
-        };
         VkDeviceCreateInfo deviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
         deviceInfo.queueCreateInfoCount = 1;
         deviceInfo.pQueueCreateInfos = &queueInfo;
-        deviceInfo.enabledExtensionCount = 5;
-        deviceInfo.ppEnabledExtensionNames = deviceExtensions;
+        deviceInfo.enabledExtensionCount = static_cast<uint32_t>(requiredDeviceExtensions.size());
+        deviceInfo.ppEnabledExtensionNames = requiredDeviceExtensions.data();
         Require(vkCreateDevice(physicalDevice, &deviceInfo, nullptr, &device) == VK_SUCCESS,
                 "vkCreateDevice failed");
         vkGetDeviceQueue(device, queueFamily, 0, &queue);
@@ -302,14 +323,14 @@ struct VulkanInterop::Impl {
             VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID};
         Require(getAhbProperties(device, hardwareBuffer, &bufferProperties) == VK_SUCCESS,
                 "vkGetAndroidHardwareBufferPropertiesANDROID failed");
-        VkMemoryRequirements requirements{};
-        vkGetImageMemoryRequirements(device, ahbImage, &requirements);
+        // For an imported Android hardware buffer the memory type/size come
+        // from the AHB query. Querying image requirements before binding this
+        // external-memory image is invalid (VUID-01897).
         uint32_t memoryType = UINT32_MAX;
         VkPhysicalDeviceMemoryProperties memoryProperties{};
         vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memoryProperties);
         for (uint32_t index = 0; index < memoryProperties.memoryTypeCount; ++index) {
-            if ((requirements.memoryTypeBits & (1U << index)) != 0 &&
-                (bufferProperties.memoryTypeBits & (1U << index)) != 0) {
+            if ((bufferProperties.memoryTypeBits & (1U << index)) != 0) {
                 memoryType = index;
                 break;
             }
@@ -343,9 +364,13 @@ struct VulkanInterop::Impl {
                 "vkAllocateCommandBuffers failed");
         VkSemaphoreCreateInfo semaphoreInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         Require(vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailable) == VK_SUCCESS &&
-                    vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinished) == VK_SUCCESS &&
                     vkCreateSemaphore(device, &semaphoreInfo, nullptr, &importedEglFence) == VK_SUCCESS,
                 "vkCreateSemaphore failed");
+        renderFinished.resize(swapchainImages.size(), VK_NULL_HANDLE);
+        for (auto& semaphore : renderFinished) {
+            Require(vkCreateSemaphore(device, &semaphoreInfo, nullptr, &semaphore) == VK_SUCCESS,
+                    "vkCreateSemaphore(present) failed");
+        }
         VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
         Require(vkCreateFence(device, &fenceInfo, nullptr, &frameFence) == VK_SUCCESS,
@@ -475,8 +500,10 @@ struct VulkanInterop::Impl {
         importInfo.flags = VK_SEMAPHORE_IMPORT_TEMPORARY_BIT;
         importInfo.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
         importInfo.fd = fenceFd;
-        Require(importSemaphoreFd(device, &importInfo) == VK_SUCCESS,
-                "vkImportSemaphoreFdKHR(EGL fence) failed");
+        const VkResult imported = importSemaphoreFd(device, &importInfo);
+        // Ownership transfers to Vulkan only when import succeeds.
+        if (imported != VK_SUCCESS) close(fenceFd);
+        Require(imported == VK_SUCCESS, "vkImportSemaphoreFdKHR(EGL fence) failed");
         uint32_t imageIndex = 0;
         const VkResult acquire = vkAcquireNextImageKHR(
             device, swapchain, UINT64_MAX, imageAvailable, VK_NULL_HANDLE, &imageIndex);
@@ -504,7 +531,7 @@ struct VulkanInterop::Impl {
         barriers[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
         barriers[0].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
         barriers[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        barriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
+        barriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT;
         barriers[0].dstQueueFamilyIndex = queueFamily;
         barriers[0].image = ahbImage;
         barriers[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
@@ -537,7 +564,7 @@ struct VulkanInterop::Impl {
         releaseBarriers[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         releaseBarriers[0].newLayout = VK_IMAGE_LAYOUT_GENERAL;
         releaseBarriers[0].srcQueueFamilyIndex = queueFamily;
-        releaseBarriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
+        releaseBarriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT;
         releaseBarriers[1] = barriers[1];
         releaseBarriers[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         releaseBarriers[1].dstAccessMask = 0;
@@ -561,7 +588,7 @@ struct VulkanInterop::Impl {
         submitInfo.commandBufferCount = 1;
         submitInfo.pCommandBuffers = &commandBuffer;
         submitInfo.signalSemaphoreCount = 1;
-        submitInfo.pSignalSemaphores = &renderFinished;
+        submitInfo.pSignalSemaphores = &renderFinished[imageIndex];
         Require(vkResetFences(device, 1, &frameFence) == VK_SUCCESS,
                 "vkResetFences failed");
         Require(vkQueueSubmit(queue, 1, &submitInfo, frameFence) == VK_SUCCESS,
@@ -569,7 +596,7 @@ struct VulkanInterop::Impl {
         timestampPending = timestampQueryPool != VK_NULL_HANDLE;
         VkPresentInfoKHR presentInfo{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
         presentInfo.waitSemaphoreCount = 1;
-        presentInfo.pWaitSemaphores = &renderFinished;
+        presentInfo.pWaitSemaphores = &renderFinished[imageIndex];
         presentInfo.swapchainCount = 1;
         presentInfo.pSwapchains = &swapchain;
         presentInfo.pImageIndices = &imageIndex;
@@ -605,7 +632,10 @@ struct VulkanInterop::Impl {
                 vkDestroyQueryPool(device, timestampQueryPool, nullptr);
             }
             if (importedEglFence != VK_NULL_HANDLE) vkDestroySemaphore(device, importedEglFence, nullptr);
-            if (renderFinished != VK_NULL_HANDLE) vkDestroySemaphore(device, renderFinished, nullptr);
+            for (const auto semaphore : renderFinished) {
+                if (semaphore != VK_NULL_HANDLE) vkDestroySemaphore(device, semaphore, nullptr);
+            }
+            renderFinished.clear();
             if (imageAvailable != VK_NULL_HANDLE) vkDestroySemaphore(device, imageAvailable, nullptr);
             if (commandPool != VK_NULL_HANDLE) vkDestroyCommandPool(device, commandPool, nullptr);
             if (ahbImage != VK_NULL_HANDLE) vkDestroyImage(device, ahbImage, nullptr);
@@ -628,7 +658,8 @@ struct VulkanInterop::Impl {
             eglMakeCurrent(eglDisplay, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
             if (eglContext != EGL_NO_CONTEXT) eglDestroyContext(eglDisplay, eglContext);
             if (eglPbuffer != EGL_NO_SURFACE) eglDestroySurface(eglDisplay, eglPbuffer);
-            eglTerminate(eglDisplay);
+            // EGL_DEFAULT_DISPLAY is shared with Flutter and other renderers.
+            // Destroy our objects only; terminating it invalidates their contexts.
         }
         eglDisplay = EGL_NO_DISPLAY;
         eglContext = EGL_NO_CONTEXT;
@@ -662,7 +693,7 @@ void VulkanInterop::Resize(uint32_t width, uint32_t height) {
     if (!impl_ || !ready_) return;
     if (impl_->width == std::max(1U, width) && impl_->height == std::max(1U, height)) return;
     ANativeWindow* window = impl_->window;
-    ANativeWindow_acquire(window);
+    // Transfer the existing owned reference; acquiring another leaks on resize.
     impl_->window = nullptr;
     impl_->Destroy();
     impl_ = std::make_unique<Impl>();

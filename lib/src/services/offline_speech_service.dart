@@ -208,7 +208,9 @@ class OfflineSpeechService extends ChangeNotifier
   }
 
   @override
-  Future<void> speak(String text) async {
+  Future<void> speak(String text) => _speak(text, toCompletion: false);
+
+  Future<void> _speak(String text, {required bool toCompletion}) async {
     _stopAnimationTimeline();
     final plan = prepareSpeech(text);
     if (plan.spokenText.isEmpty) {
@@ -229,11 +231,14 @@ class OfflineSpeechService extends ChangeNotifier
     lastError = null;
     notifyListeners();
     final moss = MossTtsService.instance;
-    if (!moss.ready || !moss.hardwareRuntimeAvailable) {
-      throw StateError('未检测到经过验证的 Qualcomm QNN MOSS-TTS 部署，已禁用 CPU/系统 TTS 兜底');
-    }
     try {
-      await moss.speak(plan.spokenText);
+      // MOSS owns initialization and validates its hardware deployment. A
+      // released runtime may be loaded again, and cancellation covers loading.
+      if (toCompletion) {
+        await moss.speakToCompletion(plan.spokenText);
+      } else {
+        await moss.speak(plan.spokenText);
+      }
     } catch (error) {
       lastError = error.toString();
       notifyListeners();
@@ -242,11 +247,8 @@ class OfflineSpeechService extends ChangeNotifier
   }
 
   @override
-  Future<void> speakToCompletion(String text) async {
-    final moss = MossTtsService.instance;
-    await speak(text);
-    await moss.speechCompletion;
-  }
+  Future<void> speakToCompletion(String text) =>
+      _speak(text, toCompletion: true);
 
   @override
   Future<void> stopSpeaking() async {
@@ -284,6 +286,10 @@ class OfflineSpeechService extends ChangeNotifier
     try {
       if (!listening) return;
       await SherpaSpeechService.instance.startListening();
+      // Sherpa may still be recognizing and decline to reopen. Do not leave
+      // the facade reporting an open microphone that does not exist.
+      listening = SherpaSpeechService.instance.listening;
+      notifyListeners();
     } catch (error) {
       listening = false;
       lastError = error.toString();

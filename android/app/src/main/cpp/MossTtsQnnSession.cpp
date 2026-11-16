@@ -935,7 +935,9 @@ MossTtsQnnSession::LocalFrameResult MossTtsQnnSession::RunLocalFrame(
 
 std::vector<std::vector<int32_t>> MossTtsQnnSession::RunDecode(PrefillResult prefill,
                                                                 int32_t max_frames,
-                                                                uint64_t seed) {
+                                                                uint64_t seed,
+                                                                const std::function<void()>& check_cancelled) {
+    check_cancelled();
     const std::vector<std::string> past_names(decode_input_names_.begin() + 2, decode_input_names_.end());
     const std::vector<std::string> present_names(decode_output_names_.begin() + 1,
                                                   decode_output_names_.end());
@@ -992,7 +994,9 @@ std::vector<std::vector<int32_t>> MossTtsQnnSession::RunDecode(PrefillResult pre
     const int32_t capped_frames = std::clamp(max_frames, 1, generation_max_frames_);
 
     for (int32_t step = 0; step < capped_frames; ++step) {
+        check_cancelled();
         const LocalFrameResult sampled = RunLocalFrame(prefill.global_hidden, previous, random);
+        check_cancelled();
         if (!sampled.should_continue) break;
         std::vector<int32_t> row(static_cast<size_t>(tts_config_.n_vq + 1),
                                  tts_config_.audio_pad_token_id);
@@ -1002,6 +1006,8 @@ std::vector<std::vector<int32_t>> MossTtsQnnSession::RunDecode(PrefillResult pre
             previous[channel].insert(sampled.frame[channel]);
         }
         audio_tokens.push_back(sampled.frame);
+        // The final sampled frame has no successor to predict.
+        if (step + 1 == capped_frames) break;
 
         const size_t capacity = static_cast<size_t>(prefill.cache.front().shape[1]);
         if (prefill.valid_length >= static_cast<int32_t>(capacity)) {
@@ -1045,7 +1051,9 @@ std::vector<std::vector<int32_t>> MossTtsQnnSession::RunDecode(PrefillResult pre
 }
 
 std::vector<float> MossTtsQnnSession::DecodeAudioTokens(
-    const std::vector<std::vector<int32_t>>& audio_tokens) {
+    const std::vector<std::vector<int32_t>>& audio_tokens,
+    const std::function<void()>& check_cancelled) {
+    check_cancelled();
     struct StateTensor {
         std::string input_name;
         std::string output_name;
@@ -1131,6 +1139,7 @@ std::vector<float> MossTtsQnnSession::DecodeAudioTokens(
     size_t current_buffer = 0;
 
     for (const auto& frame : audio_tokens) {
+        check_cancelled();
         if (frame.size() < static_cast<size_t>(tts_config_.n_vq)) {
             throw std::runtime_error("Audio token frame has too few quantizers");
         }
@@ -1194,8 +1203,9 @@ std::vector<float> MossTtsQnnSession::DecodeAudioTokens(
 
 MossTtsQnnSession::SynthesisResult MossTtsQnnSession::Synthesize(
     const std::string& text, const fs::path& output_path, const std::string& voice,
-    int32_t max_frames, uint64_t seed) {
+    int32_t max_frames, uint64_t seed, const std::function<void()>& check_cancelled) {
     std::lock_guard lock(run_mutex_);
+    check_cancelled();
     if (text.empty()) throw std::invalid_argument("Text is empty");
     const auto started = std::chrono::steady_clock::now();
     const uint64_t htp_started = htp_busy_ns_.load(std::memory_order_relaxed);
@@ -1220,39 +1230,44 @@ MossTtsQnnSession::SynthesisResult MossTtsQnnSession::Synthesize(
         int32_t total_frames = 0;
         const size_t silence_samples = static_cast<size_t>(sample_rate_ * 120 / 1000);
         for (size_t index = 0; index < chunks.size(); ++index) {
+            check_cancelled();
             const auto prefill_started = std::chrono::steady_clock::now();
             if (!prefill_.session) {
                 prefill_ = CreateSession("prefill", ResolveModelFile(tts_dir_, prefill_file_), true,
                                          config_.hardware_only);
             }
             const InputRows rows = BuildInputRows(chunks[index], voice);
+            check_cancelled();
             auto prefill = RunPrefill(rows);
             prefill_.session.reset();
             prefill_ms += std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - prefill_started).count();
             LogInfo("Released prefill session before decode");
 
+            check_cancelled();
             const auto decode_started = std::chrono::steady_clock::now();
             decode_ = CreateSession("decode", ResolveModelFile(tts_dir_, decode_file_), true,
                                     config_.hardware_only);
             // QAIRT 2.48 V81 rejects CumulativeSum in this graph, so only the sampler uses ORT CPU.
             sampler_ = CreateSession("sampler", ResolveModelFile(tts_dir_, sampler_file_), false,
                                      false);
-            auto audio_tokens = RunDecode(std::move(prefill), max_frames, seed + index);
+            auto audio_tokens = RunDecode(std::move(prefill), max_frames, seed + index, check_cancelled);
             sampler_.session.reset();
             decode_.session.reset();
             decode_ms += std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - decode_started).count();
             LogInfo("Released decode and sampler sessions before codec");
 
+            check_cancelled();
             const auto codec_started = std::chrono::steady_clock::now();
             codec_ = CreateSession("codec", ResolveModelFile(codec_dir_, codec_file_), false, false);
-            auto samples = DecodeAudioTokens(audio_tokens);
+            auto samples = DecodeAudioTokens(audio_tokens, check_cancelled);
             codec_.session.reset();
             codec_ms += std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - codec_started).count();
             LogInfo("Released codec session");
 
+            check_cancelled();
             WritePcm16(output, samples);
             if (samples.size() % kOutputChannels != 0) {
                 throw std::runtime_error("Codec returned a partial stereo sample frame");

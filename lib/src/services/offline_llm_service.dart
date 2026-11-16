@@ -58,6 +58,7 @@ class OfflineLlmService extends ChangeNotifier {
   Future<void>? _initializing;
   bool _runtimeLoaded = false;
   bool _stopRequested = false;
+  Completer<void>? _generationDone;
   int _nextGenerationId = 0;
   int? _activeGenerationId;
   String _lastStreamedText = '';
@@ -261,6 +262,8 @@ class OfflineLlmService extends ChangeNotifier {
         .where((message) => message.content.trim().isNotEmpty)
         .toList(growable: false);
     if (normalized.isEmpty) throw ArgumentError.value(messages, 'messages');
+    final generationDone = Completer<void>();
+    _generationDone = generationDone;
     generating = true;
     _stopRequested = false;
     final generationId = ++_nextGenerationId;
@@ -271,6 +274,7 @@ class OfflineLlmService extends ChangeNotifier {
     notifyListeners();
     try {
       await _ensureRuntime();
+      if (_stopRequested) throw const OfflineGenerationCancelled();
       try {
         final result = await _runtimeChannel.invokeMethod<String>('generate', {
           'messages': normalized.map((message) => message.toMap()).toList(),
@@ -279,11 +283,13 @@ class OfflineLlmService extends ChangeNotifier {
         });
         if (_stopRequested) throw const OfflineGenerationCancelled();
         await _loadRuntimeCapabilities();
+        if (_stopRequested) throw const OfflineGenerationCancelled();
         final text = (result ?? '').trim();
         if (text.isEmpty) throw StateError('Qwen3 QAIRT/NPU 没有返回文本');
         if (_lastStreamedText.trim() != text) onText?.call(text);
         return text;
       } on PlatformException catch (error) {
+        if (_stopRequested) throw const OfflineGenerationCancelled();
         _runtimeLoaded = false;
         throw OfflineLlmFailure(
           error.code,
@@ -302,14 +308,25 @@ class OfflineLlmService extends ChangeNotifier {
         _lastStreamedText = '';
       }
       generating = false;
-      notifyListeners();
+      _generationDone = null;
+      try {
+        notifyListeners();
+      } finally {
+        generationDone.complete();
+      }
     }
   }
 
   Future<void> stopGeneration() async {
-    if (!generating) return;
+    final generationDone = _generationDone;
+    if (generationDone == null) return;
     _stopRequested = true;
-    await _runtimeChannel.invokeMethod<void>('stop');
+    try {
+      await _runtimeChannel.invokeMethod<void>('stop');
+    } finally {
+      // A native stop acknowledgement can arrive before generate unwinds.
+      await generationDone.future;
+    }
   }
 
   void _mergeRuntimeState(Map<Object?, Object?> value) {

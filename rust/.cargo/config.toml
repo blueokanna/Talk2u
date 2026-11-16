@@ -1,0 +1,4 @@
+# Direct Android cargo builds. Cargokit sets CARGO_ENCODED_RUSTFLAGS (which
+# overrides this file), so it also adds these options in android_environment.dart.
+[target.aarch64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384", "-C", "link-arg=-Wl,-z,common-page-size=16384"]

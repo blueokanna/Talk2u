@@ -26,9 +26,8 @@ import io.flutter.plugin.common.StandardMessageCodec
 import io.flutter.plugin.platform.PlatformView
 import io.flutter.plugin.platform.PlatformViewFactory
 import java.io.File
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
+import androidx.lifecycle.Lifecycle
 import org.json.JSONObject
 
 internal object GpuBackendProbe {
@@ -88,6 +87,8 @@ internal object Live2dNativeBridge {
     external fun nativeSurfaceChanged(handle: Long, width: Int, height: Int)
     external fun nativeSurfaceDestroyed(handle: Long)
     external fun nativeDrawFrame(handle: Long): Boolean
+    external fun nativeSetRenderPolicy(handle: Long, active: Boolean, reducedMotion: Boolean)
+    external fun nativeSetGaze(handle: Long, x: Float, y: Float)
     external fun nativeSetMouth(handle: Long, value: Float)
     external fun nativeSetSpeaking(handle: Long, value: Boolean)
     external fun nativeMotion(handle: Long, group: String, index: Int)
@@ -115,6 +116,25 @@ private data class Live2dCue(
 
 private object Live2dViewCoordinator {
     private var active: Live2dView? = null
+    private var pendingReleases = 0
+    private val afterRelease = mutableListOf<() -> Unit>()
+
+    // All calls run on the main thread. New EGL targets wait asynchronously for
+    // retiring render threads to relinquish Cubism's process-wide graphics state.
+    fun beginRelease() { pendingReleases++ }
+
+    fun endRelease() {
+        pendingReleases--
+        if (pendingReleases == 0) {
+            val actions = afterRelease.toList()
+            afterRelease.clear()
+            actions.forEach { it() }
+        }
+    }
+
+    fun whenReleased(action: () -> Unit) {
+        if (pendingReleases == 0) action() else afterRelease.add(action)
+    }
 
     @Synchronized
     fun activate(view: Live2dView) {
@@ -147,6 +167,9 @@ private class ManagedLive2dVulkanTextureView(
     @Volatile private var attached = false
     @Volatile private var stopped = false
     private var frameScheduled = false
+    private var continuous = true
+    private var dirty = true
+    @Volatile private var visibleToUser = true
     @Volatile private var nativeSurfaceCreated = false
     private var activeSurfaceTexture: SurfaceTexture? = null
     private var activeSurface: Surface? = null
@@ -154,7 +177,10 @@ private class ManagedLive2dVulkanTextureView(
     private val frameCallback =
             Choreographer.FrameCallback {
                 frameScheduled = false
-                if (!stopped && resumed && nativeSurfaceCreated) callbacks.onDrawFrame()
+                if (!stopped && resumed && attached && visibleToUser && nativeSurfaceCreated) {
+                    dirty = false
+                    callbacks.onDrawFrame()
+                }
                 scheduleFrame()
             }
 
@@ -171,9 +197,24 @@ private class ManagedLive2dVulkanTextureView(
         if (!stopped) renderHandler.post(action)
     }
 
+    fun setContinuous(value: Boolean) {
+        renderHandler.post {
+            continuous = value
+            dirty = true
+            scheduleFrame()
+        }
+    }
+
+    fun requestFrame() {
+        renderHandler.post {
+            dirty = true
+            scheduleFrame()
+        }
+    }
+
     fun onResume() {
         resumed = true
-        renderHandler.post(::scheduleFrame)
+        requestFrame()
     }
 
     fun hasNativeSurface(): Boolean = nativeSurfaceCreated
@@ -192,6 +233,8 @@ private class ManagedLive2dVulkanTextureView(
         if (stopped ||
                         !resumed ||
                         !attached ||
+                        !visibleToUser ||
+                        (!continuous && !dirty) ||
                         !nativeSurfaceCreated ||
                         frameScheduled ||
                         !::choreographer.isInitialized
@@ -213,6 +256,7 @@ private class ManagedLive2dVulkanTextureView(
             activeSurface = surface
             callbacks.onSurfaceCreated(surface, width.coerceAtLeast(1), height.coerceAtLeast(1))
             nativeSurfaceCreated = true
+            dirty = true
             scheduleFrame()
         }
     }
@@ -221,18 +265,23 @@ private class ManagedLive2dVulkanTextureView(
         renderHandler.post {
             if (!stopped && nativeSurfaceCreated && activeSurfaceTexture === texture) {
                 callbacks.onSurfaceChanged(width.coerceAtLeast(1), height.coerceAtLeast(1))
+                dirty = true
                 scheduleFrame()
             }
         }
     }
 
     override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
-        renderHandler.post {
-            if (activeSurfaceTexture === texture) {
-                releaseActiveSurface()
+        // Retain the texture until Vulkan has stopped presenting to its Surface.
+        val queued = renderHandler.post {
+            try {
+                if (activeSurfaceTexture === texture) releaseActiveSurface()
+            } finally {
+                texture.release()
             }
         }
-        return true
+        if (!queued) texture.release() // The render thread already shut down.
+        return false
     }
 
     override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = Unit
@@ -249,20 +298,42 @@ private class ManagedLive2dVulkanTextureView(
         }
     }
 
-    fun shutdown() {
+    fun shutdown(releaseNative: () -> Unit) {
         if (stopped) return
         stopped = true
         resumed = false
+        // FIFO behind queued JNI operations; never wait on the Flutter/UI thread.
         renderHandler.post {
-            releaseActiveSurface()
-            renderThread.quitSafely()
+            try {
+                releaseActiveSurface()
+            } finally {
+                try {
+                    releaseNative()
+                } finally {
+                    renderThread.quitSafely()
+                }
+            }
         }
+    }
+
+    override fun onVisibilityChanged(changedView: View, visibility: Int) {
+        super.onVisibilityChanged(changedView, visibility)
+        visibleToUser = isShown && windowVisibility == View.VISIBLE
+        // View constructors can invoke this before renderHandler is initialized.
+        if (isAttachedToWindow) requestFrame()
+    }
+
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(visibility)
+        visibleToUser = isShown && visibility == View.VISIBLE
+        if (isAttachedToWindow) requestFrame()
     }
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         attached = true
-        renderHandler.post(::scheduleFrame)
+        visibleToUser = isShown && windowVisibility == View.VISIBLE
+        requestFrame()
     }
 
     override fun onDetachedFromWindow() {
@@ -383,6 +454,10 @@ private class Live2dView(
     @Volatile private var failed = false
     @Volatile private var lastStatus: String? = null
     @Volatile private var surfaceReady = false
+    private var lifecycleResumed = lifecycleOwner?.lifecycle?.currentState
+        ?.isAtLeast(Lifecycle.State.RESUMED) ?: true
+    private var policyActive = creationParams["active"] != false
+    private var reducedMotion = creationParams["reducedMotion"] == true
 
     init {
         channel.setMethodCallHandler(this)
@@ -394,15 +469,27 @@ private class Live2dView(
     override fun getView(): View = container
 
     override fun onResume(owner: LifecycleOwner) {
-        if (!disposed && !retired) {
-            renderView?.onResume()
-            surfaceReady = !failed && nativeHandle > 0 && renderView?.hasNativeSurface() == true
-        }
+        lifecycleResumed = true
+        applyRenderPolicy()
     }
 
     override fun onPause(owner: LifecycleOwner) {
-        surfaceReady = false
-        renderView?.onPause()
+        lifecycleResumed = false
+        applyRenderPolicy()
+    }
+
+    private fun applyRenderPolicy() {
+        val view = renderView ?: return
+        val active = lifecycleResumed && policyActive && !disposed && !retired && !failed
+        val handle = nativeHandle
+        view.setContinuous(!reducedMotion)
+        val reduced = reducedMotion
+        view.queueEvent {
+            if (handle > 0) runCatching {
+                Live2dNativeBridge.nativeSetRenderPolicy(handle, active, reduced)
+            }.onFailure { reportError(it, true) }
+        }
+        if (active) view.onResume() else view.onPause()
     }
 
     override fun onDestroy(owner: LifecycleOwner) {
@@ -411,6 +498,19 @@ private class Live2dView(
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
+            "setRenderPolicy" -> {
+                policyActive = call.argument<Boolean>("active") == true
+                reducedMotion = call.argument<Boolean>("reducedMotion") == true
+                applyRenderPolicy()
+                result.success(null)
+            }
+            "setGaze" -> enqueue(result) { handle ->
+                Live2dNativeBridge.nativeSetGaze(
+                    handle,
+                    (call.argument<Double>("x") ?: 0.0).toFloat(),
+                    (call.argument<Double>("y") ?: 0.0).toFloat(),
+                )
+            }
             "setMouth" ->
                     enqueue(result) { handle ->
                         Live2dNativeBridge.nativeSetMouth(
@@ -471,7 +571,10 @@ private class Live2dView(
         view.queueEvent {
             runCatching { action(handle) }
                     .fold(
-                            onSuccess = { mainHandler.post { result.success(null) } },
+                            onSuccess = {
+                                view.requestFrame()
+                                mainHandler.post { result.success(null) }
+                            },
                             onFailure = { error ->
                                 reportError(error, true)
                                 mainHandler.post {
@@ -548,6 +651,7 @@ private class Live2dView(
     private fun reportError(error: Throwable, recoverable: Boolean) {
         Log.e("Talk2U.Live2D", "Cubism Native renderer failed", error)
         failed = true
+        renderView?.onPause()
         val status =
                 JSONObject()
                         .put("type", "error")
@@ -592,28 +696,15 @@ private class Live2dView(
             }
             return
         }
-        val released = CountDownLatch(1)
-        runCatching {
-            view.queueEvent {
-                try {
-                    runCatching {
-                        Live2dNativeBridge.nativeSurfaceDestroyed(handle)
-                        Live2dNativeBridge.nativeDestroy(handle)
-                    }
-                            .onFailure {
-                                Log.w("Talk2U.Live2D", "Cubism session release failed", it)
-                            }
-                } finally {
-                    released.countDown()
-                }
+        Live2dViewCoordinator.beginRelease()
+        view.shutdown {
+            try {
+                runCatching { Live2dNativeBridge.nativeDestroy(handle) }
+                    .onFailure { Log.w("Talk2U.Live2D", "Cubism session release failed", it) }
+            } finally {
+                mainHandler.post { Live2dViewCoordinator.endRelease() }
             }
-            check(released.await(3, TimeUnit.SECONDS)) {
-                "Timed out while releasing the Cubism Vulkan resources"
-            }
-            view.onPause()
-            view.shutdown()
         }
-                .onFailure { Log.e("Talk2U.Live2D", "Cubism Vulkan-thread release failed", it) }
     }
 
     private fun prepareNativeRenderer() {
@@ -635,7 +726,9 @@ private class Live2dView(
                                     Live2dNativeBridge.nativeDestroy(handle)
                                 } else {
                                     nativeHandle = handle
-                                    attachGlView()
+                                    Live2dViewCoordinator.whenReleased {
+                                        if (!disposed && !retired && nativeHandle == handle) attachGlView()
+                                    }
                                 }
                             }
                         },
@@ -717,6 +810,7 @@ private class Live2dView(
                         )
                         .apply { alpha = 0f }
         renderView = view
+        applyRenderPolicy()
         container.addView(
                 view,
                 FrameLayout.LayoutParams(

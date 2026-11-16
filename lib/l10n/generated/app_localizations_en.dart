@@ -12,6 +12,51 @@ class AppLocalizationsEn extends AppLocalizations {
   String get appTitle => 'Talk2U';
 
   @override
+  String get cameraObservationStart => 'Enable gaze following';
+
+  @override
+  String get cameraObservationStop => 'Stop camera observation';
+
+  @override
+  String get cameraObservationDescription =>
+      'The front camera detects face positions on this device so the character can look toward you. Images are neither saved nor uploaded. Photos may trigger face detection; it cannot verify a real person or liveness. Leaving this screen or putting the app in the background closes the camera.';
+
+  @override
+  String get cameraObservationEnable => 'Enable camera';
+
+  @override
+  String get cameraObservationStarting => 'Starting camera';
+
+  @override
+  String get cameraObservationSearching => 'Camera on · looking for a face';
+
+  @override
+  String get cameraObservationDetected => 'Face detected · following gaze';
+
+  @override
+  String get cameraObservationDenied =>
+      'Camera permission was not granted. Allow it in system settings and try again.';
+
+  @override
+  String get cameraObservationUnsupported =>
+      'This device does not provide usable front-camera hardware face detection.';
+
+  @override
+  String get cameraObservationFailed =>
+      'The camera is unavailable. Close other apps using it and try again.';
+
+  @override
+  String get cameraObservationRestart =>
+      'The camera is off. Tap to start it again.';
+
+  @override
+  String get cameraObservationClose => 'Close';
+
+  @override
+  String get live2dDesktopHostMissing =>
+      'The desktop Live2D host is not installed: assets/live2d/index.html and a licensed Cubism Core for Web are missing. Add them as described in the README and rebuild; Android is unaffected.';
+
+  @override
   String get settings => 'Settings';
 
   @override

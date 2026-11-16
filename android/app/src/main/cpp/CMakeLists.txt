@@ -2,6 +2,10 @@ cmake_minimum_required(VERSION 3.22.1)
 
 project(talk2u_native LANGUAGES CXX)
 
+# Apply to every shared target, including the GPU probe and SDK subprojects.
+# Imported/prebuilt libraries still require the Gradle ELF artifact check.
+add_link_options("-Wl,-z,max-page-size=16384" "-Wl,-z,common-page-size=16384")
+
 if(NOT ANDROID_ABI STREQUAL "arm64-v8a")
     message(FATAL_ERROR "Talk2U MOSS/QNN runtime supports arm64-v8a only")
 endif()

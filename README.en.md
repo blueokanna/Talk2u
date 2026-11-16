@@ -19,12 +19,14 @@ This document describes the implemented behavior and its verification boundary. 
 | Offline STT | Implemented | sherpa-onnx SenseVoice 2024-07-17 INT8 QNN context on SM8850, preserving ASR/LID/SER/AED results |
 | Continuous voice call | Conditional on Android | `CallSession` state machine; full duplex when the platform confirms hardware AEC, half duplex otherwise; reference-anchored double-talk detection plus lexical self-echo rejection; voice or tap interruption |
 | Regenerate | Implemented | The rejected reply is excluded from the new prompt, an explicit anti-repetition directive is added, sampling uses temperature/top_p 0.95, and the old message is replaced in place |
-| Idle resource use | Implemented | No 1 Hz telemetry polling, no always-on 30 ms stream timer, and no automatic speech synthesis outside call mode |
+| Idle resource use | Implemented | Startup only probes MOSS/QNN capability and loads HTP contexts on the first utterance; no 1 Hz telemetry polling, no always-on 30 ms stream timer, no automatic synthesis outside call mode, and Live2D stops continuous rendering in the background, off-screen, or under reduced motion |
 | Android offline TTS | Conditional | MOSS prefill/decode/codec on QNN HTP and sampler on ORT CPU; no system TTS fallback; emoji, Markdown, code, URLs and blank lines are filtered before synthesis |
 | Windows/Linux offline TTS | Not implemented | The current desktop speech path only provides SenseVoice STT |
 | Live2D | Conditional | Cubism SDK for Native 5 R.5 with C++/OpenGL ES on Android; WebView2 on Windows and CEF on Linux |
 | Live2D semantic cues | Implemented, model-dependent | Context, emoji and silent stage directions select configured motion or expression mappings; equivalent performances rotate within a long reply |
 | Android Live2D GPU rendering | Implemented | Native C++ Cubism OpenGL ES renderer; software GL implementations are rejected and ready follows the first valid frame |
+| Android front-camera gaze following | Implemented, explicit opt-in | Camera2 hardware face detection (SIMPLE/FULL); only each face bounding box is read and the frame is released immediately. Nothing is saved or uploaded, and the normalised mirrored position drives the Live2D gaze |
+| Liveness / identity verification | Not implemented and not claimed | RGB face detection cannot tell a person from a photo, screen or mask; `livenessVerified` is always `false` and the UI only says a face was detected |
 | Android NNAPI diagnostics | Implemented | Device name, version, type, and feature level; CPU devices are excluded from accelerator results |
 
 An implemented online provider still requires a valid API key, account quota, reachable endpoint, and a model ID enabled for that account.
@@ -34,7 +36,7 @@ An implemented online provider still requires a valid API key, account quota, re
 The AHCA paper in `docs/emotion_aware_rag_paper.tex` covers the context layer (identity anchoring, tiered memory, W-RRF retrieval, emotional decay, diversity regulation). On top of it this repository implements four systems-level mechanisms that are code paths, not diagrams:
 
 1. **Reference-anchored turn taking (RATT).** The agent synthesises its own audio, so it already holds the echo reference. A 20 ms amplitude envelope plus a 180 ms peak-hold turns blind echo-path identification into known-reference detection and removes the device-delay dependency; the measured `enabled` state of the platform `AcousticEchoCanceler` gates full duplex versus half duplex. See `turn_taking.dart`, `call_session.dart`, `FullDuplexAudioCapture.kt`, and [docs/reference_anchored_turn_taking.tex](docs/reference_anchored_turn_taking.tex).
-2. **Regeneration without self-priming.** The rejected reply is excluded from the new prompt, its opening/ending/shape become an explicit anti-repetition constraint, temperature and top-p are raised together, and the message id is preserved on success. The point is that regeneration is not resampling: it is a forced divergence from a specific prior output. See `chat_engine.rs::regenerate_response`.
+2. **Regeneration without self-priming.** The rejected reply is excluded from the new prompt, its opening/ending/shape become an explicit anti-repetition constraint, temperature and top-p are raised together, and the message id is preserved on success. The point is that regeneration is not resampling: it is a forced divergence from a specific prior output. See `chat_engine.rs::regenerate_response_with_snapshot`.
 3. **Non-verbal affect transduction.** MOSS exposes neither an emotion parameter nor SSML. Emoji and Markdown structure are mapped to pauses and punctuation the vocoder handles correctly, and the same symbols decide the sustained expression for the whole reply; an emoji-only reply skips synthesis. See `speech_text_normalizer.dart`.
 4. **Playback-anchored performance timeline.** The generated WAV envelope is the time base; silent stage directions, emotion words and emoji offsets drive frame-level Live2D cues, with equivalent performances rotating inside an emotion family. See `offline_speech_service.dart` and `live2d_native_renderer.cpp`.
 
@@ -104,6 +106,16 @@ flutter build apk --debug --target-platform android-arm64
 ```
 
 The Android package is currently restricted to `arm64-v8a`. Every enabled ABI must contain compatible Flutter, Rust, plugin, ONNX Runtime, and optional vendor runtime libraries.
+
+### 16 KB page size
+
+Play requires 16 KB page support for new apps and updates targeting Android 15+ from 2025-11-01. Two independent constraints must both hold: every `PT_LOAD` segment needs `p_align >= 16384` (power of two, congruent `p_vaddr - p_offset`), and any **stored** `lib/*.so` needs a 16 KB-aligned ZIP data offset (`zipalign -P 16`); if libraries are compressed instead, the constraint applies to the ELF extracted at install time.
+
+This repository applies `-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384` through CMake `add_link_options` for every shared target, and through both `rust/.cargo/config.toml` and Cargokit's `android_environment.dart` for the Rust cdylib. The Cargokit copy is required: `CARGO_ENCODED_RUSTFLAGS` overrides Cargo config target flags, so config.toml alone leaves `librust_lib_talk2u.so` 4 KB aligned in a Flutter build.
+
+Prebuilt dependencies cannot be fixed by flags. `tools/verify_android_native.py` parses real ELF program headers, ZIP local headers and compression methods, and classifies Hexagon DSP firmware (`e_machine=164`) separately. Gradle runs the same checker after native-lib merge, `assemble*` and `bundle*`, failing the build instead of shipping an incompatible library.
+
+Measured in this workspace: 49 packaged Android host ELFs satisfy 16 KB and 14 Hexagon DSP files are listed separately. The previously installed `base.apk` stored 45 libraries at non-16 KB ZIP offsets; because that APK also used `extractNativeLibs=true`, this alone does not prove failure on 16 KB devices, but it does not satisfy the direct-mmap path. `so` was removed from `noCompress` so the build now uses the officially supported compressed-and-extracted layout. A freshly built `librust_lib_talk2u.so` passes the auditor. None of this substitutes for installing on a device whose `getconf PAGE_SIZE` is 16384; the currently attached device reports 4096.
 
 Gradle and CMake consume the Framework sources, OpenGL ES shaders, headers, and ARM64 Core static library directly from the external SDK. Do not commit `Live2DCubismCore`, copied Core headers, or the Cubism SDK to a public repository. The local APK statically links Core into `libtalk2u_live2d.so`; binary distribution remains subject to the Live2D license accepted by the builder.
 
@@ -239,7 +251,7 @@ This project explicitly uses the Live2D Cubism SDK. Android renders through `And
 
 The separate native probe creates a Vulkan logical device and an EGL OpenGL ES context. Those results prove API availability only. The current Live2D frame is identified by `Cubism Native OpenGL ES`, the renderer/vendor/version strings from its own GL context, and an increasing `frameCount`. A Vulkan probe pass must not be reported as Cubism Vulkan rendering.
 
-Windows and Linux retain the existing WebView2/CEF + Pixi path. The repository contains neither Native Cubism Core nor `live2dcubismcore.min.js`; each is consumed only from SDK files legally supplied by the builder. Never commit or vendor the Core or complete Cubism SDK into a public repository.
+Windows and Linux retain the existing WebView2/CEF + Pixi path. The repository contains neither Native Cubism Core nor `live2dcubismcore.min.js`, and it also does not contain the Web host page itself: `assets/live2d/index.html` and `assets/live2d/vendor/live2dcubismcore.min.js` must both be supplied by the builder under the applicable licence. When they are missing the desktop renderer reports a precise "host not installed" error instead of opening a WebView that is guaranteed to 404. Never commit or vendor the Core or complete Cubism SDK into a public repository.
 
 Official resources and terms:
 
@@ -280,5 +292,8 @@ Real-device acceptance must include:
 - Do not claim Windows/Linux offline TTS, continuous offline calls, or local LLM hardware acceleration.
 - Do not claim the native Vulkan probe is the actual Live2D renderer; Android currently uses Cubism Native OpenGL ES.
 - Do not claim that Cubism Core is legally bundled with the public repository.
+- Do not claim front-camera face detection proves a real person, liveness or identity; it reports face presence and position only.
+- Do not claim the repository ships a Windows/Linux Live2D Web host; `assets/live2d/` must be supplied under the applicable licence.
+- Do not claim 16 KB page support was validated on hardware; only ELF/ZIP layout checks ran here, on a 4 KB device.
 
 Failures are surfaced as unavailable capabilities or explicit errors. Qwen and MOSS do not fall back to CPU.

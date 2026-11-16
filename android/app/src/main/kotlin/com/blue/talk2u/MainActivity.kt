@@ -65,9 +65,12 @@ class MainActivity : FlutterActivity() {
     private var pendingSherpaZipImportResult: MethodChannel.Result? = null
     private val acceleratorTelemetrySampler = AcceleratorTelemetry.Sampler()
     private val fullDuplexAudio by lazy { FullDuplexAudioCapture(applicationContext) }
+    private var cameraObservation: CameraObservation? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        cameraObservation?.close()
+        cameraObservation = CameraObservation(this, flutterEngine.dartExecutor.binaryMessenger)
         val qnnStatus = QnnRuntime.prepare(applicationContext)
         Log.i("Talk2U/QNN", "runtime=${qnnStatus.asMap()}")
         if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
@@ -414,7 +417,6 @@ class MainActivity : FlutterActivity() {
             "talk2u/live2d",
             Live2dViewFactory(this, flutterEngine.dartExecutor.binaryMessenger),
         )
-        initializeMossAutomatically()
     }
 
     private fun llmRuntimeCapabilities(): Map<String, Any?> {
@@ -1241,15 +1243,6 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun initializeMossAutomatically() {
-        if (!QnnRuntime.status.ready || modelStore.inspectInstalled() == null) return
-        mossExecutor.execute {
-            val info = modelStore.inspectInstalled() ?: return@execute
-            runCatching { mossEngine(info.root) }
-                .onFailure { Log.e("Talk2U/MOSS", "Startup MOSS initialization failed", it) }
-        }
-    }
-
     private fun synthesizeMoss(arguments: Map<*, *>?, result: MethodChannel.Result) {
         val outputValue = arguments?.get("outputPath") as? String
         val text = (arguments?.get("text") as? String).orEmpty().trim()
@@ -1293,6 +1286,7 @@ class MainActivity : FlutterActivity() {
                     voice = voice,
                     maxFrames = maxFrames,
                     seed = seed,
+                    cancellation = cancellation,
                 )
                 if (cancellation.get()) {
                     outputFile.delete()
@@ -1324,10 +1318,16 @@ class MainActivity : FlutterActivity() {
                 }
             } catch (error: Throwable) {
                 outputFile.delete()
-                val message = error.message ?: error.javaClass.simpleName
-                Log.e("Talk2U/MOSS", "MOSS-TTS-Nano synthesis failed", error)
-                deliverMossResult(result) {
-                    result.error("moss_synthesis_failed", "MOSS-TTS-Nano 推理失败: $message", null)
+                if (cancellation.get()) {
+                    deliverMossResult(result) {
+                        result.error("moss_cancelled", "MOSS-TTS-Nano 推理已取消", null)
+                    }
+                } else {
+                    val message = error.message ?: error.javaClass.simpleName
+                    Log.e("Talk2U/MOSS", "MOSS-TTS-Nano synthesis failed", error)
+                    deliverMossResult(result) {
+                        result.error("moss_synthesis_failed", "MOSS-TTS-Nano 推理失败: $message", null)
+                    }
                 }
             }
         }
@@ -1392,6 +1392,31 @@ class MainActivity : FlutterActivity() {
         return path == root.path || path.startsWith(root.path + File.separator)
     }
 
+    override fun onResume() {
+        super.onResume()
+        cameraObservation?.onResume()
+    }
+
+    override fun onPause() {
+        cameraObservation?.onPause()
+        super.onPause()
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        if (cameraObservation?.onRequestPermissionsResult(requestCode, permissions, grantResults) == true) return
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+    }
+
+    override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        cameraObservation?.close()
+        cameraObservation = null
+        super.cleanUpFlutterEngine(flutterEngine)
+    }
+
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
         if (level < ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) return
@@ -1400,6 +1425,8 @@ class MainActivity : FlutterActivity() {
 
     override fun onDestroy() {
         activityDestroyed = true
+        cameraObservation?.close()
+        cameraObservation = null
         runCatching { fullDuplexAudio.close() }
         mossCancellation.set(true)
         mossExecutor.execute(::closeMossEngine)

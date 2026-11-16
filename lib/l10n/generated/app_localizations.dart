@@ -104,6 +104,84 @@ abstract class AppLocalizations {
   /// **'Talk2U'**
   String get appTitle;
 
+  /// No description provided for @cameraObservationStart.
+  ///
+  /// In en, this message translates to:
+  /// **'Enable gaze following'**
+  String get cameraObservationStart;
+
+  /// No description provided for @cameraObservationStop.
+  ///
+  /// In en, this message translates to:
+  /// **'Stop camera observation'**
+  String get cameraObservationStop;
+
+  /// No description provided for @cameraObservationDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'The front camera detects face positions on this device so the character can look toward you. Images are neither saved nor uploaded. Photos may trigger face detection; it cannot verify a real person or liveness. Leaving this screen or putting the app in the background closes the camera.'**
+  String get cameraObservationDescription;
+
+  /// No description provided for @cameraObservationEnable.
+  ///
+  /// In en, this message translates to:
+  /// **'Enable camera'**
+  String get cameraObservationEnable;
+
+  /// No description provided for @cameraObservationStarting.
+  ///
+  /// In en, this message translates to:
+  /// **'Starting camera'**
+  String get cameraObservationStarting;
+
+  /// No description provided for @cameraObservationSearching.
+  ///
+  /// In en, this message translates to:
+  /// **'Camera on · looking for a face'**
+  String get cameraObservationSearching;
+
+  /// No description provided for @cameraObservationDetected.
+  ///
+  /// In en, this message translates to:
+  /// **'Face detected · following gaze'**
+  String get cameraObservationDetected;
+
+  /// No description provided for @cameraObservationDenied.
+  ///
+  /// In en, this message translates to:
+  /// **'Camera permission was not granted. Allow it in system settings and try again.'**
+  String get cameraObservationDenied;
+
+  /// No description provided for @cameraObservationUnsupported.
+  ///
+  /// In en, this message translates to:
+  /// **'This device does not provide usable front-camera hardware face detection.'**
+  String get cameraObservationUnsupported;
+
+  /// No description provided for @cameraObservationFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'The camera is unavailable. Close other apps using it and try again.'**
+  String get cameraObservationFailed;
+
+  /// No description provided for @cameraObservationRestart.
+  ///
+  /// In en, this message translates to:
+  /// **'The camera is off. Tap to start it again.'**
+  String get cameraObservationRestart;
+
+  /// No description provided for @cameraObservationClose.
+  ///
+  /// In en, this message translates to:
+  /// **'Close'**
+  String get cameraObservationClose;
+
+  /// No description provided for @live2dDesktopHostMissing.
+  ///
+  /// In en, this message translates to:
+  /// **'The desktop Live2D host is not installed: assets/live2d/index.html and a licensed Cubism Core for Web are missing. Add them as described in the README and rebuild; Android is unaffected.'**
+  String get live2dDesktopHostMissing;
+
   /// No description provided for @settings.
   ///
   /// In en, this message translates to:

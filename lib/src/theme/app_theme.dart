@@ -1,5 +1,28 @@
 import 'package:flutter/material.dart';
 import 'package:talk2u/src/settings/ui_preferences.dart';
+import 'package:talk2u/src/rendering/motion_policy.dart';
+
+class MotionPageTransitionsBuilder extends PageTransitionsBuilder {
+  const MotionPageTransitionsBuilder();
+
+  @override
+  Widget buildTransitions<T>(
+    PageRoute<T> route,
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) {
+    if (!AppMotionPolicy.of(context).animate) return child;
+    return const FadeForwardsPageTransitionsBuilder().buildTransitions(
+      route,
+      context,
+      animation,
+      secondaryAnimation,
+      child,
+    );
+  }
+}
 
 abstract final class AppTheme {
   static ThemeData build(Brightness brightness, AppColorTheme colorTheme) {
@@ -31,11 +54,11 @@ abstract final class AppTheme {
       visualDensity: VisualDensity.standard,
       pageTransitionsTheme: const PageTransitionsTheme(
         builders: {
-          TargetPlatform.android: FadeForwardsPageTransitionsBuilder(),
-          TargetPlatform.iOS: FadeForwardsPageTransitionsBuilder(),
-          TargetPlatform.macOS: FadeForwardsPageTransitionsBuilder(),
-          TargetPlatform.windows: FadeForwardsPageTransitionsBuilder(),
-          TargetPlatform.linux: FadeForwardsPageTransitionsBuilder(),
+          TargetPlatform.android: MotionPageTransitionsBuilder(),
+          TargetPlatform.iOS: MotionPageTransitionsBuilder(),
+          TargetPlatform.macOS: MotionPageTransitionsBuilder(),
+          TargetPlatform.windows: MotionPageTransitionsBuilder(),
+          TargetPlatform.linux: MotionPageTransitionsBuilder(),
         },
       ),
       cardTheme: const CardThemeData(

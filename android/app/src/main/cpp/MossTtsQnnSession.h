@@ -58,7 +58,8 @@ public:
                                const std::filesystem::path& output_path,
                                const std::string& voice,
                                int32_t max_frames,
-                               uint64_t seed);
+                               uint64_t seed,
+                               const std::function<void()>& check_cancelled);
     [[nodiscard]] std::string TelemetryJson() const;
 
 private:
@@ -172,13 +173,15 @@ private:
     [[nodiscard]] PrefillResult RunPrefill(const InputRows& rows);
     [[nodiscard]] std::vector<std::vector<int32_t>> RunDecode(PrefillResult prefill,
                                                               int32_t max_frames,
-                                                              uint64_t seed);
+                                                              uint64_t seed,
+                                const std::function<void()>& check_cancelled);
     [[nodiscard]] LocalFrameResult RunLocalFrame(
         const std::vector<float>& global_hidden,
         const std::vector<std::unordered_set<int32_t>>& previous_tokens,
         class RandomSource& random);
     [[nodiscard]] std::vector<float> DecodeAudioTokens(
-        const std::vector<std::vector<int32_t>>& audio_tokens);
+        const std::vector<std::vector<int32_t>>& audio_tokens,
+        const std::function<void()>& check_cancelled);
 
     [[nodiscard]] std::vector<std::vector<int32_t>> TokenizeChunks(
         const std::string& text, const std::string& voice) const;

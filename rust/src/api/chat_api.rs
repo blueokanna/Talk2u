@@ -1,16 +1,16 @@
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use tokio::sync::watch;
 
 use super::chat_engine::ChatEngine;
 use super::config_manager::ConfigManager;
-use super::error_handler::ChatError;
-use super::network_diagnosis::{diagnose, EndpointDiagnosis};
 use super::conversation_store::ConversationStore;
 use super::data_models::*;
+use super::error_handler::ChatError;
 use super::knowledge_store::KnowledgeStore;
 use super::memory_engine::MemoryEngine;
+use super::network_diagnosis::{diagnose, EndpointDiagnosis};
 use super::provider::ProviderRuntime;
 use super::streaming_handler::StreamingHandler;
 
@@ -18,60 +18,97 @@ static CONFIG_MANAGER: OnceLock<ConfigManager> = OnceLock::new();
 static CONVERSATION_STORE: OnceLock<ConversationStore> = OnceLock::new();
 static DATA_PATH: OnceLock<String> = OnceLock::new();
 static ACTIVE_GENERATIONS: OnceLock<Mutex<HashMap<String, ActiveGeneration>>> = OnceLock::new();
+static GENERATION_GATES: OnceLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
+    OnceLock::new();
 
 struct ActiveGeneration {
     request_id: String,
     cancel: watch::Sender<bool>,
 }
 
+struct GenerationRegistration {
+    conversation_id: String,
+    request_id: String,
+    gate: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl Drop for GenerationRegistration {
+    fn drop(&mut self) {
+        unregister_generation(&self.conversation_id, &self.request_id);
+    }
+}
+
 fn active_generations() -> &'static Mutex<HashMap<String, ActiveGeneration>> {
     ACTIVE_GENERATIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn register_generation(conversation_id: &str) -> (String, watch::Receiver<bool>) {
+fn register_generation(conversation_id: &str) -> (GenerationRegistration, watch::Receiver<bool>) {
     let request_id = uuid::Uuid::new_v4().to_string();
     let (cancel, receiver) = watch::channel(false);
-    if let Ok(mut active) = active_generations().lock() {
-        if let Some(previous) = active.insert(
-            conversation_id.to_string(),
-            ActiveGeneration {
-                request_id: request_id.clone(),
-                cancel,
-            },
-        ) {
-            let _ = previous.cancel.send(true);
-        }
+    let mut active = active_generations()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    // A cancelled waiter may disappear before its predecessor finishes. Keep
+    // gates independently of the latest registration so a third request still
+    // waits for the predecessor's interrupted-reply commit.
+    let mut gates = GENERATION_GATES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    gates.retain(|_, gate| gate.strong_count() > 0);
+    let gate = gates
+        .get(conversation_id)
+        .and_then(Weak::upgrade)
+        .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(())));
+    gates.insert(conversation_id.to_string(), Arc::downgrade(&gate));
+    if let Some(previous) = active.insert(
+        conversation_id.to_string(),
+        ActiveGeneration {
+            request_id: request_id.clone(),
+            cancel,
+        },
+    ) {
+        let _ = previous.cancel.send(true);
     }
-    (request_id, receiver)
+    (
+        GenerationRegistration {
+            conversation_id: conversation_id.to_string(),
+            request_id,
+            gate,
+        },
+        receiver,
+    )
 }
 
-/// Persists whatever the user actually saw before pressing "stop".
-///
-/// Without this, cancelling a streaming reply silently discarded the partial
-/// answer: the conversation looked as if the assistant had never spoken, and a
-/// retry had no record of what was already on screen. The guard against a
-/// trailing assistant message avoids racing with the engine's own save.
+async fn run_until_cancelled<T>(
+    cancel: &mut watch::Receiver<bool>,
+    work: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    if *cancel.borrow() {
+        return None;
+    }
+    tokio::select! {
+        biased;
+        _ = cancel.changed() => None,
+        result = work => Some(result),
+    }
+}
+
+/// Persist only against the exact history used by this generation. This also
+/// replaces the rejected assistant reply when a regeneration is interrupted.
 fn persist_interrupted_reply(
-    conversation_id: &str,
+    store: &ConversationStore,
+    snapshot: Option<&Conversation>,
     model: &str,
     content: &str,
     thinking: &str,
-) {
-    let content = content.trim();
-    if content.is_empty() {
-        return;
+) -> Result<(), ChatError> {
+    if content.trim().is_empty() {
+        return Ok(());
     }
-    let store = get_conversation_store();
-    let Ok(conversation) = store.load_conversation(conversation_id) else {
-        return;
+    let Some(snapshot) = snapshot else {
+        return Ok(());
     };
-    if conversation
-        .messages
-        .last()
-        .is_some_and(|message| message.role != MessageRole::User)
-    {
-        return;
-    }
     let message = Message {
         id: uuid::Uuid::new_v4().to_string(),
         role: MessageRole::Assistant,
@@ -81,28 +118,49 @@ fn persist_interrupted_reply(
         timestamp: crate::api::clock::now_millis(),
         message_type: MessageType::Say,
     };
-    let _ = store.add_message(conversation_id, message);
+    store.commit_reply(snapshot, message).map(|_| ())
 }
 
-fn unregister_generation(conversation_id: &str, request_id: &str) {
-    if let Ok(mut active) = active_generations().lock() {
-        if active
-            .get(conversation_id)
-            .is_some_and(|generation| generation.request_id == request_id)
-        {
-            active.remove(conversation_id);
+#[derive(Default, Clone)]
+struct PartialReply {
+    content: String,
+    thinking: String,
+}
+
+impl PartialReply {
+    fn record(&mut self, event: &ChatStreamEvent) {
+        match event {
+            ChatStreamEvent::ContentDelta(delta) => self.content.push_str(delta),
+            ChatStreamEvent::ThinkingDelta(delta) => self.thinking.push_str(delta),
+            ChatStreamEvent::Error(error) if error == "__RETRY_RESET__" => {
+                self.content.clear();
+                self.thinking.clear();
+            }
+            _ => {}
         }
     }
 }
 
-pub fn cancel_generation(conversation_id: String) -> bool {
-    let generation = active_generations()
+fn unregister_generation(conversation_id: &str, request_id: &str) {
+    let mut active = active_generations()
         .lock()
-        .ok()
-        .and_then(|mut active| active.remove(&conversation_id));
-    generation
-        .map(|generation| generation.cancel.send(true).is_ok())
-        .unwrap_or(false)
+        .unwrap_or_else(|error| error.into_inner());
+    if active
+        .get(conversation_id)
+        .is_some_and(|generation| generation.request_id == request_id)
+    {
+        active.remove(conversation_id);
+    }
+}
+
+pub fn cancel_generation(conversation_id: String) -> bool {
+    let active = active_generations()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    // Keep registration until cleanup has committed any partial answer.
+    active
+        .get(&conversation_id)
+        .is_some_and(|generation| generation.cancel.send(true).is_ok())
 }
 
 pub fn init_app(data_path: String) {
@@ -421,42 +479,45 @@ pub async fn send_message(
         .clone()
         .unwrap_or_else(|| provider.chat_model.clone());
     let use_thinking_pipeline = enable_thinking && provider.thinking_model.is_some();
-    let (request_id, mut cancel) = register_generation(&conversation_id);
+    let (registration, mut cancel) = register_generation(&conversation_id);
+    let gate = registration.gate.clone();
+    let Some(permit) = run_until_cancelled(&mut cancel, gate.lock_owned()).await else {
+        let _ = sink.add(ChatStreamEvent::Error(
+            "__GENERATION_CANCELLED__".to_string(),
+        ));
+        let _ = sink.add(ChatStreamEvent::Done);
+        return;
+    };
+    let snapshot = Mutex::new(None::<Conversation>);
 
     let done_sent = std::sync::atomic::AtomicBool::new(false);
-    let partial_content = std::sync::Mutex::new(String::new());
-    let partial_thinking = std::sync::Mutex::new(String::new());
+    let partial = Mutex::new(PartialReply::default());
 
-    let pipeline_result = tokio::select! {
-        result = engine.send_message(
+    let pipeline_result = run_until_cancelled(
+        &mut cancel,
+        engine.send_message_with_snapshot(
             &conversation_id,
             &content,
             &chat_model,
             &thinking_model,
             use_thinking_pipeline,
+            |conversation| {
+                *snapshot.lock().unwrap_or_else(|error| error.into_inner()) =
+                    Some(conversation.clone());
+            },
             |event| {
-                match &event {
-                    ChatStreamEvent::ContentDelta(delta) => {
-                        if let Ok(mut buffer) = partial_content.lock() {
-                            buffer.push_str(delta);
-                        }
-                    }
-                    ChatStreamEvent::ThinkingDelta(delta) => {
-                        if let Ok(mut buffer) = partial_thinking.lock() {
-                            buffer.push_str(delta);
-                        }
-                    }
-                    ChatStreamEvent::Done => {
-                        done_sent.store(true, std::sync::atomic::Ordering::Release);
-                    }
-                    ChatStreamEvent::Error(_) => {}
+                partial
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .record(&event);
+                if matches!(&event, ChatStreamEvent::Done) {
+                    done_sent.store(true, std::sync::atomic::Ordering::Release);
                 }
                 let _ = sink.add(event);
             },
-        ) => Some(result),
-        _ = cancel.changed() => None,
-    };
-    unregister_generation(&conversation_id, &request_id);
+        ),
+    )
+    .await;
 
     match pipeline_result {
         Some(Ok(())) => {}
@@ -466,18 +527,27 @@ pub async fn send_message(
             }
         }
         None => {
-            let interrupted = partial_content
+            let interrupted = partial
                 .lock()
-                .map(|value| value.clone())
-                .unwrap_or_default();
-            let thinking = partial_thinking
-                .lock()
-                .map(|value| value.clone())
-                .unwrap_or_default();
-            persist_interrupted_reply(&conversation_id, &chat_model, &interrupted, &thinking);
-            let _ = sink.add(ChatStreamEvent::Error(
-                "__GENERATION_CANCELLED__".to_string(),
-            ));
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            // Done means the engine already committed the complete reply and
+            // is only extracting facts. Do not replace it with a partial buffer.
+            if !done_sent.load(std::sync::atomic::Ordering::Acquire) {
+                let snapshot = snapshot.lock().unwrap_or_else(|error| error.into_inner());
+                if let Err(error) = persist_interrupted_reply(
+                    get_conversation_store(),
+                    snapshot.as_ref(),
+                    &chat_model,
+                    &interrupted.content,
+                    &interrupted.thinking,
+                ) {
+                    let _ = sink.add(ChatStreamEvent::Error(error.to_string()));
+                }
+                let _ = sink.add(ChatStreamEvent::Error(
+                    "__GENERATION_CANCELLED__".to_string(),
+                ));
+            }
         }
     }
 
@@ -485,6 +555,10 @@ pub async fn send_message(
         let _ = sink.add(ChatStreamEvent::Done);
     }
 
+    // Release only after partial persistence and terminal events. The next
+    // request must build its context from the final history of this request.
+    drop(permit);
+    drop(registration);
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 }
 
@@ -510,41 +584,44 @@ pub async fn regenerate_response(
         .clone()
         .unwrap_or_else(|| provider.chat_model.clone());
     let use_thinking_pipeline = enable_thinking && provider.thinking_model.is_some();
-    let (request_id, mut cancel) = register_generation(&conversation_id);
+    let (registration, mut cancel) = register_generation(&conversation_id);
+    let gate = registration.gate.clone();
+    let Some(permit) = run_until_cancelled(&mut cancel, gate.lock_owned()).await else {
+        let _ = sink.add(ChatStreamEvent::Error(
+            "__GENERATION_CANCELLED__".to_string(),
+        ));
+        let _ = sink.add(ChatStreamEvent::Done);
+        return;
+    };
+    let snapshot = Mutex::new(None::<Conversation>);
 
     let done_sent = std::sync::atomic::AtomicBool::new(false);
-    let partial_content = std::sync::Mutex::new(String::new());
-    let partial_thinking = std::sync::Mutex::new(String::new());
+    let partial = Mutex::new(PartialReply::default());
 
-    let pipeline_result = tokio::select! {
-        result = engine.regenerate_response(
+    let pipeline_result = run_until_cancelled(
+        &mut cancel,
+        engine.regenerate_response_with_snapshot(
             &conversation_id,
             &chat_model,
             &thinking_model,
             use_thinking_pipeline,
+            |conversation| {
+                *snapshot.lock().unwrap_or_else(|error| error.into_inner()) =
+                    Some(conversation.clone());
+            },
             |event| {
-                match &event {
-                    ChatStreamEvent::ContentDelta(delta) => {
-                        if let Ok(mut buffer) = partial_content.lock() {
-                            buffer.push_str(delta);
-                        }
-                    }
-                    ChatStreamEvent::ThinkingDelta(delta) => {
-                        if let Ok(mut buffer) = partial_thinking.lock() {
-                            buffer.push_str(delta);
-                        }
-                    }
-                    ChatStreamEvent::Done => {
-                        done_sent.store(true, std::sync::atomic::Ordering::Release);
-                    }
-                    ChatStreamEvent::Error(_) => {}
+                partial
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .record(&event);
+                if matches!(&event, ChatStreamEvent::Done) {
+                    done_sent.store(true, std::sync::atomic::Ordering::Release);
                 }
                 let _ = sink.add(event);
             },
-        ) => Some(result),
-        _ = cancel.changed() => None,
-    };
-    unregister_generation(&conversation_id, &request_id);
+        ),
+    )
+    .await;
 
     match pipeline_result {
         Some(Ok(())) => {}
@@ -554,18 +631,27 @@ pub async fn regenerate_response(
             }
         }
         None => {
-            let interrupted = partial_content
+            let interrupted = partial
                 .lock()
-                .map(|value| value.clone())
-                .unwrap_or_default();
-            let thinking = partial_thinking
-                .lock()
-                .map(|value| value.clone())
-                .unwrap_or_default();
-            persist_interrupted_reply(&conversation_id, &chat_model, &interrupted, &thinking);
-            let _ = sink.add(ChatStreamEvent::Error(
-                "__GENERATION_CANCELLED__".to_string(),
-            ));
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            // Done means the engine already committed the complete reply and
+            // is only extracting facts. Do not replace it with a partial buffer.
+            if !done_sent.load(std::sync::atomic::Ordering::Acquire) {
+                let snapshot = snapshot.lock().unwrap_or_else(|error| error.into_inner());
+                if let Err(error) = persist_interrupted_reply(
+                    get_conversation_store(),
+                    snapshot.as_ref(),
+                    &chat_model,
+                    &interrupted.content,
+                    &interrupted.thinking,
+                ) {
+                    let _ = sink.add(ChatStreamEvent::Error(error.to_string()));
+                }
+                let _ = sink.add(ChatStreamEvent::Error(
+                    "__GENERATION_CANCELLED__".to_string(),
+                ));
+            }
         }
     }
 
@@ -573,6 +659,10 @@ pub async fn regenerate_response(
         let _ = sink.add(ChatStreamEvent::Done);
     }
 
+    // Release only after partial persistence and terminal events. The next
+    // request must build its context from the final history of this request.
+    drop(permit);
+    drop(registration);
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 }
 
@@ -591,4 +681,169 @@ pub async fn trigger_memory_summarize(
             let _ = sink.add(event);
         })
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(role: MessageRole, content: &str) -> Message {
+        Message {
+            id: uuid::Uuid::new_v4().to_string(),
+            role,
+            content: content.to_string(),
+            thinking_content: None,
+            model: "test-model".to_string(),
+            timestamp: 0,
+            message_type: MessageType::Say,
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_wins_before_ready_work_is_polled() {
+        let (sender, mut receiver) = watch::channel(false);
+        sender.send(true).unwrap();
+        let polled = std::cell::Cell::new(false);
+        let result = run_until_cancelled(&mut receiver, async {
+            polled.set(true);
+            42
+        })
+        .await;
+        assert_eq!(result, None);
+        assert!(!polled.get(), "cancelled work must not append a user turn");
+    }
+
+    #[tokio::test]
+    async fn replacement_and_cancel_keep_predecessor_gate_alive() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let (first, first_cancel) = register_generation(&id);
+        let permit = first.gate.clone().lock_owned().await;
+        let (second, second_cancel) = register_generation(&id);
+        assert!(*first_cancel.borrow());
+        assert!(Arc::ptr_eq(&first.gate, &second.gate));
+        assert!(cancel_generation(id.clone()));
+        assert!(*second_cancel.borrow());
+        drop(second);
+        // The latest waiter can exit before the cancelled predecessor has
+        // committed its partial reply. A third request must still wait.
+        let (third, third_cancel) = register_generation(&id);
+        assert!(Arc::ptr_eq(&first.gate, &third.gate));
+        assert!(third.gate.try_lock().is_err());
+        drop(first);
+        assert!(!*third_cancel.borrow());
+        assert!(
+            cancel_generation(id.clone()),
+            "old cleanup must not unregister the replacement"
+        );
+        drop(permit);
+        assert!(third.gate.try_lock().is_ok());
+        drop(third);
+        assert!(!cancel_generation(id));
+    }
+
+    #[test]
+    fn unrelated_conversations_have_independent_gates() {
+        let (first, _) = register_generation(&uuid::Uuid::new_v4().to_string());
+        let (second, _) = register_generation(&uuid::Uuid::new_v4().to_string());
+        assert!(!Arc::ptr_eq(&first.gate, &second.gate));
+    }
+
+    #[test]
+    fn interrupted_regeneration_saves_visible_text_and_thinking_exactly() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConversationStore::new(dir.path().to_str().unwrap());
+        let conversation = store.create_conversation();
+        store.save_conversation(&conversation).unwrap();
+        store
+            .add_user_turn(&conversation.id, message(MessageRole::User, "question"))
+            .unwrap();
+        let rejected = message(MessageRole::Assistant, "rejected");
+        store
+            .add_message(&conversation.id, rejected.clone())
+            .unwrap();
+        let snapshot = store.load_conversation(&conversation.id).unwrap();
+        persist_interrupted_reply(
+            &store,
+            Some(&snapshot),
+            "new-model",
+            "  partial\n",
+            "reasoning",
+        )
+        .unwrap();
+        let loaded = store.load_conversation(&conversation.id).unwrap();
+        assert_eq!(loaded.messages.len(), 2);
+        assert_eq!(loaded.messages[1].id, rejected.id);
+        assert_eq!(loaded.messages[1].content, "  partial\n");
+        assert_eq!(
+            loaded.messages[1].thinking_content.as_deref(),
+            Some("reasoning")
+        );
+        assert_eq!(loaded.messages[1].model, "new-model");
+        // A second cleanup against the old snapshot cannot overwrite it.
+        persist_interrupted_reply(&store, Some(&snapshot), "new-model", "stale", "").unwrap();
+        assert_eq!(
+            store.load_conversation(&conversation.id).unwrap().messages[1].content,
+            "  partial\n"
+        );
+    }
+
+    #[test]
+    fn retry_reset_excludes_discarded_text_from_interrupted_reply() {
+        let mut partial = PartialReply::default();
+        partial.record(&ChatStreamEvent::ContentDelta(
+            "discarded answer".to_string(),
+        ));
+        partial.record(&ChatStreamEvent::ThinkingDelta(
+            "discarded thinking".to_string(),
+        ));
+        partial.record(&ChatStreamEvent::Error("__RETRY_RESET__".to_string()));
+        partial.record(&ChatStreamEvent::ContentDelta("visible answer".to_string()));
+        partial.record(&ChatStreamEvent::ThinkingDelta(
+            "visible thinking".to_string(),
+        ));
+        assert_eq!(partial.content, "visible answer");
+        assert_eq!(partial.thinking, "visible thinking");
+    }
+
+    #[tokio::test]
+    async fn next_generation_reads_committed_interrupted_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConversationStore::new(dir.path().to_str().unwrap());
+        let conversation = store.create_conversation();
+        store.save_conversation(&conversation).unwrap();
+        let (first, _first_cancel) = register_generation(&conversation.id);
+        let first_permit = first.gate.clone().lock_owned().await;
+        let snapshot = store
+            .add_user_turn(&conversation.id, message(MessageRole::User, "first"))
+            .unwrap();
+        assert!(cancel_generation(conversation.id.clone()));
+        let (second, mut second_cancel) = register_generation(&conversation.id);
+        assert!(second.gate.try_lock().is_err());
+        persist_interrupted_reply(
+            &store,
+            Some(&snapshot),
+            "test-model",
+            "interrupted first reply",
+            "",
+        )
+        .unwrap();
+        drop(first_permit);
+        drop(first);
+        let _second_permit =
+            run_until_cancelled(&mut second_cancel, second.gate.clone().lock_owned())
+                .await
+                .unwrap();
+        let context = store
+            .add_user_turn(&conversation.id, message(MessageRole::User, "second"))
+            .unwrap();
+        assert_eq!(
+            context
+                .messages
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "interrupted first reply", "second"]
+        );
+        assert_eq!(context.turn_count, 2);
+    }
 }

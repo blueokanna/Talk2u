@@ -478,16 +478,16 @@ public:
 
     void Update(csmFloat32 deltaTime) {
         _motionUpdated = false;
-        idleTime_ += deltaTime;
-        _model->LoadParameters();
-        if (_motionManager->IsFinished()) {
-            StartMotion("Idle", 0, kPriorityIdle);
-        } else {
+        if (!reducedMotion_) {
+            idleTime_ += deltaTime;
+            _model->LoadParameters();
+            if (_motionManager->IsFinished()) StartMotion("Idle", 0, kPriorityIdle);
             _motionUpdated = _motionManager->UpdateMotion(_model, deltaTime);
+            _model->SaveParameters();
+            ApplyProceduralMotion();
+            ApplyGaze(deltaTime);
+            _updateScheduler.OnLateUpdate(_model, deltaTime);
         }
-        _model->SaveParameters();
-        ApplyProceduralMotion();
-        _updateScheduler.OnLateUpdate(_model, deltaTime);
         const csmFloat32 mouth = speaking_ ? mouth_ : 0.0F;
         for (csmUint32 index = 0; index < lipSyncIds_.GetSize(); ++index) {
             _model->SetParameterValue(lipSyncIds_[index], mouth);
@@ -539,8 +539,15 @@ public:
         _expressionManager->StopAllMotions();
     }
 
+    void SetReducedMotion(bool value) { reducedMotion_ = value; }
+
+    void SetGaze(float x, float y) {
+        gazeTargetX_ = std::isfinite(x) ? std::clamp(x, -1.0F, 1.0F) : 0.0F;
+        gazeTargetY_ = std::isfinite(y) ? std::clamp(y, -1.0F, 1.0F) : 0.0F;
+    }
+
     void SetMouth(float value) {
-        mouth_ = std::clamp(value, 0.0F, 1.0F);
+        mouth_ = std::isfinite(value) ? std::clamp(value, 0.0F, 1.0F) : 0.0F;
     }
 
     void SetSpeaking(bool value) {
@@ -692,6 +699,14 @@ private:
             int width = 0;
             int height = 0;
             int channels = 0;
+            // Validate dimensions before STB allocates/decompresses untrusted data.
+            if (encoded.size() > static_cast<size_t>(INT_MAX) ||
+                !stbi_info_from_memory(encoded.data(), static_cast<int>(encoded.size()),
+                    &width, &height, &channels) ||
+                width <= 0 || height <= 0 || width > 4096 || height > 4096) {
+                throw std::runtime_error("Live2D texture dimensions are invalid: " +
+                    std::string(fileName));
+            }
             unsigned char* decoded = stbi_load_from_memory(
                 encoded.data(),
                 static_cast<int>(encoded.size()),
@@ -759,6 +774,19 @@ private:
         }
     }
 
+    void ApplyGaze(csmFloat32 deltaTime) {
+        const float blend = 1.0F - std::exp(-deltaTime * 8.0F);
+        gazeX_ += (gazeTargetX_ - gazeX_) * blend;
+        gazeY_ += (gazeTargetY_ - gazeY_) * blend;
+        AddParameter(eyeBallXIndex_, gazeX_ * 0.65F);
+        AddParameter(eyeBallYIndex_, -gazeY_ * 0.65F);
+        AddParameter(angleXIndex_, gazeX_ * 12.0F);
+        AddParameter(angleYIndex_, -gazeY_ * 8.0F);
+    }
+
+    bool reducedMotion_ = false;
+    float gazeX_ = 0.0F, gazeY_ = 0.0F;
+    float gazeTargetX_ = 0.0F, gazeTargetY_ = 0.0F;
     ModelSource source_;
     std::unique_ptr<CubismModelSettingJson> setting_;
     std::unordered_map<std::string, ACubismMotion*> motions_;
@@ -894,7 +922,7 @@ public:
     }
 
     bool DrawFrame() {
-        if (!ready_ || !model_) return false;
+        if (!active_ || !ready_ || !model_) return false;
         interop_.BeginFrame();
         while (glGetError() != GL_NO_ERROR) {}
         PollGpuTimers();
@@ -948,6 +976,16 @@ public:
         consecutiveGlErrors_ = 0;
         ++frameCount_;
         return frameCount_ == 1U;
+    }
+
+    void SetRenderPolicy(bool active, bool reducedMotion) {
+        if (active != active_) lastFrame_ = std::chrono::steady_clock::now();
+        active_ = active;
+        if (model_) model_->SetReducedMotion(reducedMotion);
+    }
+
+    void SetGaze(float x, float y) {
+        if (model_) model_->SetGaze(x, y);
     }
 
     void SetMouth(float value) {
@@ -1140,6 +1178,7 @@ private:
     std::string glVendor_;
     std::string glVersion_;
     talk2u::VulkanInterop interop_;
+    bool active_ = true;
     float clearRed_;
     float clearGreen_;
     float clearBlue_;
@@ -1268,6 +1307,20 @@ Java_com_blue_talk2u_Live2dNativeBridge_nativeDrawFrame(
         firstFrame = FindSession(handle).DrawFrame() ? JNI_TRUE : JNI_FALSE;
     });
     return firstFrame;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_blue_talk2u_Live2dNativeBridge_nativeSetRenderPolicy(
+    JNIEnv* environment, jobject, jlong handle, jboolean active, jboolean reducedMotion) {
+    Invoke(environment, [&] {
+        FindSession(handle).SetRenderPolicy(active == JNI_TRUE, reducedMotion == JNI_TRUE);
+    });
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_blue_talk2u_Live2dNativeBridge_nativeSetGaze(
+    JNIEnv* environment, jobject, jlong handle, jfloat x, jfloat y) {
+    Invoke(environment, [&] { FindSession(handle).SetGaze(x, y); });
 }
 
 extern "C" JNIEXPORT void JNICALL

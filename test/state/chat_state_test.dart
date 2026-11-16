@@ -14,6 +14,83 @@ void main() {
     state.dispose();
   });
 
+  Conversation conversation(String id) => Conversation(
+    id: id,
+    title: id,
+    messages: const [],
+    model: 'test',
+    createdAt: 0,
+    updatedAt: 0,
+    dialogueStyle: DialogueStyle.mixed,
+    turnCount: 0,
+    memorySummaries: const [],
+  );
+
+  group('asynchronous turn ownership', () {
+    test('late load cannot replace a newer conversation', () async {
+      final oldRead = Completer<Conversation?>();
+      state.dispose();
+      state = ChatState(
+        readConversation: (id) async =>
+            id == 'old' ? oldRead.future : conversation(id),
+      );
+      final pending = state.loadConversation('old');
+      expect(await state.loadConversation('new'), isTrue);
+      oldRead.complete(conversation('old'));
+      expect(await pending, isFalse);
+      expect(state.currentConversationId, 'new');
+    });
+
+    test('late completed-turn read cannot clear the next stream', () async {
+      final completedRead = Completer<Conversation?>();
+      state.dispose();
+      state = ChatState(readConversation: (_) => completedRead.future);
+      final events = StreamController<ChatStreamEvent>();
+      state.startStreaming();
+      state.listenToChatStreamForTest(events.stream, 'same');
+      events.add(const ChatStreamEvent.done());
+      await Future<void>.delayed(Duration.zero);
+      state.startStreaming();
+      state.appendStreamingContent('next turn');
+      completedRead.complete(conversation('same'));
+      await Future<void>.delayed(Duration.zero);
+      expect(state.isStreaming, isTrue);
+      expect(state.currentStreamingContent, 'next turn');
+      expect(state.completedResponseRevision, 0);
+      await events.close();
+    });
+
+    test(
+      'events after Done are ignored even while the saved turn loads',
+      () async {
+        final read = Completer<Conversation?>();
+        state.dispose();
+        state = ChatState(readConversation: (_) => read.future);
+        final events = StreamController<ChatStreamEvent>();
+        state.startStreaming();
+        state.listenToChatStreamForTest(events.stream, 'same');
+        events.add(const ChatStreamEvent.contentDelta('final'));
+        events.add(const ChatStreamEvent.done());
+        events.add(const ChatStreamEvent.contentDelta('late'));
+        events.add(const ChatStreamEvent.error('late failure'));
+        await Future<void>.delayed(Duration.zero);
+        expect(state.currentStreamingContent, 'final');
+        expect(state.errorMessage, isNull);
+        read.complete(null);
+        await events.close();
+      },
+    );
+
+    test('disposed state rejects an in-flight conversation read', () async {
+      final read = Completer<Conversation?>();
+      final disposable = ChatState(readConversation: (_) => read.future);
+      final pending = disposable.loadConversation('old');
+      disposable.dispose();
+      read.complete(conversation('old'));
+      expect(await pending, isFalse);
+    });
+  });
+
   group('ChatState defaults', () {
     test('initial enableThinking is true', () {
       expect(state.enableThinking, true);

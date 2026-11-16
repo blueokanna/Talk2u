@@ -71,6 +71,24 @@ impl ChatEngine {
         compact
     }
 
+    fn forward_reply_event(
+        event: ChatStreamEvent,
+        need_content_reset: &std::sync::atomic::AtomicBool,
+        on_event: &impl Fn(ChatStreamEvent),
+    ) {
+        match event {
+            // Transport completion is not application completion: validation,
+            // fallback and the durable reply commit must finish first.
+            ChatStreamEvent::Error(_) | ChatStreamEvent::Done => {}
+            ChatStreamEvent::ContentDelta(_) | ChatStreamEvent::ThinkingDelta(_) => {
+                if need_content_reset.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    on_event(ChatStreamEvent::Error("__RETRY_RESET__".to_string()));
+                }
+                on_event(event);
+            }
+        }
+    }
+
     async fn request_with_fallback(
         &self,
         model: &str,
@@ -80,16 +98,8 @@ impl ChatEngine {
         on_event: &impl Fn(ChatStreamEvent),
     ) -> Result<(String, String), ChatError> {
         let need_content_reset = std::sync::atomic::AtomicBool::new(false);
-        let filtered_event = |event: ChatStreamEvent| match event {
-            ChatStreamEvent::Error(_) => {}
-            ChatStreamEvent::ContentDelta(_) | ChatStreamEvent::ThinkingDelta(_) => {
-                if need_content_reset.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                    on_event(ChatStreamEvent::Error("__RETRY_RESET__".to_string()));
-                }
-                on_event(event);
-            }
-            other => on_event(other),
-        };
+        let filtered_event =
+            |event| Self::forward_reply_event(event, &need_content_reset, on_event);
 
         let request_body = Self::build_request_body_with_sampling(
             enhanced_messages,
@@ -279,7 +289,6 @@ impl ChatEngine {
     pub fn detect_message_type(content: &str) -> MessageType {
         SayDoDetector::detect(content)
     }
-
 
     fn estimate_content_tokens(content: &str) -> usize {
         let char_count = content.chars().count();
@@ -898,8 +907,8 @@ impl ChatEngine {
             "先做一个小动作或短句，再自然地把意思展开",
             "直接给出结论或反问，再补充理由，避免铺垫",
         ];
-        let direction = directions
-            [crate::api::clock::now_millis().unsigned_abs() as usize % directions.len()];
+        let direction =
+            directions[crate::api::clock::now_millis().unsigned_abs() as usize % directions.len()];
 
         format!(
             "【重新生成要求 — 必须执行】\n\
@@ -1609,6 +1618,28 @@ impl ChatEngine {
         enable_thinking: bool,
         on_event: impl Fn(ChatStreamEvent),
     ) -> Result<(), ChatError> {
+        self.send_message_with_snapshot(
+            conversation_id,
+            content,
+            chat_model,
+            thinking_model,
+            enable_thinking,
+            |_| {},
+            on_event,
+        )
+        .await
+    }
+
+    pub(crate) async fn send_message_with_snapshot(
+        &self,
+        conversation_id: &str,
+        content: &str,
+        chat_model: &str,
+        thinking_model: &str,
+        enable_thinking: bool,
+        on_snapshot: impl Fn(&Conversation),
+        on_event: impl Fn(ChatStreamEvent),
+    ) -> Result<(), ChatError> {
         Self::validate_message(content)?;
 
         let message_type = Self::detect_message_type(content);
@@ -1621,12 +1652,10 @@ impl ChatEngine {
             timestamp: crate::api::clock::now_millis(),
             message_type: message_type.clone(),
         };
-        self.conversation_store
-            .add_message(conversation_id, user_msg)?;
-        self.conversation_store
-            .increment_turn_count(conversation_id)?;
-
-        let conv = self.conversation_store.load_conversation(conversation_id)?;
+        let conv = self
+            .conversation_store
+            .add_user_turn(conversation_id, user_msg)?;
+        on_snapshot(&conv);
         let (full_content, full_thinking) = self
             .generate_reply(
                 ReplyGeneration {
@@ -1653,10 +1682,15 @@ impl ChatEngine {
             return Ok(());
         }
 
-        self.conversation_store.add_message(
-            conversation_id,
+        if !self.conversation_store.commit_reply(
+            &conv,
             Self::assistant_message(full_content, full_thinking, chat_model),
-        )?;
+        )? {
+            return Err(ChatError::ValidationError {
+                message: "Conversation changed while generating the reply; please retry"
+                    .to_string(),
+            });
+        }
 
         on_event(ChatStreamEvent::Done);
         self.extract_and_store_facts(conversation_id, &on_event)
@@ -1680,15 +1714,29 @@ impl ChatEngine {
         }
     }
 
-    pub async fn regenerate_response(
+    fn regeneration_context(conv: &Conversation, last_user_index: usize) -> Conversation {
+        let mut prompt = conv.clone();
+        prompt.messages.truncate(last_user_index + 1);
+        prompt.messages.extend(
+            conv.messages[last_user_index + 1..]
+                .iter()
+                .filter(|message| message.role == MessageRole::System)
+                .cloned(),
+        );
+        prompt
+    }
+
+    pub(crate) async fn regenerate_response_with_snapshot(
         &self,
         conversation_id: &str,
         chat_model: &str,
         thinking_model: &str,
         enable_thinking: bool,
+        on_snapshot: impl Fn(&Conversation),
         on_event: impl Fn(ChatStreamEvent),
     ) -> Result<(), ChatError> {
         let conv = self.conversation_store.load_conversation(conversation_id)?;
+        on_snapshot(&conv);
 
         let last_user_index = conv
             .messages
@@ -1713,14 +1761,7 @@ impl ChatEngine {
         // it around is what made "regenerate" paraphrase the old reply; a
         // textual "don't repeat" hint cannot fully undo that priming. Durable
         // system blocks appended after the user turn are preserved.
-        let trailing_system: Vec<Message> = conv.messages[last_user_index + 1..]
-            .iter()
-            .filter(|message| message.role == MessageRole::System)
-            .cloned()
-            .collect();
-        let mut prompt_conversation = conv.clone();
-        prompt_conversation.messages.truncate(last_user_index + 1);
-        prompt_conversation.messages.extend(trailing_system);
+        let prompt_conversation = Self::regeneration_context(&conv, last_user_index);
 
         let message_type = Self::detect_message_type(&user_content);
         let (full_content, full_thinking) = self
@@ -1749,28 +1790,14 @@ impl ChatEngine {
             return Ok(());
         }
 
-        if let Some(previous) = previous_assistant {
-            let mut updated = self.conversation_store.load_conversation(conversation_id)?;
-            let now = crate::api::clock::now_millis();
-            if let Some(index) = updated.messages.iter().position(|m| m.id == previous.id) {
-                let mut replacement =
-                    Self::assistant_message(full_content, full_thinking, chat_model);
-                replacement.id = previous.id;
-                replacement.timestamp = now;
-                updated.messages[index] = replacement;
-                updated.updated_at = now;
-                self.conversation_store.save_conversation(&updated)?;
-            } else {
-                self.conversation_store.add_message(
-                    conversation_id,
-                    Self::assistant_message(full_content, full_thinking, chat_model),
-                )?;
-            }
-        } else {
-            self.conversation_store.add_message(
-                conversation_id,
-                Self::assistant_message(full_content, full_thinking, chat_model),
-            )?;
+        if !self.conversation_store.commit_reply(
+            &conv,
+            Self::assistant_message(full_content, full_thinking, chat_model),
+        )? {
+            return Err(ChatError::ValidationError {
+                message: "Conversation changed while generating the reply; please retry"
+                    .to_string(),
+            });
         }
 
         on_event(ChatStreamEvent::Done);
@@ -2016,25 +2043,27 @@ impl ChatEngine {
     }
 
     pub fn restart_story(&self, conversation_id: &str) -> Result<(), ChatError> {
-        let mut conv = self.conversation_store.load_conversation(conversation_id)?;
-        let mut kept_messages: Vec<Message> = Vec::new();
-        let mut found_greeting = false;
-
-        for msg in &conv.messages {
-            if msg.role == MessageRole::System {
-                kept_messages.push(msg.clone());
-            } else if msg.role == MessageRole::Assistant && !found_greeting {
-                kept_messages.push(msg.clone());
-                found_greeting = true;
-            }
-        }
-
-        conv.messages = kept_messages;
-        conv.turn_count = 0;
-        conv.memory_summaries.clear();
-        conv.updated_at = crate::api::clock::now_millis();
-
-        self.conversation_store.save_conversation(&conv)?;
+        self.conversation_store
+            .update_conversation(conversation_id, |conv| {
+                let mut kept_messages = Vec::new();
+                let mut found_greeting = false;
+                let mut found_user = false;
+                for msg in &conv.messages {
+                    if msg.role == MessageRole::System {
+                        kept_messages.push(msg.clone());
+                    } else if msg.role == MessageRole::User {
+                        found_user = true;
+                    } else if !found_user && !found_greeting {
+                        // A reply to the first user turn is not a character greeting.
+                        kept_messages.push(msg.clone());
+                        found_greeting = true;
+                    }
+                }
+                conv.messages = kept_messages;
+                conv.turn_count = 0;
+                conv.memory_summaries.clear();
+                Ok(())
+            })?;
         self.memory_engine.delete_memory_index(conversation_id)?;
         self.knowledge_store.delete_knowledge(conversation_id)?;
 
@@ -2056,6 +2085,115 @@ mod tests {
             timestamp: crate::api::clock::now_millis(),
             message_type: MessageType::Say,
         }
+    }
+
+    #[test]
+    fn transport_done_is_not_forwarded_before_reply_commit() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let reset = std::sync::atomic::AtomicBool::new(false);
+        let emit = |event| events.borrow_mut().push(event);
+        ChatEngine::forward_reply_event(
+            ChatStreamEvent::ContentDelta("reply".to_string()),
+            &reset,
+            &emit,
+        );
+        ChatEngine::forward_reply_event(ChatStreamEvent::Done, &reset, &emit);
+        ChatEngine::forward_reply_event(ChatStreamEvent::Done, &reset, &emit);
+        assert_eq!(events.borrow().len(), 1);
+        assert!(
+            matches!(&events.borrow()[0], ChatStreamEvent::ContentDelta(text) if text == "reply")
+        );
+    }
+
+    #[test]
+    fn retry_reset_precedes_first_new_delta_even_after_transport_done() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let reset = std::sync::atomic::AtomicBool::new(true);
+        let emit = |event| events.borrow_mut().push(event);
+        ChatEngine::forward_reply_event(ChatStreamEvent::Done, &reset, &emit);
+        ChatEngine::forward_reply_event(
+            ChatStreamEvent::ThinkingDelta("new thought".to_string()),
+            &reset,
+            &emit,
+        );
+        ChatEngine::forward_reply_event(
+            ChatStreamEvent::ContentDelta("new answer".to_string()),
+            &reset,
+            &emit,
+        );
+        let events = events.borrow();
+        assert_eq!(events.len(), 3);
+        assert!(matches!(&events[0], ChatStreamEvent::Error(text) if text == "__RETRY_RESET__"));
+        assert!(matches!(&events[1], ChatStreamEvent::ThinkingDelta(_)));
+        assert!(matches!(&events[2], ChatStreamEvent::ContentDelta(_)));
+    }
+
+    #[test]
+    fn regeneration_keeps_earlier_turns_and_system_but_excludes_rejected_answer() {
+        let store = ConversationStore::new("unused");
+        let mut conv = store.create_conversation();
+        conv.messages = vec![
+            make_message(MessageRole::System, "character"),
+            make_message(MessageRole::User, "first question"),
+            make_message(MessageRole::Assistant, "first answer"),
+            make_message(MessageRole::User, "second question"),
+            make_message(MessageRole::Assistant, "rejected answer"),
+            make_message(MessageRole::System, "later instruction"),
+        ];
+        let prompt = ChatEngine::regeneration_context(&conv, 3);
+        let enhanced = ChatEngine::build_context_enhanced_messages(&prompt, "second question", &[]);
+        let body = ChatEngine::build_request_body(&enhanced, "other-provider-model", false);
+        let messages = body["messages"].as_array().unwrap();
+        assert!(messages[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("character"));
+        assert!(messages[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("later instruction"));
+        let dialogue: Vec<_> = messages
+            .iter()
+            .filter(|m| m["role"] != "system")
+            .map(|m| m["content"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            dialogue,
+            vec!["first question", "first answer", "second question"]
+        );
+        assert_eq!(
+            conv.messages[4].content, "rejected answer",
+            "prompt construction must not mutate durable history"
+        );
+    }
+
+    #[test]
+    fn restart_does_not_keep_first_turn_reply_as_a_greeting() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = ProviderRuntime {
+            id: "test".to_string(),
+            api_url: "http://127.0.0.1".to_string(),
+            api_key: String::new(),
+            protocol: super::super::provider::WireProtocol::OpenAi,
+            max_output_tokens: 4096,
+        };
+        let engine = ChatEngine::new(provider, "test".to_string(), dir.path().to_str().unwrap());
+        let mut conv = engine.conversation_store.create_conversation();
+        conv.messages = vec![
+            make_message(MessageRole::System, "character"),
+            make_message(MessageRole::User, "old question"),
+            make_message(MessageRole::Assistant, "old answer"),
+        ];
+        conv.turn_count = 1;
+        engine.conversation_store.save_conversation(&conv).unwrap();
+        engine.restart_story(&conv.id).unwrap();
+        let restarted = engine
+            .conversation_store
+            .load_conversation(&conv.id)
+            .unwrap();
+        assert_eq!(restarted.messages.len(), 1);
+        assert_eq!(restarted.messages[0].content, "character");
+        assert_eq!(restarted.turn_count, 0);
     }
 
     #[test]
@@ -2238,7 +2376,6 @@ mod tests {
             MessageType::Mixed
         );
     }
-
 
     #[test]
     fn test_parse_summary_json() {

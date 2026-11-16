@@ -4,6 +4,7 @@
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
 #include <dlfcn.h>
+#include <android/NeuralNetworksTypes.h>
 
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
@@ -146,13 +147,26 @@ VulkanProbeResult ProbeVulkan() {
         enabledInstanceExtensions = {"VK_KHR_surface", "VK_KHR_android_surface"};
     }
 
+    // AHB dependencies promoted to core (dedicated allocation, external
+    // memory/semaphore capabilities and YCbCr conversion) require Vulkan 1.1.
+    const auto enumerateInstanceVersion = LoadGlobal<PFN_vkEnumerateInstanceVersion>(
+        getInstanceProcAddr, "vkEnumerateInstanceVersion");
+    uint32_t loaderVersion = VK_API_VERSION_1_0;
+    if (enumerateInstanceVersion == nullptr ||
+        enumerateInstanceVersion(&loaderVersion) != VK_SUCCESS ||
+        loaderVersion < VK_API_VERSION_1_1) {
+        output.resultCode = VK_ERROR_INCOMPATIBLE_DRIVER;
+        dlclose(library);
+        return output;
+    }
+
     VkApplicationInfo applicationInfo{};
     applicationInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     applicationInfo.pApplicationName = "Talk2U GPU Probe";
     applicationInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
     applicationInfo.pEngineName = "Talk2U";
     applicationInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-    applicationInfo.apiVersion = VK_API_VERSION_1_0;
+    applicationInfo.apiVersion = VK_API_VERSION_1_1;
 
     VkInstanceCreateInfo instanceInfo{};
     instanceInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -180,13 +194,16 @@ VulkanProbeResult ProbeVulkan() {
         getInstanceProcAddr, instance, "vkEnumerateDeviceExtensionProperties");
     const auto createDevice = LoadInstance<PFN_vkCreateDevice>(
         getInstanceProcAddr, instance, "vkCreateDevice");
-    const auto getDeviceProcAddr = LoadInstance<PFN_vkGetDeviceProcAddr>(
-        getInstanceProcAddr, instance, "vkGetDeviceProcAddr");
+    const auto destroyDevice = LoadInstance<PFN_vkDestroyDevice>(
+        getInstanceProcAddr, instance, "vkDestroyDevice");
+    const auto getExternalSemaphoreProperties =
+        LoadInstance<PFN_vkGetPhysicalDeviceExternalSemaphoreProperties>(
+            getInstanceProcAddr, instance, "vkGetPhysicalDeviceExternalSemaphoreProperties");
 
     if (destroyInstance == nullptr || enumeratePhysicalDevices == nullptr ||
         getPhysicalDeviceProperties == nullptr || getQueueFamilyProperties == nullptr ||
         enumerateDeviceExtensions == nullptr || createDevice == nullptr ||
-        getDeviceProcAddr == nullptr) {
+        destroyDevice == nullptr || getExternalSemaphoreProperties == nullptr) {
         if (destroyInstance != nullptr) destroyInstance(instance, nullptr);
         dlclose(library);
         return output;
@@ -197,8 +214,16 @@ VulkanProbeResult ProbeVulkan() {
     if (enumerateResult == VK_SUCCESS && physicalDeviceCount > 0) {
         std::vector<VkPhysicalDevice> physicalDevices(physicalDeviceCount);
         enumerateResult = enumeratePhysicalDevices(instance, &physicalDeviceCount, physicalDevices.data());
+        physicalDevices.resize(physicalDeviceCount);
+        const VulkanProbeResult instanceResult = output;
         for (const VkPhysicalDevice physicalDevice : physicalDevices) {
             if (enumerateResult != VK_SUCCESS) break;
+            // Every readiness bit must describe the same physical device.
+            output = instanceResult;
+            VkPhysicalDeviceProperties properties{};
+            getPhysicalDeviceProperties(physicalDevice, &properties);
+            if (properties.apiVersion < VK_API_VERSION_1_1 ||
+                properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) continue;
 
             uint32_t queueCount = 0;
             getQueueFamilyProperties(physicalDevice, &queueCount, nullptr);
@@ -229,11 +254,24 @@ VulkanProbeResult ProbeVulkan() {
             output.androidHardwareBuffer = HasExtension(
                 deviceExtensions,
                 "VK_ANDROID_external_memory_android_hardware_buffer");
-            output.externalMemory = HasExtension(deviceExtensions, "VK_KHR_external_memory");
-            output.externalSemaphore = HasExtension(deviceExtensions, "VK_KHR_external_semaphore");
+            output.externalMemory = true;  // Core in Vulkan 1.1.
+            output.externalSemaphore = true;
             output.externalSemaphoreFd = HasExtension(
                 deviceExtensions,
                 "VK_KHR_external_semaphore_fd");
+
+            if (!output.androidHardwareBuffer || !output.externalSemaphoreFd ||
+                !HasExtension(deviceExtensions, "VK_EXT_queue_family_foreign")) continue;
+            VkPhysicalDeviceExternalSemaphoreInfo semaphoreInfo{};
+            semaphoreInfo.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO;
+            semaphoreInfo.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
+            VkExternalSemaphoreProperties semaphoreProperties{};
+            semaphoreProperties.sType = VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES;
+            getExternalSemaphoreProperties(physicalDevice, &semaphoreInfo, &semaphoreProperties);
+            output.externalSemaphoreFd =
+                (semaphoreProperties.externalSemaphoreFeatures &
+                 VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT) != 0;
+            if (!output.externalSemaphoreFd) continue;
 
             const float priority = 1.0F;
             VkDeviceQueueCreateInfo queueInfo{};
@@ -242,20 +280,23 @@ VulkanProbeResult ProbeVulkan() {
             queueInfo.queueCount = 1;
             queueInfo.pQueuePriorities = &priority;
 
-            const char* deviceExtension = "VK_KHR_swapchain";
+            const char* deviceExtensionsToEnable[] = {
+                "VK_KHR_swapchain",
+                "VK_ANDROID_external_memory_android_hardware_buffer",
+                "VK_KHR_external_semaphore_fd",
+                "VK_EXT_queue_family_foreign",
+            };
             VkDeviceCreateInfo deviceInfo{};
             deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
             deviceInfo.queueCreateInfoCount = 1;
             deviceInfo.pQueueCreateInfos = &queueInfo;
-            deviceInfo.enabledExtensionCount = 1;
-            deviceInfo.ppEnabledExtensionNames = &deviceExtension;
+            deviceInfo.enabledExtensionCount = 4;
+            deviceInfo.ppEnabledExtensionNames = deviceExtensionsToEnable;
 
             VkDevice device = VK_NULL_HANDLE;
             output.resultCode = createDevice(physicalDevice, &deviceInfo, nullptr, &device);
             if (output.resultCode != VK_SUCCESS || device == VK_NULL_HANDLE) continue;
 
-            VkPhysicalDeviceProperties properties{};
-            getPhysicalDeviceProperties(physicalDevice, &properties);
             output.deviceName = properties.deviceName;
             output.apiVersion = VulkanVersion(properties.apiVersion);
             output.logicalDevice = true;
@@ -265,10 +306,8 @@ VulkanProbeResult ProbeVulkan() {
                 normalizedDeviceName.find("SwiftShader") == std::string::npos &&
                 normalizedDeviceName.find("swiftshader") == std::string::npos;
 
-            const auto destroyDevice = reinterpret_cast<PFN_vkDestroyDevice>(
-                getDeviceProcAddr(device, "vkDestroyDevice"));
-            if (destroyDevice != nullptr) destroyDevice(device, nullptr);
-            break;
+            destroyDevice(device, nullptr);
+            if (output.Ready()) break;
         }
     }
 
@@ -301,7 +340,10 @@ struct NnApiDeviceProbe {
     int64_t featureLevel = 0;
 
     bool Hardware() const {
-        return type == 0 || type == 2 || type == 3;
+        // UNKNOWN/OTHER/CPU do not establish GPU/NPU execution. Use the NDK
+        // constants: CPU is 2, GPU is 3 and ACCELERATOR is 4.
+        return type == ANEURALNETWORKS_DEVICE_GPU ||
+               type == ANEURALNETWORKS_DEVICE_ACCELERATOR;
     }
 };
 
@@ -416,6 +458,10 @@ bool TryOpenGlContext(EGLDisplay display, int requestedMajor, OpenGlProbeResult*
         return false;
     }
 
+    const EGLDisplay previousDisplay = eglGetCurrentDisplay();
+    const EGLContext previousContext = eglGetCurrentContext();
+    const EGLSurface previousDraw = eglGetCurrentSurface(EGL_DRAW);
+    const EGLSurface previousRead = eglGetCurrentSurface(EGL_READ);
     if (eglMakeCurrent(display, surface, surface, context) != EGL_TRUE) {
         output->eglError = eglGetError();
         eglDestroyContext(display, context);
@@ -444,7 +490,13 @@ bool TryOpenGlContext(EGLDisplay display, int requestedMajor, OpenGlProbeResult*
     output->ready = output->ready && !output->software;
     output->eglError = output->ready ? EGL_SUCCESS : static_cast<int>(glGetError());
 
-    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    const EGLBoolean restored = previousDisplay == EGL_NO_DISPLAY
+        ? eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT)
+        : eglMakeCurrent(previousDisplay, previousDraw, previousRead, previousContext);
+    if (restored != EGL_TRUE) {
+        output->eglError = eglGetError();
+        output->ready = false;
+    }
     eglDestroyContext(display, context);
     eglDestroySurface(display, surface);
     return output->ready;
@@ -464,9 +516,9 @@ OpenGlProbeResult ProbeOpenGl() {
         return output;
     }
     output.minor = eglMinor;
+    const EGLenum previousApi = eglQueryAPI();
     if (eglBindAPI(EGL_OPENGL_ES_API) != EGL_TRUE) {
         output.eglError = eglGetError();
-        eglTerminate(display);
         return output;
     }
 
@@ -486,7 +538,10 @@ OpenGlProbeResult ProbeOpenGl() {
         "EGL_ANDROID_native_fence_sync");
     output.eglWaitSync = eglMajor > 1 || (eglMajor == 1 && eglMinor >= 5) ||
                          HasExtension(eglExtensions, "EGL_KHR_wait_sync");
-    eglTerminate(display);
+    eglBindAPI(previousApi);
+    // EGL_DEFAULT_DISPLAY is process-global and may be in use by Flutter or
+    // Live2D on another thread. eglInitialize is not reference counted; a probe
+    // must never terminate that shared display. Its own context/surface are freed.
     return output;
 }
 

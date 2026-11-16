@@ -119,15 +119,28 @@ Java_com_blue_talk2u_NativeMossRuntime_nativeProbeQnn(
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_blue_talk2u_NativeMossRuntime_nativeRun(
     JNIEnv* env, jclass, jlong handle, jstring text, jstring output_path,
-    jstring voice, jint max_frames, jlong seed) {
+    jstring voice, jint max_frames, jlong seed, jobject cancellation) {
     return Guard<jstring>(env, nullptr, [&] {
         const auto session = SessionFor(handle);
         UtfChars input_text(env, text, "text");
         UtfChars output(env, output_path, "outputPath");
         UtfChars selected_voice(env, voice, "voice");
+        if (!cancellation) throw std::invalid_argument("cancellation is null");
+        jclass cancellation_class = env->GetObjectClass(cancellation);
+        if (!cancellation_class) throw std::runtime_error("Cannot inspect cancellation");
+        const jmethodID get_cancelled = env->GetMethodID(cancellation_class, "get", "()Z");
+        env->DeleteLocalRef(cancellation_class);
+        if (!get_cancelled) throw std::runtime_error("Cancellation has no get method");
+        // Invoked synchronously on this JNI call's thread; no global reference
+        // or raw session handle is accessed by the UI cancellation thread.
+        const auto check_cancelled = [env, cancellation, get_cancelled] {
+            const bool cancelled = env->CallBooleanMethod(cancellation, get_cancelled) == JNI_TRUE;
+            if (env->ExceptionCheck()) throw std::runtime_error("Cancellation check failed");
+            if (cancelled) throw std::runtime_error("MOSS synthesis cancelled");
+        };
         const auto result = session->Synthesize(input_text.String(), output.String(),
                                                 selected_voice.String(), max_frames,
-                                                static_cast<uint64_t>(seed));
+                                                static_cast<uint64_t>(seed), check_cancelled);
         return env->NewStringUTF(result.ToJson().c_str());
     });
 }

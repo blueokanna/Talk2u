@@ -7,7 +7,13 @@ class _FakePort implements CallSpeechPort {
   _FakePort({this.echoCancellationVerified = false});
 
   @override
-  final bool echoCancellationVerified;
+  bool echoCancellationVerified;
+  bool enableAecOnStart = false;
+  Completer<void>? initialization;
+  Completer<void>? captureStart;
+  Completer<void>? captureStop;
+  int captureStarts = 0;
+  int speakingStops = 0;
 
   final transcriptController = StreamController<String>.broadcast();
   final energyController = StreamController<double>.broadcast();
@@ -27,7 +33,8 @@ class _FakePort implements CallSpeechPort {
   double amplitude = 0;
 
   @override
-  String get captureSource => echoCancellationVerified ? 'VOICE_COMMUNICATION' : 'record';
+  String get captureSource =>
+      echoCancellationVerified ? 'VOICE_COMMUNICATION' : 'record';
 
   @override
   Stream<String> get transcripts => transcriptController.stream;
@@ -36,15 +43,21 @@ class _FakePort implements CallSpeechPort {
   Stream<double> get frameEnergies => energyController.stream;
 
   @override
-  Future<void> initialize() async {}
+  Future<void> initialize() async {
+    await initialization?.future;
+  }
 
   @override
   Future<void> startListening() async {
+    captureStarts++;
+    await captureStart?.future;
+    if (enableAecOnStart) echoCancellationVerified = true;
     listening = true;
   }
 
   @override
   Future<void> stopListening() async {
+    await captureStop?.future;
     listening = false;
   }
 
@@ -67,6 +80,7 @@ class _FakePort implements CallSpeechPort {
 
   @override
   Future<void> stopSpeaking() async {
+    speakingStops++;
     final active = playback;
     speaking = false;
     amplitude = 0;
@@ -107,6 +121,117 @@ void main() {
   tearDown(() async {
     session.dispose();
     await port.close();
+  });
+
+  test('stop during initialization cannot resurrect the call', () async {
+    build(withAec: false);
+    port.initialization = Completer<void>();
+    final starting = session.start();
+    final stopping = session.stop();
+    port.initialization!.complete();
+    await Future.wait([starting, stopping]);
+    expect(session.phase, CallPhase.idle);
+    expect(port.captureStarts, 0);
+    expect(port.listening, isFalse);
+    expect(stopCalls, 1);
+  });
+
+  test('concurrent starts open capture once', () async {
+    build(withAec: false);
+    port.initialization = Completer<void>();
+    final first = session.start();
+    final second = session.start();
+    port.initialization!.complete();
+    await Future.wait([first, second]);
+    expect(port.captureStarts, 1);
+  });
+
+  test('stop while microphone opens closes late capture', () async {
+    build(withAec: false);
+    port.captureStart = Completer<void>();
+    final starting = session.start();
+    await Future<void>.delayed(Duration.zero);
+    final stopping = session.stop();
+    port.captureStart!.complete();
+    await Future.wait([starting, stopping]);
+    expect(session.phase, CallPhase.idle);
+    expect(port.listening, isFalse);
+  });
+
+  test('AEC granted at capture startup enables interruption', () async {
+    build(withAec: false);
+    port.enableAecOnStart = true;
+    await session.start();
+    final speaking = session.onResponseCompleted('正在播放的一段内容');
+    await Future<void>.delayed(Duration.zero);
+    for (var i = 0; i < 20; i++) {
+      port.energyController.add(0.45);
+    }
+    await Future<void>.delayed(Duration.zero);
+    await speaking;
+    expect(session.bargeInCount, 1);
+    expect(port.speakingStops, 1);
+  });
+
+  test('full duplex accepts another transcript after playback', () async {
+    build(withAec: true);
+    await session.start();
+    port.transcriptController.add('第一句话');
+    await Future<void>.delayed(Duration.zero);
+    final speaking = session.onResponseCompleted('这是第一轮回复');
+    await Future<void>.delayed(Duration.zero);
+    await port.stopSpeaking();
+    await speaking;
+    expect(session.isBusy, isFalse);
+    port.transcriptController.add('第二句话');
+    await Future<void>.delayed(Duration.zero);
+    expect(sent, ['第一句话', '第二句话']);
+  });
+
+  test('timeout covers a send future that never completes', () async {
+    port = _FakePort();
+    final send = Completer<void>();
+    session = CallSession(
+      port: port,
+      onSend: (_) => send.future,
+      onStopGeneration: () async => stopCalls++,
+      maximumTurnMilliseconds: 20,
+    );
+    await session.start();
+    port.transcriptController.add('开始生成');
+    await Future<void>.delayed(const Duration(milliseconds: 60));
+    expect(stopCalls, 1);
+    expect(session.phase, CallPhase.listening);
+    send.complete();
+  });
+
+  test('capture reopens after VAD produces no transcript', () async {
+    build(withAec: false);
+    await session.start();
+    port.listening = false;
+    await Future<void>.delayed(const Duration(milliseconds: 450));
+    expect(port.listening, isTrue);
+    expect(port.captureStarts, 2);
+  });
+
+  test('late response after interrupt is ignored', () async {
+    build(withAec: true);
+    await session.start();
+    await session.interrupt();
+    await session.onResponseCompleted('过期回复');
+    expect(port.spoken, isEmpty);
+  });
+
+  test('stop during half duplex mic teardown prevents playback', () async {
+    build(withAec: false);
+    await session.start();
+    port.captureStop = Completer<void>();
+    final reply = session.onResponseCompleted('已经取消的语音');
+    final stopping = session.stop();
+    port.captureStop!.complete();
+    await Future.wait([reply, stopping]);
+    expect(port.spoken, isEmpty);
+    expect(session.phase, CallPhase.idle);
   });
 
   test('half-duplex closes the microphone while speaking', () async {
@@ -173,16 +298,19 @@ void main() {
     await speaking;
   });
 
-  test('transcript while listening is dispatched and enters thinking', () async {
-    build(withAec: false);
-    await session.start();
+  test(
+    'transcript while listening is dispatched and enters thinking',
+    () async {
+      build(withAec: false);
+      await session.start();
 
-    port.transcriptController.add('帮我看一下明天的天气');
-    await Future<void>.delayed(const Duration(milliseconds: 20));
+      port.transcriptController.add('帮我看一下明天的天气');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
 
-    expect(sent, ['帮我看一下明天的天气']);
-    expect(session.phase, CallPhase.thinking);
-  });
+      expect(sent, ['帮我看一下明天的天气']);
+      expect(session.phase, CallPhase.thinking);
+    },
+  );
 
   test('the interrupting sentence becomes the next turn', () async {
     build(withAec: true);

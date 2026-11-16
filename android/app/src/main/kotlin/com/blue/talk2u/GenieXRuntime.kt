@@ -42,6 +42,10 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
     private val modelManager = ModelManagerWrapper
     private val qairtRuntimeId = requireNotNull(RuntimeIdValue.QAIRT.value)
     private val stateLock = Any()
+    // stop must interrupt a turn without taking stateLock, while destroy must
+    // never free the native handle used by a concurrent stopStream call.
+    private val stopLock = Any()
+    private val generationCancelled = AtomicBoolean(false)
     private val downloadCancelled = AtomicBoolean(false)
 
     @Volatile private var initialized = false
@@ -166,14 +170,19 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
         messages: List<Pair<String, String>>,
         maxTokens: Int,
         onText: (String) -> Unit,
-    ): String {
-        val active = synchronized(stateLock) {
-            checkNotNull(llm) { "GenieX Qwen3 runtime is not loaded" }
-        }
+    ): String = synchronized(stateLock) {
+        // Keep ownership through the entire stream: load/close cannot destroy
+        // this handle while native generation is still running.
+        val active = checkNotNull(llm) { "GenieX Qwen3 runtime is not loaded" }
+        generationCancelled.set(false)
+        verified = false
+        profile = null
+        lastProfile = null
         require(messages.any { it.second.isNotBlank() }) { "Qwen3 chat messages are empty" }
         val chat = toChatMessages(messages)
 
         var response = runTurn(active, chat, maxTokens, onText)
+        checkGenerationActive()
         if (response.isEmpty()) {
             // One recovery attempt with the tail of the conversation. Reaching
             // this point means the runtime produced no token at all, which in
@@ -185,6 +194,7 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
                 response = runTurn(active, toChatMessages(trimmed), maxTokens, onText)
             }
         }
+        checkGenerationActive()
         check(response.isNotEmpty()) {
             "GenieX QAIRT/NPU 没有返回任何内容，上下文可能已超出窗口，请开始新的对话"
         }
@@ -196,7 +206,13 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
             profile = lastProfile
             verified = true
         }
-        return response
+        response
+    }
+
+    private fun checkGenerationActive() {
+        if (generationCancelled.get()) {
+            throw java.util.concurrent.CancellationException("GenieX generation was cancelled")
+        }
     }
 
     private fun toChatMessages(messages: List<Pair<String, String>>): Array<ChatMessage> =
@@ -224,14 +240,18 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
         val streamed = StringBuilder()
         var completedProfile: ProfilingData? = null
         runBlocking {
+            checkGenerationActive()
             check(active.reset() == GENIEX_SUCCESS) { "Unable to reset the GenieX Qwen3 session" }
+            checkGenerationActive()
             val prompt = active.applyChatTemplate(chat, "", false, true).getOrThrow().formattedText
             check(prompt.isNotBlank()) { "GenieX returned an empty Qwen3 chat template" }
             Log.i(
                 "Talk2U/LLM",
                 "turn.start messages=${chat.size} promptChars=${prompt.length} keep=$SLIDING_WINDOW_KEEP",
             )
+            checkGenerationActive()
             active.generateStreamFlow(prompt, generationConfig(maxTokens)).collect { result ->
+                checkGenerationActive()
                 when (result) {
                     is LlmStreamResult.Token -> {
                         streamed.append(result.text)
@@ -254,8 +274,11 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
     }
 
     fun stop() {
-        val active = llm ?: return
-        runCatching { runBlocking { active.stopStream().getOrThrow() } }
+        generationCancelled.set(true)
+        synchronized(stopLock) {
+            val active = llm ?: return
+            runCatching { runBlocking { active.stopStream().getOrThrow() } }
+        }
     }
 
     fun diagnostics(): Map<String, Any?> {
@@ -288,9 +311,9 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
         )
     }
 
-    override fun close() = synchronized(stateLock) {
+    override fun close() {
         stop()
-        destroyLocked()
+        synchronized(stateLock) { destroyLocked() }
     }
 
     private fun ensureInitialized() = synchronized(stateLock) {
@@ -481,11 +504,12 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
         ModelType.LLM,
     )
 
-    private fun destroyLocked() {
+    private fun destroyLocked() = synchronized(stopLock) {
         val active = llm
         llm = null
         verified = false
         profile = null
+        lastProfile = null
         active?.close()
     }
 

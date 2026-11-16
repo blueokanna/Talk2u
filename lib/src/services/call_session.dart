@@ -5,8 +5,6 @@ import 'package:talk2u/src/services/turn_taking.dart';
 
 enum CallPhase { idle, listening, thinking, speaking, halted }
 
-/// Everything a hands-free call needs from the speech stack, and nothing about
-/// how speech is implemented.
 abstract interface class CallSpeechPort {
   bool get listening;
   bool get speaking;
@@ -16,32 +14,19 @@ abstract interface class CallSpeechPort {
   String get captureSource;
   Stream<String> get transcripts;
   Stream<double> get frameEnergies;
-
   Future<void> initialize();
-
   Future<void> startListening();
-
   Future<void> stopListening();
-
   Future<void> speak(String text);
 
   /// Resolves only after the utterance has finished playing.
   Future<void> speakToCompletion(String text);
-
   Future<void> stopSpeaking();
-
   bool isSelfEcho(String transcript);
 }
 
-/// Turn-taking state machine for continuous voice chat.
-///
-/// Owns the listen → transcribe → generate → speak → listen cycle, the
-/// self-echo rejection, and barge-in. When the platform confirms a hardware
-/// echo canceller the microphone stays open during playback and the
-/// reference-anchored gate decides whether an incoming frame is residual echo
-/// or a human interrupting. Without that confirmation the session degrades to
-/// half-duplex: the microphone is closed while speaking, so the agent can never
-/// hear itself.
+/// Owns the listen → generate → speak cycle. Acoustic interruption is enabled
+/// only after the running capture source confirms its hardware echo canceller.
 class CallSession extends ChangeNotifier {
   CallSession({
     required CallSpeechPort port,
@@ -66,6 +51,14 @@ class CallSession extends ChangeNotifier {
   StreamSubscription<String>? _transcriptSubscription;
   StreamSubscription<double>? _energySubscription;
   Timer? _turnTimeout;
+  Timer? _captureWatchdog;
+  Future<void>? _startOperation;
+  Future<void>? _stopOperation;
+  Future<void>? _interruptOperation;
+  bool _openingCapture = false;
+  bool _microphonePaused = false;
+  bool _acceptResponses = false;
+  bool _disposed = false;
   int _generation = 0;
   bool _busy = false;
   String? _lastError;
@@ -77,95 +70,147 @@ class CallSession extends ChangeNotifier {
   bool get isBusy => _busy;
   String? get lastError => _lastError;
   int get bargeInCount => _bargeInCount;
-
-  /// Acoustic interruption is only offered when the platform actually granted
-  /// an echo canceller; otherwise the session stays half-duplex rather than
-  /// pretending to hear the user over its own voice.
   bool get acousticBargeIn => _port.echoCancellationVerified;
-
   String get captureSource => _port.captureSource;
+  bool _current(int generation) => !_disposed && generation == _generation;
 
   Future<void> start() async {
-    if (_phase != CallPhase.idle) return;
-    _lastError = null;
-    _generation++;
+    if (_disposed) return;
+    final stopping = _stopOperation;
+    if (stopping != null) await stopping;
+    if (_disposed) return;
+    final starting = _startOperation;
+    if (starting != null) return starting;
+    if (active) return;
+    final operation = _start();
+    _startOperation = operation;
     try {
-      await _port.initialize();
-      _gate
-        ..reset()
-        ..bindHardwareEchoCancellation(_port.echoCancellationVerified);
-      _transcriptSubscription ??= _port.transcripts.listen(_handleTranscript);
-      if (acousticBargeIn) {
-        _energySubscription ??= _port.frameEnergies.listen(_handleFrameEnergy);
-      }
-      await _port.startListening();
-      _setPhase(CallPhase.listening);
-      _armTurnTimeout();
-    } catch (error) {
-      _fail(error);
+      await operation;
+    } finally {
+      if (identical(_startOperation, operation)) _startOperation = null;
     }
   }
 
-  Future<void> stop() async {
+  Future<void> _start() async {
+    final generation = ++_generation;
+    _lastError = null;
+    _microphonePaused = false;
+    _acceptResponses = true;
+    _dispatchGraceUntil = null;
+    try {
+      await _port.initialize();
+      if (!_current(generation)) return;
+      _gate.reset();
+      _transcriptSubscription ??= _port.transcripts.listen(_handleTranscript);
+      // Capabilities become authoritative only after capture has opened.
+      _energySubscription ??= _port.frameEnergies.listen(_handleFrameEnergy);
+      _setPhase(CallPhase.listening);
+      await _ensureCapture(generation);
+      if (!_current(generation) || !active) return;
+      _captureWatchdog?.cancel();
+      // VAD can finish with silence or rejected echo, producing no transcript.
+      // Reopen capture after recognition settles, including between replies.
+      _captureWatchdog = Timer.periodic(const Duration(milliseconds: 400), (_) {
+        if (_microphonePaused || _interruptOperation != null || !active) return;
+        if (_phase == CallPhase.speaking && !acousticBargeIn) return;
+        unawaited(_ensureCapture(_generation));
+      });
+    } catch (error) {
+      if (_current(generation)) _fail(error);
+    }
+  }
+
+  Future<void> stop() {
+    final stopping = _stopOperation;
+    if (stopping != null) return stopping;
+    final operation = _stop();
+    _stopOperation = operation;
+    return operation.whenComplete(() {
+      if (identical(_stopOperation, operation)) _stopOperation = null;
+    });
+  }
+
+  Future<void> _stop() async {
     _generation++;
+    _acceptResponses = false;
     _turnTimeout?.cancel();
-    _turnTimeout = null;
+    _captureWatchdog?.cancel();
+    _busy = false;
+    _setPhase(CallPhase.idle);
     await _transcriptSubscription?.cancel();
     await _energySubscription?.cancel();
     _transcriptSubscription = null;
     _energySubscription = null;
     _gate.reset();
-    _busy = false;
     try {
-      if (_port.speaking || _port.generating) await _port.stopSpeaking();
+      await _onStopGeneration();
     } on Object catch (_) {
-      // Playback teardown must not block ending the call.
+      // Independent teardown steps must still run if generation stop fails.
     }
     try {
-      if (_port.listening) await _port.stopListening();
-    } on Object catch (_) {
-      // Recorder teardown must not block ending the call.
-    }
-    _setPhase(CallPhase.idle);
+      // Also cancel speech still awaiting model initialization.
+      await _port.stopSpeaking();
+    } on Object catch (_) {}
+    await _startOperation;
+    try {
+      await _port.stopListening();
+    } on Object catch (_) {}
   }
 
-  /// Mic button. Opens the microphone on demand; if the agent is talking, the
-  /// user pressing the mic is itself an interrupt.
   Future<void> toggleMicrophone() async {
-    if (_phase == CallPhase.idle) {
+    if (!active) {
       await start();
       return;
     }
     if (_port.listening && !_port.speaking) {
+      _microphonePaused = true;
       await _port.stopListening();
       return;
     }
     await interrupt();
   }
 
-  /// Stops whatever the agent is doing and hands the turn back to the user.
-  Future<void> interrupt() async {
-    if (_port.speaking || _port.generating) {
-      try {
-        await _port.stopSpeaking();
-      } on Object catch (error) {
-        _lastError = error.toString();
-      }
+  Future<void> interrupt() {
+    if (!active || _disposed) return Future.value();
+    final pending = _interruptOperation;
+    if (pending != null) return pending;
+    final operation = _interrupt();
+    _interruptOperation = operation;
+    return operation.whenComplete(() {
+      if (identical(_interruptOperation, operation)) _interruptOperation = null;
+    });
+  }
+
+  Future<void> _interrupt() async {
+    final generation = ++_generation;
+    _acceptResponses = false;
+    _turnTimeout?.cancel();
+    _gate.reset();
+    _dispatchGraceUntil = null;
+    _microphonePaused = false;
+    try {
+      await _port.stopSpeaking();
+    } on Object catch (error) {
+      if (_current(generation)) _lastError = error.toString();
     }
+    if (!_current(generation)) return;
     try {
       await _onStopGeneration();
     } on Object catch (error) {
-      _lastError = error.toString();
+      if (_current(generation)) _lastError = error.toString();
     }
-    _busy = false;
-    await _listen();
+    if (_current(generation)) await _listen();
   }
 
-  /// Called when the chat layer finished a reply. Speaking is the only place
-  /// where playback is allowed to start, so a late completion from an earlier
-  /// turn cannot talk over the current one.
   Future<void> onResponseCompleted(String reply) async {
-    if (_phase == CallPhase.idle || _phase == CallPhase.halted) return;
+    if (!active ||
+        !_acceptResponses ||
+        _interruptOperation != null ||
+        _phase == CallPhase.speaking) {
+      return;
+    }
+    _acceptResponses = false;
+    _turnTimeout?.cancel();
     if (reply.trim().isEmpty) {
       await _listen();
       return;
@@ -173,60 +218,54 @@ class CallSession extends ChangeNotifier {
     final generation = _generation;
     _setPhase(CallPhase.speaking);
     try {
-      // Half-duplex fallback: close the microphone so the recognizer cannot
-      // pick up the assistant's own voice at all.
       if (!acousticBargeIn && _port.listening) {
         await _port.stopListening();
       }
+      if (!_current(generation)) return;
       await _port.speakToCompletion(reply);
     } on Object catch (error) {
-      _lastError = error.toString();
+      if (_current(generation)) _lastError = error.toString();
     }
-    if (generation != _generation) return;
-    if (acousticBargeIn && _port.listening) {
-      _setPhase(CallPhase.listening);
-      _armTurnTimeout();
-      return;
+    if (!_current(generation)) return;
+    if (!acousticBargeIn || !_port.listening) {
+      await Future<void>.delayed(settleDelay);
     }
-    await Future<void>.delayed(settleDelay);
-    if (generation != _generation) return;
-    await _listen();
+    if (_current(generation)) await _listen();
   }
 
   void onResponseFailed() {
-    if (_phase == CallPhase.idle || _phase == CallPhase.halted) return;
-    _busy = false;
+    if (!active ||
+        _phase != CallPhase.thinking ||
+        _interruptOperation != null) {
+      return;
+    }
+    _acceptResponses = false;
     unawaited(_listen());
   }
 
   void _handleTranscript(String raw) {
-    if (_phase == CallPhase.idle || _phase == CallPhase.halted) return;
+    if (!active || _interruptOperation != null) return;
     final transcript = raw.trim();
-    if (transcript.isEmpty) return;
-    if (_port.isSelfEcho(transcript)) return;
-
-    if (_phase == CallPhase.speaking) {
+    if (transcript.isEmpty || _port.isSelfEcho(transcript)) return;
+    if (_phase == CallPhase.speaking && !acousticBargeIn) return;
+    if (_phase == CallPhase.speaking || _phase == CallPhase.thinking) {
+      final grace = _dispatchGraceUntil;
+      if (_phase == CallPhase.thinking &&
+          grace != null &&
+          DateTime.now().isBefore(grace)) {
+        return;
+      }
       _bargeInCount++;
-      // The sentence that interrupted the agent is the next turn, not noise.
       unawaited(_interruptAndDispatch(transcript));
       return;
     }
-    if (_phase == CallPhase.thinking) {
-      final grace = _dispatchGraceUntil;
-      if (grace != null && DateTime.now().isBefore(grace)) return;
-      _bargeInCount++;
-      unawaited(interrupt());
-      return;
-    }
-    if (_busy || _phase != CallPhase.listening) return;
+    if (_busy || _microphonePaused || _phase != CallPhase.listening) return;
     unawaited(_dispatch(transcript));
   }
 
   void _handleFrameEnergy(double rms) {
-    if (!acousticBargeIn) return;
+    if (!acousticBargeIn || _interruptOperation != null) return;
     if (_phase != CallPhase.speaking && _phase != CallPhase.thinking) return;
-    // The tail of the utterance that opened this turn is still in the buffer;
-    // treating it as an interruption would cancel the reply it just triggered.
     final grace = _dispatchGraceUntil;
     if (grace != null && DateTime.now().isBefore(grace)) return;
     final snapshot = _gate.evaluate(
@@ -241,81 +280,79 @@ class CallSession extends ChangeNotifier {
   }
 
   Future<void> _interruptAndDispatch(String transcript) async {
+    final generation = _generation + 1;
     await interrupt();
-    if (_phase != CallPhase.listening) return;
+    if (!_current(generation) || _phase != CallPhase.listening) return;
     await _dispatch(transcript);
   }
 
   Future<void> _dispatch(String transcript) async {
-    final generation = _generation;
+    final generation = ++_generation;
     _busy = true;
+    _acceptResponses = true;
     _dispatchGraceUntil = DateTime.now().add(const Duration(milliseconds: 900));
-    _turnTimeout?.cancel();
     _setPhase(CallPhase.thinking);
+    _turnTimeout?.cancel();
+    // onSend can await the entire generation, so arm before calling it.
+    _turnTimeout = Timer(Duration(milliseconds: maximumTurnMilliseconds), () {
+      if (_current(generation) && _phase == CallPhase.thinking) {
+        unawaited(interrupt());
+      }
+    });
     try {
       await _onSend(transcript);
     } catch (error) {
-      if (generation != _generation) return;
-      _fail(error);
-      return;
+      if (_current(generation)) _fail(error);
     }
-    if (generation != _generation) return;
-    _armTurnTimeout();
   }
 
-  Future<void> _listen({int attempt = 0}) async {
-    if (_phase == CallPhase.idle || _phase == CallPhase.halted) return;
+  Future<void> _listen() async {
+    if (!active || _disposed) return;
+    _turnTimeout?.cancel();
     _busy = false;
     _setPhase(CallPhase.listening);
-    if (!_port.listening) {
-      try {
-        await _port.startListening();
-      } catch (error) {
-        _fail(error);
-        return;
-      }
-    }
-    if (!_port.listening && attempt < 3) {
-      // The recogniser may still be finishing the previous utterance; retry
-      // instead of leaving the session believing it is listening with a closed
-      // microphone.
-      await Future<void>.delayed(const Duration(milliseconds: 400));
-      if (_phase != CallPhase.listening) return;
-      await _listen(attempt: attempt + 1);
-      return;
-    }
-    _armTurnTimeout();
+    if (!_microphonePaused) await _ensureCapture(_generation);
   }
 
-  void _armTurnTimeout() {
-    _turnTimeout?.cancel();
-    _turnTimeout = Timer(
-      Duration(milliseconds: maximumTurnMilliseconds),
-      () {
-        if (_phase == CallPhase.thinking) {
-          unawaited(interrupt());
-        }
-      },
-    );
+  Future<void> _ensureCapture(int generation) async {
+    if (_openingCapture || _port.listening || !_current(generation)) return;
+    _openingCapture = true;
+    try {
+      await _port.startListening();
+      if (!_current(generation)) {
+        // A stop during startup must not leave a newly opened microphone alive.
+        if (!active) await _port.stopListening();
+        return;
+      }
+      _gate.bindHardwareEchoCancellation(_port.echoCancellationVerified);
+    } catch (error) {
+      if (_current(generation)) _fail(error);
+    } finally {
+      _openingCapture = false;
+    }
   }
 
   void _fail(Object error) {
     _lastError = error.toString();
     _busy = false;
+    _acceptResponses = false;
     _turnTimeout?.cancel();
+    _captureWatchdog?.cancel();
     _setPhase(CallPhase.halted);
   }
 
   void _setPhase(CallPhase value) {
-    if (_phase == value) return;
+    if (_disposed || _phase == value) return;
     _phase = value;
     notifyListeners();
   }
 
   @override
   void dispose() {
+    _disposed = true;
     _generation++;
     _turnTimeout?.cancel();
+    _captureWatchdog?.cancel();
     _transcriptSubscription?.cancel();
     _energySubscription?.cancel();
     super.dispose();

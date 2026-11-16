@@ -190,6 +190,10 @@ class AndroidEnvironment {
       rustFlags = '$rustFlags\x1f';
     }
     rustFlags = '$rustFlags-L\x1f$workaroundDir';
+    // CARGO_ENCODED_RUSTFLAGS overrides target rustflags in .cargo/config.toml.
+    // Keep the Android cdylib aligned even when built through Flutter/Cargokit.
+    rustFlags = '$rustFlags\x1f-C\x1flink-arg=-Wl,-z,max-page-size=16384'
+        '\x1f-C\x1flink-arg=-Wl,-z,common-page-size=16384';
     return rustFlags;
   }
 }

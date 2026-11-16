@@ -9,6 +9,7 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicBoolean
 
 @Keep
 fun interface NativeInitProgressCallback {
@@ -44,13 +45,14 @@ class NativeMossRuntime private constructor(private val handle: AtomicLong) : Cl
         voice: String,
         maxFrames: Int,
         seed: Long,
+        cancellation: AtomicBoolean,
     ): SynthesisResult {
         require(text.isNotBlank()) { "Text cannot be empty" }
         require(maxFrames in 1..375) { "maxFrames must be between 1 and 375" }
         val current = handle.get()
         check(current != 0L) { "MOSS runtime is closed" }
         val payload = JSONObject(
-            nativeRun(current, text.trim(), outputFile.absolutePath, voice, maxFrames, seed),
+            nativeRun(current, text.trim(), outputFile.absolutePath, voice, maxFrames, seed, cancellation),
         )
         return SynthesisResult(
             outputFile = File(payload.getString("outputPath")),
@@ -192,6 +194,7 @@ class NativeMossRuntime private constructor(private val handle: AtomicLong) : Cl
             voice: String,
             maxFrames: Int,
             seed: Long,
+            cancellation: AtomicBoolean,
         ): String
 
         @JvmStatic
