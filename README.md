@@ -419,7 +419,17 @@ python tools/check_moss_package.py C:\Downloads\moss-qnn-v81-streaming.zip `
   --output build/moss-qnn-v81-streaming.zip
 ```
 
-该命令只有在**所有文件都已与替换清单一致**时才写出新 ZIP；否则删除输出并以非零退出码结束，不会把损坏的包“修”成能通过校验的包。本工作区里的 `C:\Users\blueo\OneDrive\GitHub Resources\Talk2U\moss-qnn-v81-streaming.zip` 就是这种情况：13 个文件、684.4 MiB 全部匹配，只有清单里 `browser_poc_manifest.json` 的大小/哈希是旧值。修复后的包已生成在 `build/moss-qnn-v81-streaming.zip` 并通过同一套校验；真机导入尚未执行（设备当前未连接）。
+该命令只有在**所有文件都已与替换清单一致**时才写出新 ZIP；否则删除输出并以非零退出码结束，不会把损坏的包“修”成能通过校验的包。本工作区里的 `C:\Users\blueo\OneDrive\GitHub Resources\Talk2U\moss-qnn-v81-streaming.zip` 就是这种情况：13 个文件、684.4 MiB 全部匹配，只有清单里 `browser_poc_manifest.json` 的大小/哈希是旧值。修复后的包已生成在 `build/moss-qnn-v81-streaming.zip` 并通过同一套校验。
+
+### 一加 15 真机导入与 NPU 执行（已实测）
+
+2026-11-16 在本机 `PLK110`（SM8850，Android API 37，页面大小 4096）上完成了一次完整链路：
+
+1. 通过设置页“从 ZIP 文件导入”导入修复后的 317 MiB ZIP；Kotlin 侧解压后逐文件校验 13 个文件（684.4 MiB）全部通过，原子替换安装目录。
+2. `MossTtsQnn` 注册 QNN Plugin EP（1 device），加载 `libQnnHtpV81Skel.so` 到 CDSP domain（`fastrpc … _dom=cdsp`），生成并复用 prefill/decode 的 QNN context binary（`prefill_v2_q248_*.ctx.onnx`、`decode_v2_*.ctx.onnx`）。
+3. 两次真实合成返回 `provider=QNN_HTP(prefill,decode)+ORT_CPU(sampler,codec)`，分别 3475 ms / 20 帧与 4348 ms / 49 帧；界面显示 `TTS · Qualcomm QNN HTP + ORT CPU`。
+
+同一台机器上仍未验证的项目：16 KB 页面大小（该机为 4096，只能在 16384 设备上验证）、听感主观评价、长时间通话温升与功耗。不要把这些写成已通过。
 
 华为 Mate 10 Pro 当前不接入许可受限的 HiAI DDK 二进制，也不使用通用 NNAPI 代替 Qualcomm QNN，因此 MOSS 在该设备上不可用。仓库没有在一加 15 或 Mate 10 Pro 上完成 MOSS 真机验收，不能把可构建路径写成真机已通过。
 

@@ -189,7 +189,17 @@ python tools/check_moss_package.py C:\Downloads\moss-qnn-v81-streaming.zip `
   --output build/moss-qnn-v81-streaming.zip
 ```
 
-The rewrite is written only if every file already matches the replacement manifest; otherwise the output is deleted and the command fails, so a corrupt package can never be laundered into an accepted one. The package found in `C:\Users\blueo\OneDrive\GitHub Resources\Talk2U` is exactly this case: all 13 files (684.4 MiB) match, only the embedded `browser_poc_manifest.json` entry was stale. The repaired archive is `build/moss-qnn-v81-streaming.zip`, verified by the same rules; importing it on the phone is still pending because the device is disconnected.
+The rewrite is written only if every file already matches the replacement manifest; otherwise the output is deleted and the command fails, so a corrupt package can never be laundered into an accepted one. The package found in `C:\Users\blueo\OneDrive\GitHub Resources\Talk2U` is exactly this case: all 13 files (684.4 MiB) match, only the embedded `browser_poc_manifest.json` entry was stale. The repaired archive is `build/moss-qnn-v81-streaming.zip`, verified by the same rules.
+
+### OnePlus 15 import and NPU execution (measured)
+
+On 2026-11-16 a full run was completed on `PLK110` (SM8850, Android API 37, 4096-byte pages):
+
+1. The repaired 317 MiB ZIP was imported through Settings; Kotlin extracted it and validated all 13 files (684.4 MiB) before atomically replacing the install directory.
+2. `MossTtsQnn` registered the QNN Plugin EP (1 device), loaded `libQnnHtpV81Skel.so` on the CDSP domain, and generated plus reused prefill/decode QNN context binaries (`prefill_v2_q248_*.ctx.onnx`, `decode_v2_*.ctx.onnx`).
+3. Two real syntheses returned `provider=QNN_HTP(prefill,decode)+ORT_CPU(sampler,codec)`: 3475 ms / 20 frames and 4348 ms / 49 frames. The UI reports `TTS · Qualcomm QNN HTP + ORT CPU`.
+
+Not verified on this hardware: 16 KB page size (the device reports 4096), subjective audio quality, and long-call thermal/battery behaviour. Do not claim those as passed.
 
 ### Huawei and NNAPI
 

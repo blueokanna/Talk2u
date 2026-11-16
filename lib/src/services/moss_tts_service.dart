@@ -92,6 +92,22 @@ class MossTtsService extends ChangeNotifier {
       if (!_playbackClock.isRunning) _playbackClock.start();
       _updateLipSync();
     });
+    _channel.setMethodCallHandler(_handleNativeCall);
+  }
+
+  /// Handles the one native callback the MOSS channel sends.
+  ///
+  /// The SAF picker returns *inside* the blocking `importModel`/`importModelZip`
+  /// call, so Dart cannot observe when the user actually picked a package. The
+  /// native side announces the transition; without it the card keeps saying
+  /// "choose a file" for the whole import.
+  Future<void> _handleNativeCall(MethodCall call) async {
+    if (call.method != 'importStarted') return;
+    if (operation == MossOperation.importing) return;
+    operation = MossOperation.importing;
+    lastError = null;
+    lastErrorCode = null;
+    notifyListeners();
   }
 
   @visibleForTesting

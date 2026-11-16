@@ -54,6 +54,7 @@ class MainActivity : FlutterActivity() {
     private val genieXRuntime by lazy { GenieXRuntime(applicationContext) }
     private val senseVoiceRuntime by lazy { SenseVoiceQnnRuntime(applicationContext) }
     @Volatile private var mossCancellation = AtomicBoolean(false)
+    @Volatile private var mossImportChannel: MethodChannel? = null
     @Volatile private var activityDestroyed = false
     @Volatile private var mossInitializing = false
     @Volatile private var mossInitializationStage = "idle"
@@ -331,6 +332,7 @@ class MainActivity : FlutterActivity() {
         }
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, mossTtsChannelName)
+            .also { mossImportChannel = it }
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "availableStorageBytes" -> result.success(StatFs(filesDir.path).availableBytes)
@@ -1101,6 +1103,7 @@ class MainActivity : FlutterActivity() {
         mossExecutor.execute {
             runCatching {
                 closeMossEngine()
+                notifyMossImportStarted()
                 val info = modelStore.importFromTree(uri) { progress ->
                     if (progress.copiedBytes == progress.totalBytes) {
                         Log.i("Talk2U/MOSS", "imported ${progress.fileName}")
@@ -1136,6 +1139,7 @@ class MainActivity : FlutterActivity() {
             runCatching {
                 closeMossEngine()
                 Log.i("Talk2U/MOSS", "Importing MOSS from ZIP: $uri")
+                notifyMossImportStarted()
                 val info = modelStore.importFromZip(uri) { progress ->
                     if (progress.copiedBytes == progress.totalBytes) {
                         Log.i("Talk2U/MOSS", "imported ${progress.fileName}")
@@ -1390,6 +1394,16 @@ class MainActivity : FlutterActivity() {
                 null,
             )
         }
+    }
+
+    /**
+     * Tells Dart that the picker returned and the copy/verify phase started.
+     *
+     * The import call blocks until the whole package is installed, so without this
+     * callback the settings card would keep showing the "choose a file" stage.
+     */
+    private fun notifyMossImportStarted() {
+        runOnUiThread { mossImportChannel?.invokeMethod("importStarted", null) }
     }
 
     private fun deliverAsrResult(result: MethodChannel.Result, action: () -> Unit) {

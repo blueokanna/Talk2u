@@ -224,4 +224,17 @@ void main() {
     await speech;
     expect(done, isTrue);
   });
+
+  test('native importStarted moves the card out of the picker stage', () async {
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    await messenger.handlePlatformMessage(
+      channel.name,
+      channel.codec.encodeMethodCall(const MethodCall('importStarted')),
+      (_) {},
+    );
+    expect(service.operation, MossOperation.importing);
+    expect(service.lastError, isNull);
+    expect(service.lastErrorCode, isNull);
+  });
 }
