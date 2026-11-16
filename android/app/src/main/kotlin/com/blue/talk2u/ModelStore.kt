@@ -23,7 +23,7 @@ import java.util.zip.ZipInputStream
 internal class MossPackageIncomplete(
     val missing: List<String>,
 ) : IllegalStateException(
-        "The deployment package is incomplete. Missing: ${missing.joinToString(", ")}",
+        "The deployment package is incomplete or damaged: ${missing.joinToString(", ")}",
     )
 
 class ModelStore(private val context: Context) {

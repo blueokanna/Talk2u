@@ -8,7 +8,13 @@ import tempfile
 import unittest
 import zipfile
 
-from check_moss_package import ManifestError, audit, describe, main
+from check_moss_package import (
+    ManifestError,
+    audit,
+    describe,
+    main,
+    rewrite_zip_manifest,
+)
 
 
 def _sha(data: bytes) -> str:
@@ -159,6 +165,52 @@ class ZipAuditTests(unittest.TestCase):
             report = audit(path)
             self.assertFalse(report["ok"])
             self.assertTrue(any("unsafe" in error for error in report["errors"]))
+
+
+class RewriteTests(unittest.TestCase):
+    def _stale_zip(self, directory: Path, stale_manifest: dict) -> Path:
+        path = directory / "stale.zip"
+        prefix = "moss-qnn-v81-streaming/"
+        with zipfile.ZipFile(path, "w") as archive:
+            for name, data in _entries():
+                archive.writestr(prefix + name, data)
+            archive.writestr(prefix + "moss-qnn-deployment.json", json.dumps(stale_manifest))
+        return path
+
+    def test_repairs_a_stale_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            entries = _entries()
+            stale = _manifest(entries)
+            stale["files"][0]["size"] += 5
+            archive = self._stale_zip(root, stale)
+            correct = root / "correct.json"
+            correct.write_text(json.dumps(_manifest(entries)), encoding="utf-8")
+            output = root / "fixed.zip"
+
+            self.assertFalse(audit(archive)["ok"])
+            report = rewrite_zip_manifest(archive, correct, output)
+            self.assertTrue(report["ok"], report)
+            self.assertTrue(audit(output)["ok"])
+
+    def test_refuses_a_manifest_that_does_not_match(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = self._stale_zip(root, _manifest(_entries()))
+            wrong = _manifest([("MOSS-TTS-Nano-100M-ONNX/tokenizer.model", b"different")])
+            manifest = root / "wrong.json"
+            manifest.write_text(json.dumps(wrong), encoding="utf-8")
+            output = root / "fixed.zip"
+            with self.assertRaises(ManifestError):
+                rewrite_zip_manifest(archive, manifest, output)
+            self.assertFalse(output.exists())
+
+    def test_refuses_to_overwrite_the_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = self._stale_zip(root, _manifest(_entries()))
+            with self.assertRaises(ManifestError):
+                rewrite_zip_manifest(archive, root / "stale.zip", archive)
 
 
 class CommandLineTests(unittest.TestCase):

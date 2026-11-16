@@ -179,7 +179,17 @@ python tools/check_moss_package.py model/TTS/moss-qnn-v81-streaming
 python tools/check_moss_package.py C:\Downloads\moss-qnn-v81-streaming.zip
 ```
 
-Exit codes: `0` complete and verified, `2` missing file / wrong size / SHA-256 mismatch, `1` usage or manifest error. `--json` prints the machine-readable report and `--no-hashes` does a size-only pre-check. The Android importer reports the same list through the `moss_package_incomplete` error code, which the UI renders as "The deployment package is incomplete. Missing: …".
+Exit codes: `0` complete and verified, `2` missing file / wrong size / SHA-256 mismatch, `1` usage or manifest error. `--json` prints the machine-readable report and `--no-hashes` does a size-only pre-check. The Android importer reports the same list through the `moss_package_incomplete` error code, which the UI renders as "The deployment package is incomplete or damaged. Check: …".
+
+When the runtime files are correct but the manifest that travelled with them is stale, only the manifest needs replacing:
+
+```powershell
+python tools/check_moss_package.py C:\Downloads\moss-qnn-v81-streaming.zip `
+  --rewrite-manifest model/TTS/moss-qnn-v81-streaming/moss-qnn-deployment.json `
+  --output build/moss-qnn-v81-streaming.zip
+```
+
+The rewrite is written only if every file already matches the replacement manifest; otherwise the output is deleted and the command fails, so a corrupt package can never be laundered into an accepted one. The package found in `C:\Users\blueo\OneDrive\GitHub Resources\Talk2U` is exactly this case: all 13 files (684.4 MiB) match, only the embedded `browser_poc_manifest.json` entry was stale. The repaired archive is `build/moss-qnn-v81-streaming.zip`, verified by the same rules; importing it on the phone is still pending because the device is disconnected.
 
 ### Huawei and NNAPI
 

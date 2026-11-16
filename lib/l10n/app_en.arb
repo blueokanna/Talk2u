@@ -323,7 +323,7 @@
   "languageChinese": "Chinese",
   "currentOnlinePlatform": "the current online platform",
   "offlineProviderName": "On-device AI",
-  "mossPackageIncomplete": "The deployment package is incomplete. Missing: {files}",
+  "mossPackageIncomplete": "The deployment package is incomplete or damaged. Check: {files}",
   "@mossPackageIncomplete": {"placeholders": {"files": {"type": "String"}}},
   "captureReleased": "Audio capture has been released",
   "live2dImportUnsupported": "Importing Live2D ZIP files is not supported on this platform",

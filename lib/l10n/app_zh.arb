@@ -285,7 +285,7 @@
   "languageChinese": "中文",
   "currentOnlinePlatform": "当前在线平台",
   "offlineProviderName": "设备离线 AI",
-  "mossPackageIncomplete": "部署包不完整，缺少：{files}",
+  "mossPackageIncomplete": "部署包不完整或已损坏，请检查：{files}",
   "captureReleased": "录音通道已释放",
   "live2dImportUnsupported": "当前平台暂不支持导入 Live2D ZIP",
   "live2dNativeListMissing": "原生端没有返回 Live2D 模型列表",

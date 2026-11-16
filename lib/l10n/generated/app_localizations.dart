@@ -1793,7 +1793,7 @@ abstract class AppLocalizations {
   /// No description provided for @mossPackageIncomplete.
   ///
   /// In en, this message translates to:
-  /// **'The deployment package is incomplete. Missing: {files}'**
+  /// **'The deployment package is incomplete or damaged. Check: {files}'**
   String mossPackageIncomplete(String files);
 
   /// No description provided for @captureReleased.

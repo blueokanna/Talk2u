@@ -983,7 +983,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String mossPackageIncomplete(String files) {
-    return 'The deployment package is incomplete. Missing: $files';
+    return 'The deployment package is incomplete or damaged. Check: $files';
   }
 
   @override

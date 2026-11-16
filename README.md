@@ -409,7 +409,17 @@ python tools/check_moss_package.py model/TTS/moss-qnn-v81-streaming
 python tools/check_moss_package.py C:\Downloads\moss-qnn-v81-streaming.zip
 ```
 
-退出码：`0` 完整且校验通过，`2` 缺文件/大小不符/SHA-256 不符，`1` 参数或清单错误。`--json` 输出机器可读报告，`--no-hashes` 只做大小预检。手机端导入失败时，Kotlin 侧用 `moss_package_incomplete` 错误码回传完整缺失列表，界面显示“部署包不完整，缺少：…”，链路与这个脚本一致。
+退出码：`0` 完整且校验通过，`2` 缺文件/大小不符/SHA-256 不符，`1` 参数或清单错误。`--json` 输出机器可读报告，`--no-hashes` 只做大小预检。手机端导入失败时，Kotlin 侧用 `moss_package_incomplete` 错误码回传完整缺失列表，界面显示“部署包不完整或已损坏，请检查：…”，链路与这个脚本一致。
+
+如果权重文件本身正确、只是随包的 `moss-qnn-deployment.json` 过期（例如 ZIP 内清单仍指向旧版 `browser_poc_manifest.json`），可以只替换清单、不重打包权重：
+
+```powershell
+python tools/check_moss_package.py C:\Downloads\moss-qnn-v81-streaming.zip `
+  --rewrite-manifest model/TTS/moss-qnn-v81-streaming/moss-qnn-deployment.json `
+  --output build/moss-qnn-v81-streaming.zip
+```
+
+该命令只有在**所有文件都已与替换清单一致**时才写出新 ZIP；否则删除输出并以非零退出码结束，不会把损坏的包“修”成能通过校验的包。本工作区里的 `C:\Users\blueo\OneDrive\GitHub Resources\Talk2U\moss-qnn-v81-streaming.zip` 就是这种情况：13 个文件、684.4 MiB 全部匹配，只有清单里 `browser_poc_manifest.json` 的大小/哈希是旧值。修复后的包已生成在 `build/moss-qnn-v81-streaming.zip` 并通过同一套校验；真机导入尚未执行（设备当前未连接）。
 
 华为 Mate 10 Pro 当前不接入许可受限的 HiAI DDK 二进制，也不使用通用 NNAPI 代替 Qualcomm QNN，因此 MOSS 在该设备上不可用。仓库没有在一加 15 或 Mate 10 Pro 上完成 MOSS 真机验收，不能把可构建路径写成真机已通过。
 

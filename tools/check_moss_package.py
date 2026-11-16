@@ -11,6 +11,9 @@ Usage:
     python tools/check_moss_package.py model/TTS/moss-qnn-v81-streaming
     python tools/check_moss_package.py C:/Downloads/moss-qnn-v81-streaming.zip
     python tools/check_moss_package.py <package> --json
+    python tools/check_moss_package.py <stale.zip> --rewrite-manifest \\
+        model/TTS/moss-qnn-v81-streaming/moss-qnn-deployment.json \\
+        --output build/moss-qnn-v81-streaming.zip
 
 Exit codes: 0 complete, 1 usage error, 2 incomplete or invalid.
 """
@@ -181,6 +184,26 @@ def _zip_manifest(source: zipfile.ZipFile, names: dict) -> tuple[dict, PurePosix
     return _validate_manifest(manifest, str(embedded)), embedded.parent
 
 
+def _detect_prefix(names: dict, files: list) -> PurePosixPath:
+    """Finds the wrapper directory that the manifest paths are relative to.
+
+    Archives are commonly packed as ``moss-qnn-v81-streaming/<file>``, so an
+    external manifest has to be matched against the prefix that contains the most
+    declared files instead of assuming the archive root.
+    """
+    declared = [_safe_relative(entry["path"]) for entry in files]
+    prefixes = {PurePosixPath()}
+    for path in names:
+        for depth in range(1, min(len(path.parts), 3)):
+            prefixes.add(PurePosixPath(*path.parts[:depth]))
+    return max(
+        prefixes,
+        key=lambda prefix: sum(
+            PurePosixPath(*prefix.parts, *path.parts) in names for path in declared
+        ),
+    )
+
+
 def audit_zip(
     archive: Path,
     manifest_path: Path | None = None,
@@ -202,7 +225,8 @@ def audit_zip(
                     )
 
             if manifest_path is not None:
-                manifest, prefix = load_manifest(manifest_path), PurePosixPath()
+                manifest = load_manifest(manifest_path)
+                prefix = _detect_prefix(names, manifest["files"])
             else:
                 manifest, prefix = _zip_manifest(source, names)
             files = manifest["files"]
@@ -258,9 +282,65 @@ def describe(report: dict) -> str:
     else:
         lines.append(
             "Package is NOT importable. Fetch the complete "
-            "moss-qnn-v81-streaming package, then re-run this check."
+            "moss-qnn-v81-streaming package, or repair a stale manifest with "
+            "--rewrite-manifest, then re-run this check."
         )
     return "\n".join(lines)
+
+
+def rewrite_zip_manifest(
+    archive: Path,
+    manifest_path: Path,
+    output: Path,
+    *,
+    verify_hashes: bool = True,
+) -> dict:
+    """Writes a copy of ``archive`` whose embedded manifest is ``manifest_path``.
+
+    A package rebuilt from a fixed manifest is common: the runtime files are
+    correct while the manifest that travelled with them is stale. Nothing is
+    written unless every file already matches the replacement manifest, so a
+    repair can never launder a corrupt package into an "accepted" one.
+    """
+    if archive.resolve() == output.resolve():
+        raise ManifestError("refusing to overwrite the source archive; pass another --output")
+    manifest = load_manifest(manifest_path)
+    payload = json.dumps(manifest, indent=2).encode("utf-8")
+    with zipfile.ZipFile(archive) as source:
+        names = {}
+        for info in source.infolist():
+            if info.is_dir():
+                continue
+            try:
+                names[_safe_relative(info.filename)] = info
+            except ManifestError as error:
+                raise ManifestError(str(error)) from error
+        manifest_entries = [path for path in names if path.name in MANIFEST_NAMES]
+        if len(manifest_entries) != 1:
+            raise ManifestError("the archive must contain exactly one deployment manifest")
+
+        with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as target:
+            for info in source.infolist():
+                if info.is_dir():
+                    continue
+                if _safe_relative(info.filename) in manifest_entries:
+                    target.writestr(info.filename, payload)
+                else:
+                    with source.open(info) as handle, target.open(info, "w") as sink:
+                        while True:
+                            chunk = handle.read(CHUNK_BYTES)
+                            if not chunk:
+                                break
+                            sink.write(chunk)
+
+    report = audit_zip(output, manifest_path, verify_hashes=verify_hashes)
+    if not report["ok"]:
+        output.unlink(missing_ok=True)
+        raise ManifestError(
+            "the archive does not match the supplied manifest; "
+            + describe(report)
+        )
+    return report
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -281,7 +361,34 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="skip SHA-256 verification (size-only pre-check)",
     )
+    parser.add_argument(
+        "--rewrite-manifest",
+        type=Path,
+        metavar="MANIFEST",
+        help="rewrite a ZIP so its embedded manifest equals MANIFEST",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        metavar="ZIP",
+        help="destination for --rewrite-manifest",
+    )
     args = parser.parse_args(argv)
+    if args.rewrite_manifest is not None:
+        if args.output is None:
+            parser.error("--rewrite-manifest requires --output")
+        try:
+            report = rewrite_zip_manifest(
+                args.package,
+                args.rewrite_manifest,
+                args.output,
+                verify_hashes=not args.no_hashes,
+            )
+        except ManifestError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        print(describe(report))
+        return 0
     try:
         report = audit(args.package, args.manifest, verify_hashes=not args.no_hashes)
     except ManifestError as error:

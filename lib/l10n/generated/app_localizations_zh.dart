@@ -940,7 +940,7 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String mossPackageIncomplete(String files) {
-    return '部署包不完整，缺少：$files';
+    return '部署包不完整或已损坏，请检查：$files';
   }
 
   @override
