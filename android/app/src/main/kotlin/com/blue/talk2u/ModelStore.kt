@@ -129,7 +129,7 @@ class ModelStore(private val context: Context) {
             val manifestFile = findDeploymentManifest(staging)
                 ?: error(
                     "The ZIP archive does not contain $DEPLOYMENT_MANIFEST. " +
-                        "请确认选择的 ZIP 是 moss-qnn-v81-streaming 部署包。"
+                        "Make sure the selected ZIP is a moss-qnn-v81-streaming deployment package."
                 )
             val effectiveRoot = manifestFile.parentFile
                 ?: error("Cannot resolve the deployment manifest directory")

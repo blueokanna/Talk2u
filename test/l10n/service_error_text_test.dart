@@ -29,6 +29,16 @@ void main() {
       'sensevoice_recording_failed',
       'sherpa_import_failed',
       'sherpa_import_cancelled',
+      'moss_package_incomplete',
+      'activity_destroyed',
+      'live2d_import_failed',
+      'invalid_archive',
+      'invalid_moss_request',
+      'invalid_moss_output_path',
+      'invalid_sensevoice_path',
+      'invalid_sensevoice_audio',
+      'invalid_qwen3_messages',
+      'invalid_qwen3_generation',
     ]) {
       final english = serviceErrorText(en, code: code, fallback: 'detail');
       final chinese = serviceErrorText(zh, code: code, fallback: 'detail');

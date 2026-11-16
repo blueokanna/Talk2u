@@ -36,6 +36,7 @@ class MainActivity : FlutterActivity() {
     private val llmRuntimeChannelName = "talk2u/llm_runtime"
     private val mossTtsChannelName = "talk2u/moss_tts"
     private val acceleratorTelemetryChannelName = "talk2u/accelerator_telemetry"
+    private val memoryChannelName = "talk2u/memory"
     private val fullDuplexAudioChannelName = "talk2u/full_duplex_audio"
     private val fullDuplexFramesChannelName = "talk2u/full_duplex_frames"
     private val mossImportRequest = 4203
@@ -55,6 +56,7 @@ class MainActivity : FlutterActivity() {
     private val senseVoiceRuntime by lazy { SenseVoiceQnnRuntime(applicationContext) }
     @Volatile private var mossCancellation = AtomicBoolean(false)
     @Volatile private var mossImportChannel: MethodChannel? = null
+    @Volatile private var memoryChannel: MethodChannel? = null
     @Volatile private var activityDestroyed = false
     @Volatile private var mossInitializing = false
     @Volatile private var mossInitializationStage = "idle"
@@ -70,6 +72,11 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        // Platform to Dart only: `onTrimMemory` sends `trim` with the trim level.
+        memoryChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            memoryChannelName,
+        )
         cameraObservation?.close()
         cameraObservation = CameraObservation(this, flutterEngine.dartExecutor.binaryMessenger)
         val qnnStatus = QnnRuntime.prepare(applicationContext)
@@ -125,7 +132,7 @@ class MainActivity : FlutterActivity() {
                     "importArchive", "importArchiveModels" -> {
                         val archivePath = call.argument<String>("path")
                         if (archivePath.isNullOrBlank()) {
-                            result.error("invalid_archive", "未收到 Live2D ZIP 文件路径", null)
+                            result.error("invalid_archive", "No Live2D ZIP path was provided", null)
                             return@setMethodCallHandler
                         }
                         runLive2dImport(result) {
@@ -271,7 +278,7 @@ class MainActivity : FlutterActivity() {
                 "load" -> {
                     val root = secureAppModelRoot(call.argument<String>("modelRoot"))
                     if (root == null) {
-                        result.error("invalid_sensevoice_path", "SenseVoice 模型路径不安全", null)
+                        result.error("invalid_sensevoice_path", "The SenseVoice model path is unsafe", null)
                     } else {
                         asrExecutor.execute {
                             runCatching { senseVoiceRuntime.load(root) }.fold(
@@ -296,9 +303,9 @@ class MainActivity : FlutterActivity() {
                     val root = secureAppModelRoot(call.argument<String>("modelRoot"))
                     val pcm = call.argument<ByteArray>("pcm16le")
                     if (root == null) {
-                        result.error("invalid_sensevoice_path", "SenseVoice 模型路径不安全", null)
+                        result.error("invalid_sensevoice_path", "The SenseVoice model path is unsafe", null)
                     } else if (pcm == null || pcm.isEmpty()) {
-                        result.error("invalid_sensevoice_audio", "SenseVoice PCM 音频为空", null)
+                        result.error("invalid_sensevoice_audio", "The SenseVoice PCM audio is empty", null)
                     } else {
                         asrExecutor.execute {
                             runCatching {
@@ -342,14 +349,14 @@ class MainActivity : FlutterActivity() {
                             onFailure = {
                                 result.error(
                                     "moss_runtime_unavailable",
-                                    "MOSS-TTS-Nano ONNX Runtime 无法加载: ${it.message}",
+                                    "The MOSS-TTS-Nano ONNX Runtime could not be loaded: ${it.message}",
                                     null,
                                 )
                             },
                         )
                     "providers" -> runCatching {
                         check(QnnRuntime.status.ready && QnnRuntime.status.epDeviceCount > 0) {
-                            "QNN Plugin EP 未暴露可用设备"
+                            "The QNN Plugin EP exposed no usable device"
                         }
                         listOf("QNN_HTP", "ORT_CPU")
                     }
@@ -361,7 +368,7 @@ class MainActivity : FlutterActivity() {
                             onFailure = {
                                 result.error(
                                     "moss_provider_probe_failed",
-                                    "MOSS-TTS-Nano 无法读取 ONNX Runtime 执行提供程序: ${it.message}",
+                                    "The MOSS-TTS-Nano execution providers could not be read: ${it.message}",
                                     null,
                                 )
                             },
@@ -500,9 +507,9 @@ class MainActivity : FlutterActivity() {
 
     private fun importLive2dArchive(archivePath: String): List<String> {
         val archive = File(archivePath)
-        require(archive.isFile) { "找不到选择的 Live2D ZIP 文件" }
+        require(archive.isFile) { "The selected Live2D ZIP file was not found" }
         require(archive.length() <= 512L * 1024L * 1024L) {
-            "Live2D ZIP 超过 512 MB 导入限制"
+            "Live2D ZIP exceeds the 512 MB import limit"
         }
 
         val modelsRoot = File(filesDir, "live2d_models").apply { mkdirs() }
@@ -510,7 +517,7 @@ class MainActivity : FlutterActivity() {
             modelsRoot,
             "model-${System.currentTimeMillis()}-${archive.length().toString(16)}",
         )
-        require(importDir.mkdirs()) { "无法创建 Live2D 模型目录" }
+        require(importDir.mkdirs()) { "Cannot create the Live2D model directory" }
 
         try {
             extractLive2dArchive(archive, importDir)
@@ -518,7 +525,7 @@ class MainActivity : FlutterActivity() {
                 .filter { it.isFile && it.name.lowercase(Locale.ROOT).endsWith(".model3.json") }
                 .sortedBy { it.relativeTo(importDir).path }
                 .toList()
-            require(modelFiles.isNotEmpty()) { "ZIP 中没有 .model3.json" }
+            require(modelFiles.isNotEmpty()) { "The ZIP contains no .model3.json" }
             modelFiles.forEach { validateLive2dModel(it, importDir) }
             return modelFiles.map { it.canonicalPath }
         } catch (error: Exception) {
@@ -539,7 +546,7 @@ class MainActivity : FlutterActivity() {
                 runOnUiThread {
                     result.error(
                         "live2d_import_failed",
-                        error.message ?: "Live2D 模型导入失败",
+                        error.message ?: "Live2D model import failed",
                         null,
                     )
                 }
@@ -553,14 +560,14 @@ class MainActivity : FlutterActivity() {
         val modelFile = File(installDir, "mao_pro.model3.json")
         if (!modelFile.isFile) {
             val staging = File(modelsRoot, "bundled-mao-staging-${System.currentTimeMillis()}")
-            require(staging.mkdirs()) { "无法创建内置 Mao 模型目录" }
+            require(staging.mkdirs()) { "Cannot create the bundled Mao model directory" }
             try {
                 copyAssetTree("flutter_assets/model/Live2d/mao/runtime", staging)
                 require(File(staging, "mao_pro.model3.json").isFile) {
-                    "APK 中缺少内置 Mao 模型；请检查 pubspec assets"
+                    "The bundled Mao model is missing from the APK; check the pubspec assets"
                 }
                 if (installDir.exists()) installDir.deleteRecursively()
-                require(staging.renameTo(installDir)) { "无法完成内置 Mao 模型安装" }
+                require(staging.renameTo(installDir)) { "Cannot finish installing the bundled Mao model" }
             } catch (error: Exception) {
                 staging.deleteRecursively()
                 throw error
@@ -582,7 +589,7 @@ class MainActivity : FlutterActivity() {
             return
         }
         require(destination.mkdirs() || destination.isDirectory) {
-            "无法创建模型目录: ${destination.name}"
+            "Cannot create the model directory: ${destination.name}"
         }
         for (child in children) {
             copyAssetTree("$assetPath/$child", File(destination, child))
@@ -599,14 +606,14 @@ class MainActivity : FlutterActivity() {
             while (true) {
                 val entry = zip.nextEntry ?: break
                 entryCount++
-                require(entryCount <= 4096) { "ZIP 文件条目过多" }
+                require(entryCount <= 4096) { "The ZIP contains too many entries" }
                 val entryName = entry.name.replace('\\', '/')
                 require(!entryName.startsWith('/') && !entryName.split('/').contains("..")) {
-                    "ZIP 包含不安全路径: ${entry.name}"
+                    "The ZIP contains an unsafe path: ${entry.name}"
                 }
                 val output = File(destination, entryName).canonicalFile
                 require(output.path.startsWith(destinationPath)) {
-                    "ZIP 包含越界路径: ${entry.name}"
+                    "The ZIP contains an out-of-bounds path: ${entry.name}"
                 }
                 if (entry.isDirectory) {
                     output.mkdirs()
@@ -618,7 +625,7 @@ class MainActivity : FlutterActivity() {
                             if (read < 0) break
                             totalBytes += read
                             require(totalBytes <= 512L * 1024L * 1024L) {
-                                "解压后模型超过 512 MB 限制"
+                                "The unpacked model exceeds the 512 MB limit"
                             }
                             target.write(buffer, 0, read)
                         }
@@ -627,16 +634,16 @@ class MainActivity : FlutterActivity() {
                 zip.closeEntry()
             }
         }
-        require(entryCount > 0) { "ZIP 文件为空或格式无效" }
+        require(entryCount > 0) { "The ZIP is empty or malformed" }
     }
 
     private fun validateLive2dModel(modelFile: File, importRoot: File) {
         val json = JSONObject(modelFile.readText(Charsets.UTF_8))
         require(json.optInt("Version", -1) == 3) {
-            "只支持 Cubism .model3.json Version 3"
+            "Only Cubism .model3.json Version 3 is supported"
         }
         val references = json.optJSONObject("FileReferences")
-            ?: throw IllegalArgumentException("model3.json 缺少 FileReferences")
+            ?: throw IllegalArgumentException("model3.json is missing FileReferences")
         val modelDirectory = modelFile.parentFile ?: importRoot
         includeUnreferencedVtuberAssets(references, modelDirectory, importRoot)
         fun normalizeReference(relativePath: String): String {
@@ -645,11 +652,11 @@ class MainActivity : FlutterActivity() {
         }
 
         val moc = references.optString("Moc")
-        require(moc.isNotBlank()) { "model3.json 缺少 Moc 文件引用" }
+        require(moc.isNotBlank()) { "model3.json has no Moc file reference" }
         references.put("Moc", normalizeReference(moc))
 
         val textures = references.optJSONArray("Textures")
-        require(textures != null && textures.length() > 0) { "model3.json 没有纹理引用" }
+        require(textures != null && textures.length() > 0) { "model3.json has no texture references" }
         val textureFiles = mutableListOf<File>()
         for (index in 0 until textures.length()) {
             val normalized = normalizeReference(textures.getString(index))
@@ -694,7 +701,7 @@ class MainActivity : FlutterActivity() {
         val displayInfo = displayInfoFile?.let { file ->
             JSONObject(file.readText(Charsets.UTF_8)).also { cdi ->
                 require(cdi.optInt("Version", -1) == 3) {
-                    "cdi3.json 的 Version 必须为 3"
+                    "cdi3.json Version must be 3"
                 }
             }
         }
@@ -778,7 +785,7 @@ class MainActivity : FlutterActivity() {
         relativePath: String,
     ): File {
         require(!relativePath.contains("://") && !File(relativePath).isAbsolute) {
-            "模型引用了非本地资源: $relativePath"
+            "The model references a non-local resource: $relativePath"
         }
         val rootPath = importRoot.canonicalPath + File.separator
         val direct = File(modelDirectory, relativePath).canonicalFile
@@ -789,19 +796,19 @@ class MainActivity : FlutterActivity() {
             current = when (segment) {
                 "." -> current
                 ".." -> current.parentFile
-                    ?: throw IllegalArgumentException("模型引用路径越界: $relativePath")
+                    ?: throw IllegalArgumentException("The model reference escapes the model directory: $relativePath")
                 else -> {
                     val matches = current.listFiles()
                         ?.filter { it.name.equals(segment, ignoreCase = true) }
                         .orEmpty()
-                    require(matches.size == 1) { "模型资源缺失或大小写冲突: $relativePath" }
+                    require(matches.size == 1) { "The model resource is missing or case-conflicting: $relativePath" }
                     matches.single()
                 }
             }
         }
         val resolved = current.canonicalFile
         require(resolved.path.startsWith(rootPath) && resolved.isFile) {
-            "模型资源缺失或路径越界: $relativePath"
+            "The model resource is missing or escapes the model directory: $relativePath"
         }
         return resolved
     }
@@ -818,11 +825,11 @@ class MainActivity : FlutterActivity() {
         val header = ByteArray(8)
         val bytesRead = FileInputStream(mocFile).use { it.read(header) }
         require(bytesRead == header.size && header.copyOfRange(0, 4).contentEquals("MOC3".toByteArray())) {
-            "${mocFile.name} 不是有效的 moc3 文件"
+            "${mocFile.name} is not a valid moc3 file"
         }
         val mocVersion = header[4].toInt() and 0xff
         require(mocVersion in 1..5) {
-            "${mocFile.name} 使用了 Cubism 5 Core 尚不支持的 moc3 版本 $mocVersion"
+            "${mocFile.name} uses moc3 version $mocVersion, which this Cubism 5 Core does not support yet"
         }
     }
 
@@ -846,6 +853,9 @@ class MainActivity : FlutterActivity() {
                 if (
                     id in listOf("ParamMouthOpenY", "ParamA", "ParamI", "ParamU", "ParamE", "ParamO") ||
                     name == "mouth open" ||
+                    // Model metadata, not UI text: some Cubism models name the
+                    // mouth parameter in Chinese, and matching it is the only way
+                    // to find the lip-sync parameter for those models.
                     name == "嘴巴开合"
                 ) {
                     result += id
@@ -861,10 +871,10 @@ class MainActivity : FlutterActivity() {
             val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeFile(texture.path, options)
             require(options.outWidth > 0 && options.outHeight > 0) {
-                "无法读取纹理尺寸: ${texture.name}"
+                "Cannot read the texture dimensions: ${texture.name}"
             }
             require(options.outWidth <= 4096 && options.outHeight <= 4096) {
-                "Android 最小运行配置不接受超过 4096x4096 的纹理: ${texture.name}"
+                "Textures larger than 4096x4096 are rejected on Android: ${texture.name}"
             }
             rgbaTextureBytes += options.outWidth.toLong() * options.outHeight.toLong() * 4L
         }
@@ -874,7 +884,7 @@ class MainActivity : FlutterActivity() {
         val memoryInfo = ActivityManager.MemoryInfo().also(activityManager::getMemoryInfo)
         val storageAvailable = StatFs(filesDir.path).availableBytes
         require(storageAvailable >= mocFile.length() + rgbaTextureBytes / 4L) {
-            "设备剩余存储空间不足以安全加载该模型"
+            "Not enough free storage to load this model safely"
         }
         val systemBudget = if (memoryInfo.totalMem > 0L && memoryInfo.availMem > 0L) {
             minOf(
@@ -889,8 +899,8 @@ class MainActivity : FlutterActivity() {
         require(estimatedBytes <= safeBudget) {
             val estimatedMb = estimatedBytes / (1024L * 1024L)
             val budgetMb = safeBudget / (1024L * 1024L)
-            "模型预计至少占用 ${estimatedMb} MB，超过本设备 Live2D 安全预算 ${budgetMb} MB；" +
-                "请减小 moc3/纹理数量或改用桌面端，已阻止加载以避免闪退"
+            "The model needs at least $estimatedMb MB, above this device's Live2D budget of $budgetMb MB. " +
+                "Reduce the moc3/texture count or use the desktop build; loading was blocked to avoid a crash"
         }
     }
 
@@ -1006,7 +1016,7 @@ class MainActivity : FlutterActivity() {
 
     private fun beginMossModelImport(result: MethodChannel.Result) {
         if (pendingMossImportResult != null) {
-            result.error("moss_import_busy", "已有 MOSS 模型导入请求正在进行", null)
+            result.error("moss_import_busy", "A MOSS model import is already running", null)
             return
         }
         pendingMossImportResult = result
@@ -1021,7 +1031,7 @@ class MainActivity : FlutterActivity() {
                 pendingMossImportResult = null
                 result.error(
                     "moss_import_picker_failed",
-                    error.message ?: "无法打开 MOSS 模型目录选择器",
+                    error.message ?: "Cannot open the MOSS model directory picker",
                     null,
                 )
             }
@@ -1029,7 +1039,7 @@ class MainActivity : FlutterActivity() {
 
     private fun beginMossZipImport(result: MethodChannel.Result) {
         if (pendingMossZipImportResult != null) {
-            result.error("moss_import_busy", "已有 MOSS 模型导入请求正在进行", null)
+            result.error("moss_import_busy", "A MOSS model import is already running", null)
             return
         }
         pendingMossZipImportResult = result
@@ -1043,7 +1053,7 @@ class MainActivity : FlutterActivity() {
                 pendingMossZipImportResult = null
                 result.error(
                     "moss_import_picker_failed",
-                    error.message ?: "无法打开 ZIP 文件选择器",
+                    error.message ?: "Cannot open the ZIP file picker",
                     null,
                 )
             }
@@ -1051,7 +1061,7 @@ class MainActivity : FlutterActivity() {
 
     private fun beginSherpaZipImport(result: MethodChannel.Result) {
         if (pendingSherpaZipImportResult != null) {
-            result.error("sherpa_import_busy", "已有 SenseVoice 模型导入请求正在进行", null)
+            result.error("sherpa_import_busy", "A SenseVoice model import is already running", null)
             return
         }
         pendingSherpaZipImportResult = result
@@ -1070,7 +1080,7 @@ class MainActivity : FlutterActivity() {
                 pendingSherpaZipImportResult = null
                 result.error(
                     "sherpa_import_picker_failed",
-                    error.message ?: "无法打开文件选择器",
+                    error.message ?: "Cannot open the file picker",
                     null,
                 )
             }
@@ -1091,7 +1101,7 @@ class MainActivity : FlutterActivity() {
         pendingMossImportResult = null
         val uri = data?.data
         if (resultCode != RESULT_OK || uri == null) {
-            pending.error("moss_import_cancelled", "未选择 MOSS QNN 部署目录", null)
+            pending.error("moss_import_cancelled", "No MOSS QNN deployment directory was selected", null)
             return
         }
         runCatching {
@@ -1132,7 +1142,7 @@ class MainActivity : FlutterActivity() {
         pendingMossZipImportResult = null
         val uri = data?.data
         if (resultCode != RESULT_OK || uri == null) {
-            pending.error("moss_import_cancelled", "未选择 MOSS QNN 部署 ZIP 文件", null)
+            pending.error("moss_import_cancelled", "No MOSS QNN deployment ZIP was selected", null)
             return
         }
         mossExecutor.execute {
@@ -1168,7 +1178,7 @@ class MainActivity : FlutterActivity() {
         pendingSherpaZipImportResult = null
         val uri = data?.data
         if (resultCode != RESULT_OK || uri == null) {
-            pending.error("sherpa_import_cancelled", "未选择 SenseVoice 模型 ZIP 文件", null)
+            pending.error("sherpa_import_cancelled", "No SenseVoice model ZIP was selected", null)
             return
         }
         asrExecutor.execute {
@@ -1214,7 +1224,7 @@ class MainActivity : FlutterActivity() {
     private fun initializeMoss(result: MethodChannel.Result) {
         val info = modelStore.inspectInstalled()
         if (info == null) {
-            result.error("moss_model_missing", "请先导入 MOSS QNN HTP v81 部署包", null)
+            result.error("moss_model_missing", "Import a MOSS QNN HTP v81 deployment package first", null)
             return
         }
         mossExecutor.execute {
@@ -1243,19 +1253,19 @@ class MainActivity : FlutterActivity() {
         val outputValue = arguments?.get("outputPath") as? String
         val text = (arguments?.get("text") as? String).orEmpty().trim()
         if (outputValue.isNullOrBlank() || text.isEmpty()) {
-            result.error("invalid_moss_request", "MOSS-TTS-Nano 推理参数不完整", null)
+            result.error("invalid_moss_request", "The MOSS-TTS-Nano inference parameters are incomplete", null)
             return
         }
         val modelInfo = modelStore.inspectInstalled()
         if (modelInfo == null) {
-            result.error("moss_model_missing", "请先导入 MOSS QNN HTP v81 部署包", null)
+            result.error("moss_model_missing", "Import a MOSS QNN HTP v81 deployment package first", null)
             return
         }
         val modelRoot = modelInfo.root.canonicalFile
         val outputFile = runCatching { File(outputValue).canonicalFile }.getOrNull()
         val cacheRoot = cacheDir.canonicalFile
         if (outputFile == null || !outputFile.isInside(cacheRoot)) {
-            result.error("invalid_moss_output_path", "MOSS-TTS-Nano 音频输出路径不安全", null)
+            result.error("invalid_moss_output_path", "The MOSS-TTS-Nano audio output path is unsafe", null)
             return
         }
         val voices = modelInfo.voices.mapTo(HashSet(), ModelStore.Voice::id)
@@ -1271,7 +1281,7 @@ class MainActivity : FlutterActivity() {
             try {
                 if (cancellation.get()) {
                     deliverMossResult(result) {
-                        result.error("moss_cancelled", "MOSS-TTS-Nano 推理已取消", null)
+                        result.error("moss_cancelled", "MOSS-TTS-Nano inference was cancelled", null)
                     }
                     return@execute
                 }
@@ -1287,7 +1297,7 @@ class MainActivity : FlutterActivity() {
                 if (cancellation.get()) {
                     outputFile.delete()
                     deliverMossResult(result) {
-                        result.error("moss_cancelled", "MOSS-TTS-Nano 推理已取消", null)
+                        result.error("moss_cancelled", "MOSS-TTS-Nano inference was cancelled", null)
                     }
                     return@execute
                 }
@@ -1316,13 +1326,13 @@ class MainActivity : FlutterActivity() {
                 outputFile.delete()
                 if (cancellation.get()) {
                     deliverMossResult(result) {
-                        result.error("moss_cancelled", "MOSS-TTS-Nano 推理已取消", null)
+                        result.error("moss_cancelled", "MOSS-TTS-Nano inference was cancelled", null)
                     }
                 } else {
                     val message = error.message ?: error.javaClass.simpleName
                     Log.e("Talk2U/MOSS", "MOSS-TTS-Nano synthesis failed", error)
                     deliverMossResult(result) {
-                        result.error("moss_synthesis_failed", "MOSS-TTS-Nano 推理失败: $message", null)
+                        result.error("moss_synthesis_failed", "MOSS-TTS-Nano inference failed: $message", null)
                     }
                 }
             }
@@ -1445,7 +1455,15 @@ class MainActivity : FlutterActivity() {
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
         if (level < ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) return
+        // Per-utterance work is the first thing to drop: a cancelled synthesis
+        // costs nothing, while the installed package stays untouched.
         mossCancellation.set(true)
+        runOnUiThread { memoryChannel?.invokeMethod("trim", level) }
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL) {
+            // Under critical pressure the QNN/ORT sessions are released as well;
+            // the next utterance re-creates them from the on-disk context cache.
+            mossExecutor.execute(::closeMossEngine)
+        }
     }
 
     override fun onDestroy() {
@@ -1460,7 +1478,7 @@ class MainActivity : FlutterActivity() {
         llmExecutor.shutdown()
         asrExecutor.execute { senseVoiceRuntime.close() }
         asrExecutor.shutdown()
-        pendingMossImportResult?.error("activity_destroyed", "MOSS 模型导入已随页面关闭", null)
+        pendingMossImportResult?.error("activity_destroyed", "The MOSS model import ended because the page was closed", null)
         pendingMossImportResult = null
         super.onDestroy()
     }

@@ -987,6 +987,17 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
+  String get live2dImportFailed =>
+      'Live2D model import failed. Check the ZIP file.';
+
+  @override
+  String get requestRejected => 'The on-device runtime rejected the request.';
+
+  @override
+  String get mossImportClosed =>
+      'The MOSS import was cancelled because the page was closed.';
+
+  @override
   String get captureReleased => 'Audio capture has been released';
 
   @override

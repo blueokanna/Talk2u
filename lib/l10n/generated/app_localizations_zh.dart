@@ -944,6 +944,15 @@ class AppLocalizationsZh extends AppLocalizations {
   }
 
   @override
+  String get live2dImportFailed => 'Live2D 模型导入失败，请检查 ZIP 文件。';
+
+  @override
+  String get requestRejected => '端侧运行时拒绝了该请求。';
+
+  @override
+  String get mossImportClosed => 'MOSS 模型导入已随页面关闭而取消。';
+
+  @override
   String get captureReleased => '录音通道已释放';
 
   @override

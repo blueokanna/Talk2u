@@ -1796,6 +1796,24 @@ abstract class AppLocalizations {
   /// **'The deployment package is incomplete or damaged. Check: {files}'**
   String mossPackageIncomplete(String files);
 
+  /// No description provided for @live2dImportFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Live2D model import failed. Check the ZIP file.'**
+  String get live2dImportFailed;
+
+  /// No description provided for @requestRejected.
+  ///
+  /// In en, this message translates to:
+  /// **'The on-device runtime rejected the request.'**
+  String get requestRejected;
+
+  /// No description provided for @mossImportClosed.
+  ///
+  /// In en, this message translates to:
+  /// **'The MOSS import was cancelled because the page was closed.'**
+  String get mossImportClosed;
+
   /// No description provided for @captureReleased.
   ///
   /// In en, this message translates to:

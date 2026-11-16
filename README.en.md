@@ -149,6 +149,17 @@ MOSS-TTS-Nano uses four ONNX stages: prefill, recurrent decode, local sampler, a
 
 The HTP stages disable CPU EP fallback. The runtime reports the explicit mixed plan `QNN_HTP(prefill,decode)+ORT_CPU(sampler,codec)` only after a real synthesis returns a structurally valid WAV. Generic NNAPI is not used as Qualcomm execution evidence.
 
+### Memory pressure trimming
+
+`onTrimMemory` now reclaims the Dart-side allocations instead of only cancelling one utterance:
+
+- `MainActivity.onTrimMemory` sends `trim` over the `talk2u/memory` channel from `RUNNING_LOW` up; at `RUNNING_CRITICAL` it also calls `closeMossEngine()` to drop the QNN/ORT sessions. The next utterance rebuilds them from the on-disk context cache.
+- `lib/src/services/memory_pressure_service.dart` clears the Flutter `ImageCache` (including live images) and deletes synthesised WAVs that nothing is playing. `MossTtsService.trimAudioCache()` skips while speech is playing, so the active file is never removed.
+- Startup bounds the image cache to 64 entries / 32 MiB instead of Flutter's 1000 / 100 MB default. This UI loads no remote images, so the default only lets decoded bitmaps accumulate in long sessions.
+- `test/services/memory_pressure_service_test.dart` locks both the bound and the "clear images once, release audio once" behaviour.
+
+Measured on PLK110 after a cold start: TOTAL PSS about 425 MB (Native Heap 110 MB, Unknown 135 MB, Other mmap 79 MB, `.so` 56 MB). Sending `adb shell am send-trim-memory com.blue.talk2u RUNNING_LOW` while idle changed PSS by less than 1 MB, because nothing is decoded or cached at that moment. The trim targets long sessions and background pressure; do not claim it lowers idle memory.
+
 Android uses the same matching ONNX Runtime `1.26.0/API 26` core and QNN Plugin EP `2.4.0` artifacts as the reference project. Gradle enforces fixed SHA-256 values for the ORT core, Plugin EP, and C API header, preventing ABI mixing. QAIRT host libraries and the HTP skel come from a legally installed SDK. Prefill/decode use QNN HTP; sampler/codec use multithreaded ORT CPU and are never reported as NPU work. Physical-device graph execution remains mandatory proof.
 
 ### Qualcomm QNN HTP
@@ -301,7 +312,9 @@ pwsh tools/run_quality_checks.ps1        # -SkipRust / -SkipFlutter / -SkipAndro
 
 That script runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --all-targets`, `flutter pub get`, `dart format --output=none --set-exit-if-changed lib test`, `flutter analyze lib test`, `flutter test --no-pub`, the desktop avatar frame gate, the Python host tooling tests, and `:app:testDebugUnitTest`. The same jobs are defined in `.github/workflows/quality.yml` and run on every push, pull request and manual dispatch.
 
-Current results in this workspace: 177 Rust tests passed (2 ignored), 156 Flutter tests passed, 20 Android JVM tests passed, 23 host-side Python tests passed, analyzer and formatter clean.
+Current results in this workspace: 177 Rust tests passed (2 ignored), 159 Flutter tests passed, 20 Android JVM tests passed, 26 host-side Python tests passed, analyzer and formatter clean.
+
+Localization is enforced end to end: the Dart guard test scans all of `lib/` except the language-data modules, and the native diagnostics in `MainActivity`, `GenieXRuntime`, `ModelStore` and `Chipset` are English, with `live2d_import_failed`, `invalid_*` and `activity_destroyed` mapped to ARB strings. The only Chinese left in Kotlin is the `moc3` parameter name `嘴巴开合`, which is model metadata carrying an explanatory comment.
 
 Two CI details matter. The Gradle wrapper (`gradlew`, `gradlew.bat`, `gradle-wrapper.jar`) is committed on purpose: Flutter only regenerates it during a full build, which needs the licensed SDKs, so `android/.gitignore` un-ignores it. The Android job also writes `android/local.properties` (`sdk.dir` plus `flutter.sdk`) because Flutter only writes that file during `flutter build`.
 

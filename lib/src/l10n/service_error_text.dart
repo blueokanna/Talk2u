@@ -28,6 +28,7 @@ String serviceErrorText(
           ? strings.mossErrorImport
           : strings.mossPackageIncomplete(fallback.trim()),
     'moss_import_busy' => strings.mossErrorImportBusy,
+    'activity_destroyed' => strings.mossImportClosed,
     'moss_cancelled' || 'moss_import_cancelled' => strings.mossCancelled,
     'moss_delete_failed' => strings.mossErrorDelete,
     'sensevoice_capabilities_failed' => strings.senseVoiceErrorCheck,
@@ -39,6 +40,14 @@ String serviceErrorText(
     'sherpa_import_busy' ||
     'sherpa_import_picker_failed' => strings.senseVoiceErrorImport,
     'sherpa_import_cancelled' => strings.senseVoiceCancelled,
+    'live2d_import_failed' => strings.live2dImportFailed,
+    'invalid_archive' ||
+    'invalid_moss_request' ||
+    'invalid_moss_output_path' ||
+    'invalid_sensevoice_path' ||
+    'invalid_sensevoice_audio' ||
+    'invalid_qwen3_messages' ||
+    'invalid_qwen3_generation' => strings.requestRejected,
     _ => null,
   };
   if (mapped != null) return mapped;

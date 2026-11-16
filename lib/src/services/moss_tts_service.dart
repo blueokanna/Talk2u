@@ -803,6 +803,16 @@ class MossTtsService extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Deletes synthesised WAV files that nothing is playing.
+  ///
+  /// Called from Android memory pressure. The file owned by the current playback
+  /// is left alone, and nothing here touches the installed deployment package.
+  Future<void> trimAudioCache() async {
+    if (_disposed || speaking) return;
+    await _cleanupAudioCache();
+    notifyListeners();
+  }
+
   Future<void> _deleteAudio(File output) async {
     _pendingOutputs.remove(output);
     if (_currentOutput?.path == output.path) _currentOutput = null;

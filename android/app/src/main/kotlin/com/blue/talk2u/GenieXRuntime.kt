@@ -234,7 +234,7 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
         }
         checkGenerationActive()
         check(response.isNotEmpty()) {
-            "GenieX QAIRT/NPU 没有返回任何内容，上下文可能已超出窗口，请开始新的对话"
+            "GenieX QAIRT/NPU returned no content; the context window may be exhausted. Start a new conversation."
         }
         check(!response.contains("<|im_start|>") && !response.contains("<|im_end|>")) {
             "GenieX returned raw chat-template control tokens"
@@ -366,8 +366,8 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
         val normalizedSoc = Chipset.normalize(socModel)
         if (socModel.isNotBlank() && normalizedSoc !in Chipset.supported) {
             throw IllegalStateException(
-                "GenieX Qwen3 需要 ${Chipset.supported.joinToString("/")} HTP v81；" +
-                    "当前设备芯片: ${socModel.ifEmpty { "未知" }}",
+                "GenieX Qwen3 requires ${Chipset.supported.joinToString("/")} HTP v81; " +
+                    "current device chipset: ${socModel.ifEmpty { "unknown" }}",
             )
         }
 
@@ -385,7 +385,7 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
         } catch (error: Throwable) {
             Log.e("Talk2U/GenieX", "GenieX SDK init threw", error)
             throw IllegalStateException(
-                "GenieX SDK 初始化失败: ${error.message ?: error.javaClass.simpleName}",
+                "GenieX SDK initialization failed: ${error.message ?: error.javaClass.simpleName}",
                 error,
             )
         }

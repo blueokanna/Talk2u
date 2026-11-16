@@ -14,6 +14,7 @@ import 'package:talk2u/src/rendering/motion_policy.dart';
 import 'package:talk2u/src/pages/chat_page.dart';
 import 'package:talk2u/src/services/offline_llm_service.dart';
 import 'package:talk2u/src/services/offline_speech_service.dart';
+import 'package:talk2u/src/services/memory_pressure_service.dart';
 import 'package:talk2u/src/settings/ui_preferences.dart';
 
 enum _StartupFailure { rustCoreTimeout, localDataTimeout }
@@ -33,6 +34,9 @@ Future<void> main() async {
   preferences.addListener(() => _syncAppStrings(preferences));
   WidgetsBinding.instance.platformDispatcher.onLocaleChanged = () =>
       _syncAppStrings(preferences);
+  // Bounding the image cache early keeps the first frames from claiming memory
+  // the rest of the app cannot use; the handler answers Android's trims.
+  MemoryPressureService.install();
   runApp(Talk2UApp(preferences: preferences));
 }
 

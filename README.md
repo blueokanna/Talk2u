@@ -24,7 +24,7 @@ Talk2U 是一个 Flutter + Rust 的本地角色聊天应用。聊天记录、角
 | 离线 STT | 已实现 | Android SM8850 上使用 sherpa-onnx + SenseVoice 2024-07-17 INT8 QNN context，提供 ASR/LID/SER/AED |
 | 持续语音通话 | Android 有条件实现 | `CallSession` 状态机；确认硬件 AEC 后全双工，否则半双工；参考信号双讲检测 + 文本自回音过滤；可语音/点按打断 |
 | 重新生成 | 已实现 | 旧回复不进入新 prompt，附带“禁止复用开头/句式/收尾”的显式指令，并以 temperature/top_p 0.95 重新采样；成功后原位替换旧消息 |
-| 空闲资源占用 | 已实现 | 启动只探测 MOSS/QNN 能力，首次朗读才加载 HTP 上下文；无 1 Hz 硬件遥测轮询、无全程 30 ms 流式定时器、非通话模式不自动合成语音；Live2D 在后台、离页或系统要求减少动画时停止持续渲染；流式增量在后台只入缓冲，回前台一次性重绘 |
+| 空闲资源占用 | 已实现 | 启动只探测 MOSS/QNN 能力，首次朗读才加载 HTP 上下文；无 1 Hz 硬件遥测轮询、无全程 30 ms 流式定时器、非通话模式不自动合成语音；Live2D 在后台、离页或系统要求减少动画时停止持续渲染；流式增量在后台只入缓冲，回前台一次性重绘；`onTrimMemory` 会清空 Flutter 图片缓存与未被播放的合成 WAV，临界时释放 QNN/ORT session |
 | Android/Windows/Linux Live2D | 有条件实现 | Android 使用 Cubism SDK for Native 5 R.5 + C++ + OpenGL ES；Windows 使用 WebView2，Linux 使用 CEF |
 | Cubism 5 moc3 | 已实现 | 导入时读取 `MOC3` 头并接受 moc3 版本 1-5；运行时拒绝 Core 4 |
 | `.cdi3.json` | 已实现 | 校验 Version 3，并用于发现 LipSync 参数 |
@@ -389,6 +389,17 @@ Android 不调用系统 on-device STT/TTS。MOSS 仅从带完整清单的 SM8850
 Android 使用与参考工程一致的 ONNX Runtime `1.26.0/API 26` core 和 QNN Plugin EP `2.4.0` 同构产物。Gradle 对 ORT core、Plugin EP 和 C API 头文件执行固定 SHA-256 校验，禁止混用 ABI。QAIRT host 库和 HTP skel 来自本机合法安装的 SDK；只有经过验证的部署才会创建 QNN session。prefill/decode 使用 QNN HTP，sampler/codec 使用 ORT CPU 多线程且不会伪报为 NPU。APK 中存在 QNN 库或 provider 可枚举，都不单独构成硬件执行证据；必须完成真机图执行验证。
 
 MOSS 初始化会生成或复用 QNN context cache，合成时依次加载 prefill、decode/sampler、codec 并及时释放，以控制移动设备峰值内存。界面只有在真实合成返回有效 WAV 和 provider 计划后才显示已执行验证。
+
+### 内存压力回收（Dart + Native）
+
+Android 的 `onTrimMemory` 现在会真正回收 Dart 侧可回收的部分，而不是只取消一次推理：
+
+- `MainActivity.onTrimMemory` 在 `RUNNING_LOW` 及以上通过 `talk2u/memory` 通道发 `trim`；`RUNNING_CRITICAL` 时额外 `closeMossEngine()`，释放 QNN/ORT session（下一次朗读会用磁盘上的 context cache 重新创建）。
+- `lib/src/services/memory_pressure_service.dart` 收到 `trim` 后清空 Flutter `ImageCache`（含 live images）并删除未被播放占用的合成 WAV；`MossTtsService.trimAudioCache()` 在播放中直接跳过，不会删除正在播放的文件。
+- 启动时把 `ImageCache` 从 Flutter 默认的 1000 项 / 100 MB 收紧到 64 项 / 32 MB。这个 UI 不加载远程图片，默认上限只会让长会话里的解码位图无限堆积。
+- `test/services/memory_pressure_service_test.dart` 固定缓存上限与"清空图片 + 释放一次音频"的行为。
+
+实测（PLK110，冷启动后静止）：`dumpsys meminfo` 的 TOTAL PSS 约 425 MB，其中 Native Heap 约 110 MB、Unknown 约 135 MB、Other mmap 约 79 MB、`.so` 约 56 MB。静止状态下执行 `adb shell am send-trim-memory com.blue.talk2u RUNNING_LOW` 前后差异小于 1 MB——因为此时并没有解码图片或缓存 WAV 可回收。这个回收通路针对的是长会话与后台压力场景，不应宣称"降低了静止内存"。
 
 QAIRT 2.48 的静态化流程固定 recurrent KV 容量。V81 无法接受 sampler 的 `QNN_CumulativeSum`，因此 sampler 明确使用 ORT CPU；streaming codec 使用部署包中的固定形状 QNN HTP 图。原始动态 ONNX 不会直接送入 Android QNN runtime。
 
@@ -808,7 +819,7 @@ Pop-Location
 pwsh tools/run_quality_checks.ps1
 ```
 
-`tools` 下的 23 项主机侧测试全部只用 Python 标准库：ELF/ZIP 16 KB 审计 10 项，MOSS 部署包审计 13 项（目录与 ZIP、缺失/截断/SHA-256、越界路径、命令行退出码、真实仓库清单）。
+`tools` 下的 26 项主机侧测试全部只用 Python 标准库：ELF/ZIP 16 KB 审计 10 项，MOSS 部署包审计 16 项（目录与 ZIP、缺失/截断/SHA-256、越界路径、清单重写与拒绝改写、命令行退出码、真实仓库清单）。Flutter 侧当前 159 项。
 
 Android 侧现在也有纯 JVM 单测（`android/app/src/test/kotlin`），共 20 项：芯片代号解析（`ChipsetTest` 7）、ZIP/SAF 路径越界防护（`SafeRelativePathTest` 5）、MOSS 清单校验（`MossDeploymentParserTest` 8，覆盖 schema、provider plan、重复/穿越路径、大小与 SHA-256、必需文件、文件数上限）。它们不依赖设备，也不需要 Cubism SDK；在 CI 或没有许可 SDK 的机器上用以下命令即可运行：
 
@@ -849,6 +860,7 @@ Flutter 版本在 workflow 里固定为 `3.47.9`：`flutter analyze` 的规则�
 - Qwen、MOSS 与 SenseVoice 的失败状态改为稳定错误码（`lastErrorCode`），设置页通过 `serviceErrorText` 映射到 ARB；未知原生错误才回退到原始详情。`service_error_text_test.dart` 锁定已知错误码的英文文案不含 CJK。
 - 语言数据与模型输入不放进 ARB：情感/cue 词表在 `lib/src/lexicon`（`emotion_lexicon.dart`、`speech_cue_lexicon.dart`、`moss_voice_catalog.dart`），角色系统提示词与离线重写指令在 `lib/src/prompts/persona_prompts.dart`。它们是“喂给模型/用于匹配的中文数据”，不是界面文案，翻译它们只会改变人设的推理语言。
 - 内置 provider 名称（如 `android-offline`）在磁盘上保持稳定英文标识，显示时经 `lib/src/l10n/provider_names.dart` 本地化，避免持久化配置把某一种语言写死。
+- Kotlin 侧的用户可见错误详情也已统一为英文（`MainActivity`、`GenieXRuntime`、`ModelStore`、`Chipset`），并补齐 `live2d_import_failed`、`invalid_*`、`activity_destroyed` 等错误码到 ARB 的映射；唯一保留的中文是 `moc3` 参数名 `嘴巴开合`，它是模型元数据而不是文案，代码里已加注释说明。
 
 - 消息气泡只在“已完成”的消息上渲染 Markdown；流式阶段用纯文本，避免每个 token 重建 AST。
 - 完成态 Markdown 按 `content + ThemeData 实例 + TextScaler` 缓存 widget 实例，父级每 48 ms 重绘时不会重复解析历史消息；`message_bubble_cache_test.dart` 用构建计数验证这一点。

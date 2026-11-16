@@ -30,9 +30,9 @@ internal object Chipset {
     fun requireSupported(socModel: String, detected: String): String {
         val code = normalize(socModel).ifBlank { normalize(detected) }
         check(code in supported) {
-            val current = detected.ifBlank { socModel }.ifBlank { "未知" }
-            "无法确定可用的 AI Hub 芯片代号（当前: $current）；" +
-                "仅支持 ${supported.joinToString("/")}"
+            val current = detected.ifBlank { socModel }.ifBlank { "unknown" }
+            "Cannot determine a usable AI Hub chipset code (current: $current); " +
+                "only ${supported.joinToString("/")} is supported"
         }
         return code
     }
