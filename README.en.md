@@ -285,6 +285,8 @@ Current results in this workspace: 177 Rust tests passed (2 ignored), 156 Flutte
 
 Two CI details matter. The Gradle wrapper (`gradlew`, `gradlew.bat`, `gradle-wrapper.jar`) is committed on purpose: Flutter only regenerates it during a full build, which needs the licensed SDKs, so `android/.gitignore` un-ignores it. The Android job also writes `android/local.properties` (`sdk.dir` plus `flutter.sdk`) because Flutter only writes that file during `flutter build`.
 
+The workflow pins Flutter to `3.47.9` because the analyzer rule set changes across stable releases, and it installs `platforms;android-36` with the runner's own `sdkmanager` instead of bootstrapping the SDK. Analyzer diagnostics are re-emitted as `::error::` annotations, because job logs of a public repository require authentication while annotations are readable by anyone.
+
 Automated checks cannot prove: third-party account quotas, regional network, model permissions, real QNN execution, audio latency, or thermal behaviour.
 
 Real-device acceptance must include:

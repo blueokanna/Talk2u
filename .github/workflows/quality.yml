@@ -51,6 +51,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
         with:
+          # Pinned so analyzer and lint results match a developer machine instead
+          # of moving with every Flutter stable release.
+          flutter-version: 3.47.9
           channel: stable
           cache: true
       - name: Dependencies
@@ -58,7 +61,19 @@ jobs:
       - name: Formatting
         run: dart format --output=none --set-exit-if-changed lib test
       - name: Analyzer
-        run: flutter analyze lib test
+        # The analyzer is the gate most likely to fail after a toolchain bump, so
+        # its diagnostics are re-emitted as check annotations: job logs of a
+        # public repository need authentication, annotations do not.
+        run: |
+          set +e
+          flutter analyze lib test > analyze.log 2>&1
+          status=$?
+          cat analyze.log
+          if [ "$status" -ne 0 ]; then
+            grep -E '^[[:space:]]*(error|warning|info)' analyze.log | head -n 25 |
+              while IFS= read -r line; do echo "::error::$line"; done
+          fi
+          exit "$status"
       - name: Tests
         run: flutter test --no-pub
       - name: Desktop avatar frame gate
@@ -72,15 +87,25 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
-      - name: Android platform
-        run: sdkmanager --install "platforms;android-36" "build-tools;36.0.0"
+      - name: Android SDK
+        # The runner image ships the SDK and cmdline-tools; installing the one
+        # missing platform is more reliable than bootstrapping the SDK again.
+        run: |
+          set -euo pipefail
+          sdkmanager_bin="$(command -v sdkmanager || true)"
+          if [ -z "$sdkmanager_bin" ]; then
+            sdkmanager_bin="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          "$sdkmanager_bin" --version
+          yes | "$sdkmanager_bin" --licenses > /dev/null 2>&1 || true
+          "$sdkmanager_bin" --install "platforms;android-36" "build-tools;36.0.0"
       - uses: subosito/flutter-action@v2
         with:
+          flutter-version: 3.47.9
           channel: stable
           cache: true
       - name: Dependencies

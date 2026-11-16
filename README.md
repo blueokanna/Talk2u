@@ -819,6 +819,8 @@ Rust 测试覆盖供应商鉴权/请求转换、Anthropic 和 OpenAI-compatible 
 
 CI 里有两处工程约束值得注意：Gradle wrapper（`gradlew`、`gradlew.bat`、`gradle-wrapper.jar`）是**提交进仓库**的——Flutter 只在完整构建时才会重新生成它，而完整构建需要许可 SDK，所以 `android/.gitignore` 用 `!` 规则把它们放行；`android-unit` 先 `flutter pub get`，再由 CI 写 `android/local.properties`（`sdk.dir` + `flutter.sdk`），因为 Flutter 只在 `flutter build` 时写这个文件。
 
+Flutter 版本在 workflow 里固定为 `3.47.9`：`flutter analyze` 的规则集随 stable 更新而变化，固定版本才能让 CI 的结论和本机一致。Android SDK 不重新 bootstrap，直接用 runner 镜像自带的 `ANDROID_HOME` 与 `sdkmanager` 安装 `platforms;android-36`、`build-tools;36.0.0`。Analyzer 失败时会把诊断以 `::error::` 注解回写到 check run，因为公开仓库的 job 日志需要认证，而注解是公开可读的。
+
 ### UI 文案与重绘约束
 
 - `test/l10n/no_hardcoded_cjk_test.dart` 扫描整个 `lib/`：除 `lib/src/lexicon`（语言数据）、`lib/src/prompts`（模型提示词）、`lib/src/rust` 与 `lib/l10n/generated`（生成物）外，禁止出现中文字符；同一个测试还校验 en/zh 两份 ARB 的键集合完全一致。
