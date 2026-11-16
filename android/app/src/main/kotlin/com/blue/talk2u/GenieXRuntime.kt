@@ -52,6 +52,8 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
     @Volatile private var llm: LlmWrapper? = null
     @Volatile private var verified = false
     @Volatile private var chipset = ""
+    /** SoC code such as SM8850. AI Hub model pulls require this, not a marketing name. */
+    @Volatile private var socCode = ""
     @Volatile private var modelKey: String? = null
     @Volatile private var profile: ProfilingData? = null
     /** Profile of the most recent turn, staged by [runTurn]. */
@@ -93,20 +95,49 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
             ensureInitialized()
             if (findInstalledKey() != null) return modelStatus()
             downloadCancelled.set(false)
-            runBlocking {
-                modelManager.pullFlow(modelPullInput()).collect { event ->
-                    check(!downloadCancelled.get()) { "GenieX model download was cancelled" }
-                    when (event) {
-                        is ModelManagerWrapper.PullEvent.Progress -> {
-                            val progress = aggregateProgress(event.files)
-                            lastKnownModelBytes = progress.totalBytes
-                            onProgress(progress)
+            // The hub reports progress for the current attempt only, while bytes
+            // from earlier attempts stay on disk and are reused. Add that baseline
+            // so a resumed pull does not look like it restarted from zero.
+            val resumeBase = cachedModelBytes()
+            var attempt = 0
+            while (true) {
+                attempt++
+                try {
+                    runBlocking {
+                        modelManager.pullFlow(modelPullInput()).collect { event ->
+                            check(!downloadCancelled.get()) { "GenieX model download was cancelled" }
+                            when (event) {
+                                is ModelManagerWrapper.PullEvent.Progress -> {
+                                    val session = aggregateProgress(event.files)
+                                    val progress = DownloadProgress(
+                                        (resumeBase + session.downloadedBytes)
+                                            .coerceAtMost(session.totalBytes),
+                                        session.totalBytes,
+                                    )
+                                    lastKnownModelBytes = progress.totalBytes
+                                    onProgress(progress)
+                                }
+                                is ModelManagerWrapper.PullEvent.Error -> error(
+                                    event.message.ifBlank {
+                                        "GenieX model pull failed with code ${event.code}"
+                                    },
+                                )
+                                ModelManagerWrapper.PullEvent.Completed -> Unit
+                            }
                         }
-                        is ModelManagerWrapper.PullEvent.Error -> error(
-                            event.message.ifBlank { "GenieX model pull failed with code ${event.code}" },
-                        )
-                        ModelManagerWrapper.PullEvent.Completed -> Unit
                     }
+                    break
+                } catch (error: Throwable) {
+                    // The SDK resumes from the files already on disk, so a bounded
+                    // retry continues the transfer instead of restarting it.
+                    if (downloadCancelled.get() || attempt >= MAX_PULL_ATTEMPTS) throw error
+                    Log.w(
+                        "Talk2U/GenieX",
+                        "model pull attempt $attempt failed; resuming after backoff",
+                        error,
+                    )
+                    Thread.sleep(PULL_RETRY_BASE_DELAY_MS * attempt)
+                    check(!downloadCancelled.get()) { "GenieX model download was cancelled" }
                 }
             }
             val installed = findInstalledKey()
@@ -120,6 +151,13 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
 
     fun cancelDownload() {
         downloadCancelled.set(true)
+    }
+
+    /** Bytes already materialised under the SDK cache, including `.inflight` parts. */
+    private fun cachedModelBytes(): Long {
+        val root = File(appContext.filesDir, "geniex/models")
+        if (!root.isDirectory) return 0L
+        return root.walkTopDown().filter(File::isFile).sumOf(File::length)
     }
 
     fun deleteModel() {
@@ -325,9 +363,10 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
         } else {
             ""
         }
-        if (socModel.isNotBlank() && !SUPPORTED_SOCS.contains(socModel)) {
+        val normalizedSoc = Chipset.normalize(socModel)
+        if (socModel.isNotBlank() && normalizedSoc !in Chipset.supported) {
             throw IllegalStateException(
-                "GenieX Qwen3 需要 ${SUPPORTED_SOCS.joinToString("/")} HTP v81；" +
+                "GenieX Qwen3 需要 ${Chipset.supported.joinToString("/")} HTP v81；" +
                     "当前设备芯片: ${socModel.ifEmpty { "未知" }}",
             )
         }
@@ -351,6 +390,7 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
             )
         }
         check(initError.isNullOrBlank()) { "GenieX initialization failed: $initError" }
+        socCode = normalizedSoc
         chipset = runCatching { runBlocking { modelManager.detectChipset() } }
             .getOrNull()
             .orEmpty()
@@ -499,10 +539,13 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
         HubSource.AUTO,
         null,
         null,
-        chipset,
+        requireHubChipset(),
         MODEL_NAME,
         ModelType.LLM,
     )
+
+    private fun requireHubChipset(): String =
+        Chipset.requireSupported(socCode, chipset)
 
     private fun destroyLocked() = synchronized(stopLock) {
         val active = llm
@@ -576,6 +619,7 @@ internal class GenieXRuntime(context: Context) : AutoCloseable {
         private const val QAIRT_BACKEND_TYPE = "QnnHtp"
         private const val QAIRT_PRECISION = "w4a16"
         private const val GENIEX_SUCCESS = 0
-        private val SUPPORTED_SOCS = setOf("SM8750", "SM8850")
+        private const val MAX_PULL_ATTEMPTS = 3
+        private const val PULL_RETRY_BASE_DELAY_MS = 2_000L
     }
 }

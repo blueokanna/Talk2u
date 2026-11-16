@@ -296,7 +296,7 @@ void main() {
         isA<FormatException>().having(
           (error) => error.message,
           'message',
-          contains('Version 必须为 3'),
+          contains('cdi3.json Version must be 3'),
         ),
       ),
     );

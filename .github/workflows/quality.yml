@@ -1,0 +1,99 @@
+name: quality
+
+# Static gates plus unit tests that are reproducible without the licensed
+# Cubism/QNN artifacts. APK packaging stays in the release checklist because it
+# needs externally licensed SDKs and a device, so the JVM job disables the
+# Cubism check and exercises only the pure-Kotlin tests.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  PUB_HOSTED_URL: https://pub.flutter-io.cn
+
+jobs:
+  rust:
+    name: Rust fmt, clippy and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Formatting
+        run: cargo fmt --check
+      - name: Lints
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --all-targets
+
+  flutter:
+    name: Dart analyze, tests and host tooling
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Dependencies
+        run: flutter pub get
+      - name: Formatting
+        run: dart format --output=none --set-exit-if-changed lib test
+      - name: Analyzer
+        run: flutter analyze lib test
+      - name: Tests
+        run: flutter test --no-pub
+      - name: Desktop avatar frame gate
+        run: node --test --test-isolation=none test/rendering/avatar_frame_gate_test.cjs
+      - name: Native host tooling tests
+        run: python -m unittest discover -s tools -p "test_*.py" -v
+
+  android-unit:
+    name: Android JVM unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Android platform
+        run: sdkmanager --install "platforms;android-36" "build-tools;36.0.0"
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Dependencies
+        run: flutter pub get
+      - name: Point Gradle at the SDKs
+        # Flutter only writes local.properties during a full build, which needs
+        # the licensed SDKs; CI writes the two paths Gradle actually reads.
+        run: |
+          flutter_sdk="$(dirname "$(dirname "$(command -v flutter)")")"
+          printf 'sdk.dir=%s\nflutter.sdk=%s\n' "$ANDROID_HOME" "$flutter_sdk" > android/local.properties
+      - name: JVM unit tests
+        working-directory: android
+        run: >
+          bash gradlew --no-daemon --stacktrace :app:testDebugUnitTest
+          -Ptalk2u.cubismSdkRoot=/nonexistent
+          -Ptalk2u.requireCubism=false

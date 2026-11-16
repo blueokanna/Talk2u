@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'package:flutter/widgets.dart';
+import 'package:talk2u/src/l10n/app_strings.dart';
+import 'package:talk2u/src/lexicon/speech_cue_lexicon.dart';
 import 'package:talk2u/src/services/call_session.dart';
 import 'package:talk2u/src/services/moss_tts_service.dart';
 import 'package:talk2u/src/services/sherpa_speech_service.dart';
@@ -32,14 +34,6 @@ class SpeechAnimationCue {
       );
 }
 
-class _CuePattern {
-  final String cue;
-  final int priority;
-  final List<String> terms;
-
-  const _CuePattern(this.cue, this.priority, this.terms);
-}
-
 @immutable
 class SpeechVoice {
   final String name;
@@ -59,11 +53,14 @@ class SpeechVoice {
   );
 
   String get displayLabel {
-    final language = locale.toLowerCase().startsWith('zh') ? '中文' : locale;
+    final strings = AppStrings.current;
+    final language = locale.toLowerCase().startsWith('zh')
+        ? strings.languageChinese
+        : locale;
     final genderLabel = switch (gender) {
-      'male' => '男声',
-      'female' => '女声',
-      _ => '通用',
+      'male' => strings.genderMale,
+      'female' => strings.genderFemale,
+      _ => strings.genderOther,
     };
     return '$name · $language · $genderLabel';
   }
@@ -268,7 +265,7 @@ class OfflineSpeechService extends ChangeNotifier
     if (activeStart != null) return activeStart;
     if (listening || _stopListeningOperation != null) return Future.value();
     if (!SherpaSpeechService.instance.asrReady) {
-      throw StateError('请先安装 SenseVoice 中英文端侧识别模型');
+      throw StateError(AppStrings.current.senseVoiceInstallFirst);
     }
     listening = true;
     lastError = null;
@@ -412,85 +409,7 @@ class OfflineSpeechService extends ChangeNotifier
 
   static List<SpeechAnimationCue> _inferAnimationCuesPlain(String text) {
     final value = text.toLowerCase();
-    const patterns = <_CuePattern>[
-      _CuePattern('wave', 0, ['挥手', '招手', '挥了挥', 'wave', '再见', '拜拜']),
-      _CuePattern('hug', 0, ['抱住', '抱抱', '拥抱', '相拥', 'hug']),
-      _CuePattern('nod', 0, ['点头', '颔首', '答应', '赞同', '明白', 'nod', '嗯嗯']),
-      _CuePattern('emphasis', 1, [
-        '必须',
-        '一定',
-        '注意',
-        '重点',
-        '关键',
-        '终于',
-        '立刻',
-        '绝不能',
-        'important',
-      ]),
-      _CuePattern('thinking', 1, ['为什么', '怎么会', '想一想', '思考', '疑惑', 'question']),
-      _CuePattern('dramatic', 1, [
-        '危险',
-        '紧张',
-        '恐惧',
-        '黑暗',
-        '追逐',
-        '战斗',
-        '危机',
-        '屏住呼吸',
-        'suspense',
-      ]),
-      _CuePattern('angry', 1, [
-        '生气',
-        '愤怒',
-        '恼火',
-        '气愤',
-        '咬牙',
-        '争吵',
-        '怒吼',
-        '讨厌',
-        'angry',
-      ]),
-      _CuePattern('sad', 1, [
-        '难过',
-        '伤心',
-        '悲伤',
-        '哭泣',
-        '眼泪',
-        '失落',
-        '孤独',
-        '遗憾',
-        '沉重',
-        'sad',
-      ]),
-      _CuePattern('shy', 1, ['害羞', '脸红', '不好意思', '低下头', '小声说', 'shy']),
-      _CuePattern('surprise', 1, [
-        '惊讶',
-        '震惊',
-        '突然',
-        '猛地',
-        '意外',
-        '居然',
-        '竟然',
-        '真的吗',
-        'surprise',
-      ]),
-      _CuePattern('happy', 1, [
-        '开心',
-        '高兴',
-        '喜悦',
-        '兴奋',
-        '幸福',
-        '温暖',
-        '轻松',
-        '欢呼',
-        '哈哈',
-        '微笑',
-        '笑了',
-        '太好了',
-        'happy',
-      ]),
-      _CuePattern('greeting', 1, ['你好', '嗨', '哈喽', '欢迎', '👋', 'hello', 'hi ']),
-    ];
+    const patterns = plainSpeechCuePatterns;
     final matches = <SpeechAnimationCue>[];
     for (final pattern in patterns) {
       for (final term in pattern.terms) {
@@ -620,8 +539,8 @@ class OfflineSpeechService extends ChangeNotifier
   };
 
   static List<_SpeechTextSegment> _speechTextSegments(String text) {
-    const strong = '。！？；…\n!?;.';
-    const soft = '，、,：:';
+    const strong = sentenceBreakCharacters;
+    const soft = clauseBreakCharacters;
     final result = <_SpeechTextSegment>[];
     var start = 0;
     for (var index = 0; index < text.length; index++) {
@@ -645,46 +564,15 @@ class OfflineSpeechService extends ChangeNotifier
 
   static String _contextualAnimationCue(String text, int index) {
     final value = text.toLowerCase();
-    if ('？?'.split('').any(value.contains) ||
-        const [
-          '为什么',
-          '怎么',
-          '是否',
-          '想一想',
-          '思考',
-          '疑惑',
-          'question',
-        ].any(value.contains)) {
+    if (questionMarks.split('').any(value.contains) ||
+        thinkingCueTerms.any(value.contains)) {
       return 'thinking';
     }
-    if (const [
-          '必须',
-          '一定',
-          '注意',
-          '重点',
-          '关键',
-          '终于',
-          '立刻',
-          '绝不能',
-          'important',
-        ].any(value.contains) ||
-        value.contains('！') ||
-        value.contains('!')) {
+    if (emphasisCueTerms.any(value.contains) ||
+        exclamationMarks.split('').any(value.contains)) {
       return 'emphasis';
     }
-    if (const [
-      '从前',
-      '那天',
-      '夜里',
-      '这时',
-      '后来',
-      '与此同时',
-      '紧接着',
-      '危机',
-      '战斗',
-      '故事',
-      'suddenly',
-    ].any(value.contains)) {
+    if (dramaticCueTerms.any(value.contains)) {
       return 'dramatic';
     }
     return index.isEven ? 'talking' : 'talkingSoft';

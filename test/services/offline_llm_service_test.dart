@@ -25,13 +25,19 @@ void main() {
         'activeBackend': 'geniex-qairt-npu',
         'activeBackendVerified': false,
       };
-      expect(service.accelerationDescription, contains('等待首轮执行验证'));
+      expect(
+        service.accelerationDescription,
+        contains('awaiting first-run verification'),
+      );
 
       service.runtimeCapabilities = const {
         'activeBackend': 'geniex-qairt-npu',
         'activeBackendVerified': true,
       };
-      expect(service.accelerationDescription, 'Qualcomm QNN HTP/NPU（已验证）');
+      expect(
+        service.accelerationDescription,
+        'Qualcomm QNN HTP/NPU (verified)',
+      );
     },
   );
 
@@ -46,7 +52,10 @@ void main() {
     };
 
     expect(service.hardwareAccelerationVerified, isFalse);
-    expect(service.accelerationDescription, 'GenieX QAIRT/NPU 模型尚未安装');
+    expect(
+      service.accelerationDescription,
+      'GenieX QAIRT/NPU model is not installed',
+    );
   });
 
   group('generation cancellation races', () {

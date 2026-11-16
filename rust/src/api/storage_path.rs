@@ -3,9 +3,9 @@ use super::error_handler::ChatError;
 pub(crate) fn validate_storage_id(value: &str) -> Result<(), ChatError> {
     let valid = !value.is_empty()
         && value.len() <= 128
-        && value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '_');
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
+        });
     if valid {
         Ok(())
     } else {
@@ -27,7 +27,15 @@ mod tests {
 
     #[test]
     fn rejects_path_traversal_and_empty_ids() {
-        for value in ["", "..", "../settings", "a/b", "a\\b", "a\0b", "id with space"] {
+        for value in [
+            "",
+            "..",
+            "../settings",
+            "a/b",
+            "a\\b",
+            "a\0b",
+            "id with space",
+        ] {
             assert!(
                 validate_storage_id(value).is_err(),
                 "expected rejection for {value:?}"

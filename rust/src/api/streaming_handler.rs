@@ -48,6 +48,7 @@ impl ReplyBuffer {
             ChatStreamEvent::ThinkingDelta(delta) => self.thinking.push_str(delta),
             ChatStreamEvent::Done => self.saw_done = true,
             ChatStreamEvent::Error(message) => self.last_error = Some(message.clone()),
+            ChatStreamEvent::RetryReset | ChatStreamEvent::GenerationCancelled => {}
         }
         Some(event)
     }
@@ -187,9 +188,9 @@ impl StreamingHandler {
                 let terminal = matches!(event, ChatStreamEvent::Error(_));
                 on_event(event);
                 if terminal {
-                    let message = reply
-                        .last_error()
-                        .unwrap_or_else(|| format!("[{model_name}] 流式响应中断，服务端没有给出错误原因"));
+                    let message = reply.last_error().unwrap_or_else(|| {
+                        format!("[{model_name}] 流式响应中断，服务端没有给出错误原因")
+                    });
                     return Err(ChatError::StreamError { message });
                 }
             }
@@ -204,9 +205,9 @@ impl StreamingHandler {
                 let terminal = matches!(event, ChatStreamEvent::Error(_));
                 on_event(event);
                 if terminal {
-                    let message = reply
-                        .last_error()
-                        .unwrap_or_else(|| format!("[{model_name}] 流式响应中断，服务端没有给出错误原因"));
+                    let message = reply.last_error().unwrap_or_else(|| {
+                        format!("[{model_name}] 流式响应中断，服务端没有给出错误原因")
+                    });
                     return Err(ChatError::StreamError { message });
                 }
             }
@@ -280,11 +281,10 @@ impl StreamingHandler {
             if event.is_none() {
                 match choice.finish_reason.as_deref() {
                     Some("stop" | "length") => event = Some(ChatStreamEvent::Done),
-                    Some("sensitive") => {
-                        event = Some(ChatStreamEvent::Error(
-                            "内容被服务端的安全策略拦截，本轮回复已中断；请换一种说法或换个话题再试。".to_string(),
-                        ))
-                    }
+                    Some("sensitive") => event = Some(ChatStreamEvent::Error(
+                        "内容被服务端的安全策略拦截，本轮回复已中断；请换一种说法或换个话题再试。"
+                            .to_string(),
+                    )),
                     _ => {}
                 }
             }
@@ -303,14 +303,9 @@ impl StreamingHandler {
         }
 
         if trimmed.starts_with("data: ") || trimmed.starts_with("data:") {
-            let data = if let Some(stripped) = trimmed.strip_prefix("data: ") {
-                stripped
-            } else if let Some(stripped) = trimmed.strip_prefix("data:") {
-                stripped
-            } else {
-                return None;
-            };
-
+            let after_prefix = trimmed.strip_prefix("data:")?;
+            // The SSE spec allows zero or one space after the field colon.
+            let data = after_prefix.strip_prefix(' ').unwrap_or(after_prefix);
             let data = data.trim();
 
             if data == "[DONE]" {

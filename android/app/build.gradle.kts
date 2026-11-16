@@ -56,23 +56,34 @@ val cubismSdkRoot = providers
     .let(::file)
     .canonicalFile
 
+/// Pure-JVM unit tests do not compile the native renderer. CI can therefore run
+/// them without the licensed SDK; every native/package task keeps the strict
+/// check because it genuinely needs Core and the Framework sources.
+val requireCubismSdk = providers
+    .gradleProperty("talk2u.requireCubism")
+    .map { it.trim().lowercase() != "false" }
+    .orElse(true)
+    .get()
+
 require(Regex("v[0-9]+").matches(qnnHtpArch)) {
     "TALK2U_QNN_HTP_ARCH must look like v81: $qnnHtpArch"
 }
 require(qnnSdkRoot == null || qnnJniDirectory == null) {
     "Configure TALK2U_QNN_SDK_ROOT or TALK2U_QNN_JNI_DIR, not both"
 }
-require(cubismSdkRoot.resolve("Core/include/Live2DCubismCore.h").isFile) {
-    "Cubism SDK for Native 5 Core headers are missing: $cubismSdkRoot"
-}
-require(cubismSdkRoot.resolve("Core/lib/android/arm64-v8a/libLive2DCubismCore.a").isFile) {
-    "Cubism SDK for Native 5 arm64 Core library is missing: $cubismSdkRoot"
-}
-require(cubismSdkRoot.resolve("Framework/CMakeLists.txt").isFile) {
-    "Cubism SDK for Native 5 Framework is missing: $cubismSdkRoot"
-}
-require(cubismSdkRoot.resolve("Samples/OpenGL/thirdParty/stb/stb_image.h").isFile) {
-    "Cubism SDK for Native 5 stb dependency is missing: $cubismSdkRoot"
+if (requireCubismSdk) {
+    require(cubismSdkRoot.resolve("Core/include/Live2DCubismCore.h").isFile) {
+        "Cubism SDK for Native 5 Core headers are missing: $cubismSdkRoot"
+    }
+    require(cubismSdkRoot.resolve("Core/lib/android/arm64-v8a/libLive2DCubismCore.a").isFile) {
+        "Cubism SDK for Native 5 arm64 Core library is missing: $cubismSdkRoot"
+    }
+    require(cubismSdkRoot.resolve("Framework/CMakeLists.txt").isFile) {
+        "Cubism SDK for Native 5 Framework is missing: $cubismSdkRoot"
+    }
+    require(cubismSdkRoot.resolve("Samples/OpenGL/thirdParty/stb/stb_image.h").isFile) {
+        "Cubism SDK for Native 5 stb dependency is missing: $cubismSdkRoot"
+    }
 }
 
 qnnJniDirectory?.let {
@@ -155,6 +166,16 @@ fun File.sha256(): String {
     return digest.digest().joinToString("") { "%02x".format(it) }
 }
 
+/// Pins text sources by canonical LF content, not by checkout bytes. Git's
+/// `core.autocrlf` turns the same blob into CRLF on Windows, which would
+/// otherwise fail this gate on Windows and pass on Linux for identical source.
+fun File.sha256Text(): String {
+    val normalized = readText(Charsets.UTF_8).replace("\r\n", "\n")
+    return MessageDigest.getInstance("SHA-256")
+        .digest(normalized.toByteArray(Charsets.UTF_8))
+        .joinToString("") { "%02x".format(it) }
+}
+
 fun ByteArray.containsAscii(value: String): Boolean {
     val marker = value.toByteArray(Charsets.US_ASCII)
     if (marker.isEmpty()) return true
@@ -177,7 +198,7 @@ require(
         "2fd72fb234ab08db037fca8458f495533512498598053709b947093ca9e8fb2c",
 ) { "libonnxruntime_providers_qnn.so is not the validated Plugin EP 2.4.0 build" }
 require(
-    file("src/main/cpp/third_party/onnxruntime/include/onnxruntime_c_api.h").sha256() ==
+    file("src/main/cpp/third_party/onnxruntime/include/onnxruntime_c_api.h").sha256Text() ==
         "f09c0d8584aae94dced9bb05cff8579f4f6c5c4a2271413ea8ab27bd0bbf46aa",
 ) { "ONNX Runtime headers do not match the validated API 26 build" }
 mapOf(
@@ -272,6 +293,11 @@ dependencies {
     implementation(genieXRuntimeAar)
     implementation(files(sherpaQnnAar))
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+
+    // Pure-JVM tests for logic that must not depend on a device: chipset
+    // resolution, manifest checks, and other native-side parsing.
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }
 
 val qnnSdkJniDirectory = layout.buildDirectory.dir("generated/qnn/jniLibs")

@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:talk2u/src/l10n/app_strings.dart';
 
 class Live2dModelImporter {
   Live2dModelImporter._();
@@ -29,7 +30,7 @@ class Live2dModelImporter {
           ?.where((path) => path.trim().isNotEmpty)
           .toList(growable: false);
       if (paths == null || paths.isEmpty) {
-        throw const FormatException('原生端没有返回 Live2D 模型列表');
+        throw FormatException(AppStrings.current.live2dNativeListMissing);
       }
       return paths;
     }
@@ -38,7 +39,7 @@ class Live2dModelImporter {
         defaultTargetPlatform == TargetPlatform.macOS) {
       return _importArchiveModelsOnDesktop(archivePath);
     }
-    throw UnsupportedError('当前平台暂不支持导入 Live2D ZIP');
+    throw UnsupportedError(AppStrings.current.live2dImportUnsupported);
   }
 
   static Future<String> installBundledMao() async {
@@ -47,7 +48,7 @@ class Live2dModelImporter {
         'installBundledMao',
       );
       if (modelPath == null || modelPath.isEmpty) {
-        throw const FormatException('原生端没有返回内置 Live2D 模型路径');
+        throw FormatException(AppStrings.current.live2dBuiltinPathMissing);
       }
       return modelPath;
     }
@@ -77,9 +78,15 @@ class Live2dModelImporter {
     Directory? supportDirectory,
   }) async {
     final source = File(archivePath);
-    if (!source.existsSync()) throw const FileSystemException('找不到 ZIP 文件');
+    if (!source.existsSync()) {
+      throw FileSystemException(AppStrings.current.live2dZipNotFound);
+    }
     if (source.lengthSync() > _maximumArchiveBytes) {
-      throw const FormatException('Live2D ZIP 超过 512 MB 导入限制');
+      throw FormatException(
+        AppStrings.current.live2dZipTooLarge(
+          _maximumArchiveBytes ~/ (1024 * 1024),
+        ),
+      );
     }
 
     final support = supportDirectory ?? await getApplicationSupportDirectory();
@@ -96,9 +103,11 @@ class Live2dModelImporter {
     try {
       input = InputFileStream(source.path);
       final archive = ZipDecoder().decodeStream(input);
-      if (archive.isEmpty) throw const FormatException('ZIP 文件为空或格式无效');
+      if (archive.isEmpty) {
+        throw FormatException(AppStrings.current.live2dZipEmpty);
+      }
       if (archive.length > _maximumEntries) {
-        throw const FormatException('ZIP 文件条目过多');
+        throw FormatException(AppStrings.current.live2dZipTooManyEntries);
       }
 
       var extractedBytes = 0;
@@ -107,14 +116,20 @@ class Live2dModelImporter {
         if (relative == null) continue;
         extractedBytes += entry.size;
         if (extractedBytes > _maximumArchiveBytes) {
-          throw const FormatException('解压后模型超过 512 MB 限制');
+          throw FormatException(
+            AppStrings.current.live2dUnpackedTooLarge(
+              _maximumArchiveBytes ~/ (1024 * 1024),
+            ),
+          );
         }
         final outputPath = p.joinAll([
           destination.path,
           ...p.posix.split(relative),
         ]);
         if (!_isWithin(destination.path, outputPath)) {
-          throw FormatException('ZIP 包含越界路径: ${entry.name}');
+          throw FormatException(
+            AppStrings.current.live2dZipUnsafeEntry(entry.name),
+          );
         }
         if (entry.isDirectory) {
           Directory(outputPath).createSync(recursive: true);
@@ -127,7 +142,9 @@ class Live2dModelImporter {
             output.closeSync();
           }
         } else {
-          throw FormatException('ZIP 包含不支持的链接条目: ${entry.name}');
+          throw FormatException(
+            AppStrings.current.live2dZipUnsupportedLink(entry.name),
+          );
         }
       }
 
@@ -139,7 +156,7 @@ class Live2dModelImporter {
               .toList()
             ..sort((left, right) => left.path.compareTo(right.path));
       if (modelFiles.isEmpty) {
-        throw const FormatException('ZIP 中没有 .model3.json');
+        throw FormatException(AppStrings.current.live2dZipNoModelJson);
       }
       for (final modelFile in modelFiles) {
         _validateAndNormalizeModel(modelFile, destination);
@@ -159,11 +176,11 @@ class Live2dModelImporter {
     final source = rawName.replaceAll('\\', '/');
     if (source.isEmpty) return null;
     if (source.startsWith('/') || RegExp(r'^[A-Za-z]:').hasMatch(source)) {
-      throw FormatException('ZIP 包含绝对路径: $rawName');
+      throw FormatException(AppStrings.current.live2dZipAbsolutePath(rawName));
     }
     final segments = p.posix.split(source);
     if (segments.contains('..')) {
-      throw FormatException('ZIP 包含不安全路径: $rawName');
+      throw FormatException(AppStrings.current.live2dZipUnsafePath(rawName));
     }
     final normalized = p.posix.normalize(source);
     return normalized == '.' ? null : normalized;
@@ -179,14 +196,14 @@ class Live2dModelImporter {
   static void _validateAndNormalizeModel(File modelFile, Directory root) {
     final decoded = jsonDecode(modelFile.readAsStringSync());
     if (decoded is! Map<String, dynamic>) {
-      throw const FormatException('model3.json 不是 JSON 对象');
+      throw FormatException(AppStrings.current.live2dModelJsonNotObject);
     }
     if (decoded['Version'] != 3) {
-      throw const FormatException('只支持 Cubism .model3.json Version 3');
+      throw FormatException(AppStrings.current.live2dModelJsonVersion);
     }
     final rawReferences = decoded['FileReferences'];
     if (rawReferences is! Map) {
-      throw const FormatException('model3.json 缺少 FileReferences');
+      throw FormatException(AppStrings.current.live2dModelJsonFileReferences);
     }
     final references = Map<String, dynamic>.from(rawReferences);
     decoded['FileReferences'] = references;
@@ -202,16 +219,18 @@ class Live2dModelImporter {
 
     final moc = references['Moc'];
     if (moc is! String || moc.trim().isEmpty) {
-      throw const FormatException('model3.json 缺少 Moc 文件引用');
+      throw FormatException(AppStrings.current.live2dModelJsonMoc);
     }
     references['Moc'] = normalizeReference(moc);
     final textures = references['Textures'];
     if (textures is! List || textures.isEmpty) {
-      throw const FormatException('model3.json 没有纹理引用');
+      throw FormatException(AppStrings.current.live2dModelJsonNoTextures);
     }
     for (var index = 0; index < textures.length; index++) {
       final value = textures[index];
-      if (value is! String) throw const FormatException('纹理引用格式无效');
+      if (value is! String) {
+        throw FormatException(AppStrings.current.live2dTextureReferenceInvalid);
+      }
       textures[index] = normalizeReference(value);
     }
 
@@ -250,11 +269,15 @@ class Live2dModelImporter {
       final header = handle.readSync(8);
       if (header.length != 8 ||
           ascii.decode(header.take(4).toList()) != 'MOC3') {
-        throw FormatException('${p.basename(mocFile.path)} 不是有效的 moc3 文件');
+        throw FormatException(
+          AppStrings.current.live2dMocInvalid(p.basename(mocFile.path)),
+        );
       }
       final version = header[4];
       if (version < 1 || version > 5) {
-        throw FormatException('当前 Cubism Core 不支持 moc3 版本 $version');
+        throw FormatException(
+          AppStrings.current.live2dMocVersionUnsupported('$version'),
+        );
       }
     } finally {
       handle.closeSync();
@@ -267,7 +290,7 @@ class Live2dModelImporter {
         File(p.join(modelDirectory.path, displayInfo)).readAsStringSync(),
       );
       if (value is! Map || value['Version'] != 3) {
-        throw const FormatException('cdi3.json 的 Version 必须为 3');
+        throw FormatException(AppStrings.current.live2dCdi3Version);
       }
       displayInfoJson = Map<String, dynamic>.from(value);
     }
@@ -483,7 +506,9 @@ class Live2dModelImporter {
     if (reference.contains('://') ||
         reference.startsWith('/') ||
         RegExp(r'^[A-Za-z]:').hasMatch(reference)) {
-      throw FormatException('模型引用了非本地资源: $rawReference');
+      throw FormatException(
+        AppStrings.current.live2dReferenceRemote(rawReference),
+      );
     }
 
     var current = modelDirectory.absolute;
@@ -492,7 +517,9 @@ class Live2dModelImporter {
       if (segment == '..') {
         current = current.parent;
         if (!_isWithin(root.path, current.path)) {
-          throw FormatException('模型引用路径越界: $rawReference');
+          throw FormatException(
+            AppStrings.current.live2dReferenceTraversal(rawReference),
+          );
         }
         continue;
       }
@@ -504,20 +531,28 @@ class Live2dModelImporter {
           )
           .toList();
       if (matches.length != 1) {
-        throw FormatException('模型资源缺失或大小写冲突: $rawReference');
+        throw FormatException(
+          AppStrings.current.live2dReferenceConflict(rawReference),
+        );
       }
       final match = matches.single;
       if (match is Directory) {
         current = match;
       } else if (match is File && segment == p.posix.basename(reference)) {
         if (!_isWithin(root.path, match.path)) {
-          throw FormatException('模型引用路径越界: $rawReference');
+          throw FormatException(
+            AppStrings.current.live2dReferenceTraversal(rawReference),
+          );
         }
         return match;
       } else {
-        throw FormatException('模型资源路径无效: $rawReference');
+        throw FormatException(
+          AppStrings.current.live2dReferenceInvalid(rawReference),
+        );
       }
     }
-    throw FormatException('模型资源缺失: $rawReference');
+    throw FormatException(
+      AppStrings.current.live2dReferenceMissing(rawReference),
+    );
   }
 }

@@ -63,7 +63,8 @@ class UiPreferences extends ChangeNotifier {
   Future<void> _read() async {
     if (!await _file.exists()) return;
     try {
-      final value = jsonDecode(await _file.readAsString()) as Map<String, dynamic>;
+      final value =
+          jsonDecode(await _file.readAsString()) as Map<String, dynamic>;
       themeMode = ThemeMode.values.firstWhere(
         (item) => item.name == value['themeMode'],
         orElse: () => ThemeMode.system,

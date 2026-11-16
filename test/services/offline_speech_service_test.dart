@@ -43,7 +43,7 @@ void main() {
     expect(capabilities.ttsVoice, 'zh-cn-offline');
     expect(capabilities.ttsVoices, hasLength(2));
     expect(capabilities.ttsVoices.first.gender, 'male');
-    expect(capabilities.ttsVoices.first.displayLabel, contains('男声'));
+    expect(capabilities.ttsVoices.first.displayLabel, contains('Male'));
   });
 
   group('OfflineSpeechService animation cue', () {
@@ -167,7 +167,7 @@ void main() {
 
       expect(chinese.where((voice) => voice.gender == 'male'), hasLength(3));
       expect(chinese.where((voice) => voice.gender == 'female'), hasLength(3));
-      expect(MossTtsService.modelBytes, 717414286);
+      expect(MossTtsService.estimatedModelBytes, 717414286);
     });
 
     test('splits long narrative text on semantic boundaries', () {

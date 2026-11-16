@@ -65,7 +65,10 @@ pub(crate) fn send_buffered(
     } else {
         request.body(body)
     };
-    let response = request.timeout(read_timeout).send().map_err(map_transport_error)?;
+    let response = request
+        .timeout(read_timeout)
+        .send()
+        .map_err(map_transport_error)?;
     let status = response.status.as_u16();
     let bytes = response
         .body
@@ -164,10 +167,7 @@ fn attempt_once(
                     }
                     text.push_str(&String::from_utf8_lossy(&chunk));
                 }
-                return (
-                    false,
-                    Err(ChatError::from_http_error(status, &text)),
-                );
+                return (false, Err(ChatError::from_http_error(status, &text)));
             }
             let mut emitted = false;
             while let Ok(chunk) = chunks.recv() {
@@ -198,9 +198,11 @@ fn send_frame(
     sender: &mpsc::Sender<Result<Vec<u8>, ChatError>>,
     frame: Vec<u8>,
 ) -> Result<(), ChatError> {
-    sender.blocking_send(Ok(frame)).map_err(|_| ChatError::StreamError {
-        message: "响应流已被使用者关闭".to_string(),
-    })
+    sender
+        .blocking_send(Ok(frame))
+        .map_err(|_| ChatError::StreamError {
+            message: "响应流已被使用者关闭".to_string(),
+        })
 }
 
 fn is_success(status: u16) -> bool {
@@ -327,11 +329,10 @@ pub(crate) fn headers_from_pairs(
         }
         headers.insert(
             courierust::courierust_http::header::HeaderName::from_static(name),
-            courierust::courierust_http::header::HeaderValue::from_bytes(value.as_bytes()).map_err(
-                |error| ChatError::AuthError {
+            courierust::courierust_http::header::HeaderValue::from_bytes(value.as_bytes())
+                .map_err(|error| ChatError::AuthError {
                     message: format!("请求头 {name} 的值无效: {error:?}"),
-                },
-            )?,
+                })?,
         );
     }
     Ok(headers)
@@ -347,7 +348,10 @@ pub(crate) fn validate_http_url(value: &str) -> Result<String, String> {
     let parsed = courierust::courierust_http::uri::Url::parse(trimmed)
         .map_err(|error| format!("URL 无效: {error:?}"))?;
     if parsed.scheme != "http" && parsed.scheme != "https" {
-        return Err(format!("URL 必须是 HTTP(S) 地址，实际为 {}://", parsed.scheme));
+        return Err(format!(
+            "URL 必须是 HTTP(S) 地址，实际为 {}://",
+            parsed.scheme
+        ));
     }
     if parsed.host.is_empty() {
         return Err("URL 缺少主机名".to_string());
@@ -394,7 +398,10 @@ mod tests {
     #[test]
     fn gives_up_at_the_attempt_cap() {
         let delay = Duration::from_millis(1_000);
-        assert_eq!(next_delay(MAX_ATTEMPTS - 1, &transient(), false, delay), None);
+        assert_eq!(
+            next_delay(MAX_ATTEMPTS - 1, &transient(), false, delay),
+            None
+        );
     }
 
     #[test]
@@ -487,36 +494,39 @@ mod tests {
         let address = server.local_addr().expect("local addr");
 
         let handle = server
-            .serve_background(move |_request: Request<ServerBody>| -> Response<ServerBody> {
-                let (sender, body) = courierust::courierust_body::channel();
-                let signal = Arc::clone(&first_was_received);
-                std::thread::spawn(move || {
-                    if sender
-                        .send(Bytes::from_static(b"data: {\"n\":1}\n\n"))
-                        .is_err()
-                    {
-                        return;
-                    }
-                    // Blocks until the client proves it saw frame one; on a
-                    // buffering transport nothing is ever sent afterwards.
-                    let waiting = signal.lock().map(|rx| rx.recv_timeout(Duration::from_secs(5)));
-                    match waiting.unwrap_or(Err(RecvTimeoutError::Disconnected)) {
-                        Ok(()) => {
-                            let _ = sender
-                                .send(Bytes::from_static(b"data: [DONE]\n\n"));
+            .serve_background(
+                move |_request: Request<ServerBody>| -> Response<ServerBody> {
+                    let (sender, body) = courierust::courierust_body::channel();
+                    let signal = Arc::clone(&first_was_received);
+                    std::thread::spawn(move || {
+                        if sender
+                            .send(Bytes::from_static(b"data: {\"n\":1}\n\n"))
+                            .is_err()
+                        {
+                            return;
                         }
-                        Err(RecvTimeoutError::Timeout) => {}
-                        Err(RecvTimeoutError::Disconnected) => {}
-                    }
-                });
-                let mut response = Response::with_status(200.into());
-                response.headers.insert(
-                    HeaderName::from_static("content-type"),
-                    HeaderValue::from_static("text/event-stream"),
-                );
-                response.body = body;
-                response
-            })
+                        // Blocks until the client proves it saw frame one; on a
+                        // buffering transport nothing is ever sent afterwards.
+                        let waiting = signal
+                            .lock()
+                            .map(|rx| rx.recv_timeout(Duration::from_secs(5)));
+                        match waiting.unwrap_or(Err(RecvTimeoutError::Disconnected)) {
+                            Ok(()) => {
+                                let _ = sender.send(Bytes::from_static(b"data: [DONE]\n\n"));
+                            }
+                            Err(RecvTimeoutError::Timeout) => {}
+                            Err(RecvTimeoutError::Disconnected) => {}
+                        }
+                    });
+                    let mut response = Response::with_status(200.into());
+                    response.headers.insert(
+                        HeaderName::from_static("content-type"),
+                        HeaderValue::from_static("text/event-stream"),
+                    );
+                    response.body = body;
+                    response
+                },
+            )
             .expect("serve");
 
         let mut stream = post_stream(StreamRequest {

@@ -122,9 +122,10 @@ fn persist_interrupted_reply(
 }
 
 #[derive(Default, Clone)]
-struct PartialReply {
-    content: String,
-    thinking: String,
+#[flutter_rust_bridge::frb(ignore)]
+pub(crate) struct PartialReply {
+    pub(crate) content: String,
+    pub(crate) thinking: String,
 }
 
 impl PartialReply {
@@ -132,7 +133,7 @@ impl PartialReply {
         match event {
             ChatStreamEvent::ContentDelta(delta) => self.content.push_str(delta),
             ChatStreamEvent::ThinkingDelta(delta) => self.thinking.push_str(delta),
-            ChatStreamEvent::Error(error) if error == "__RETRY_RESET__" => {
+            ChatStreamEvent::RetryReset => {
                 self.content.clear();
                 self.thinking.clear();
             }
@@ -482,9 +483,7 @@ pub async fn send_message(
     let (registration, mut cancel) = register_generation(&conversation_id);
     let gate = registration.gate.clone();
     let Some(permit) = run_until_cancelled(&mut cancel, gate.lock_owned()).await else {
-        let _ = sink.add(ChatStreamEvent::Error(
-            "__GENERATION_CANCELLED__".to_string(),
-        ));
+        let _ = sink.add(ChatStreamEvent::GenerationCancelled);
         let _ = sink.add(ChatStreamEvent::Done);
         return;
     };
@@ -496,11 +495,13 @@ pub async fn send_message(
     let pipeline_result = run_until_cancelled(
         &mut cancel,
         engine.send_message_with_snapshot(
-            &conversation_id,
-            &content,
-            &chat_model,
-            &thinking_model,
-            use_thinking_pipeline,
+            super::chat_engine::SendMessageRequest {
+                conversation_id: &conversation_id,
+                content: &content,
+                chat_model: &chat_model,
+                thinking_model: &thinking_model,
+                enable_thinking: use_thinking_pipeline,
+            },
             |conversation| {
                 *snapshot.lock().unwrap_or_else(|error| error.into_inner()) =
                     Some(conversation.clone());
@@ -544,9 +545,7 @@ pub async fn send_message(
                 ) {
                     let _ = sink.add(ChatStreamEvent::Error(error.to_string()));
                 }
-                let _ = sink.add(ChatStreamEvent::Error(
-                    "__GENERATION_CANCELLED__".to_string(),
-                ));
+                let _ = sink.add(ChatStreamEvent::GenerationCancelled);
             }
         }
     }
@@ -587,9 +586,7 @@ pub async fn regenerate_response(
     let (registration, mut cancel) = register_generation(&conversation_id);
     let gate = registration.gate.clone();
     let Some(permit) = run_until_cancelled(&mut cancel, gate.lock_owned()).await else {
-        let _ = sink.add(ChatStreamEvent::Error(
-            "__GENERATION_CANCELLED__".to_string(),
-        ));
+        let _ = sink.add(ChatStreamEvent::GenerationCancelled);
         let _ = sink.add(ChatStreamEvent::Done);
         return;
     };
@@ -648,9 +645,7 @@ pub async fn regenerate_response(
                 ) {
                     let _ = sink.add(ChatStreamEvent::Error(error.to_string()));
                 }
-                let _ = sink.add(ChatStreamEvent::Error(
-                    "__GENERATION_CANCELLED__".to_string(),
-                ));
+                let _ = sink.add(ChatStreamEvent::GenerationCancelled);
             }
         }
     }
@@ -796,7 +791,7 @@ mod tests {
         partial.record(&ChatStreamEvent::ThinkingDelta(
             "discarded thinking".to_string(),
         ));
-        partial.record(&ChatStreamEvent::Error("__RETRY_RESET__".to_string()));
+        partial.record(&ChatStreamEvent::RetryReset);
         partial.record(&ChatStreamEvent::ContentDelta("visible answer".to_string()));
         partial.record(&ChatStreamEvent::ThinkingDelta(
             "visible thinking".to_string(),

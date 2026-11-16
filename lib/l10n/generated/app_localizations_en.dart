@@ -53,6 +53,87 @@ class AppLocalizationsEn extends AppLocalizations {
   String get cameraObservationClose => 'Close';
 
   @override
+  String pauseDownloadFailed(String error) {
+    return 'Could not pause the download: $error';
+  }
+
+  @override
+  String get qwenCapabilitiesFailed =>
+      'Could not check the Qwen3 QAIRT/NPU model state. Try again.';
+
+  @override
+  String get qwenDownloadFailed =>
+      'The Qwen3 download was interrupted. Partial data is kept; tap download to resume.';
+
+  @override
+  String get qwenDownloadPaused =>
+      'Download paused. Partial data is kept; tap download to continue.';
+
+  @override
+  String get qwenLoadFailed =>
+      'The Qwen3 QAIRT/NPU model failed to load. Try again.';
+
+  @override
+  String get qwenGenerateFailed =>
+      'On-device Qwen3 generation failed. Try again.';
+
+  @override
+  String get unknownError => 'The operation failed. Try again.';
+
+  @override
+  String get mossErrorRuntime =>
+      'The Qualcomm QNN HTP runtime required by MOSS is unavailable.';
+
+  @override
+  String get mossErrorInit =>
+      'MOSS QNN initialization failed. Try again or re-import the deployment package.';
+
+  @override
+  String get mossErrorModelMissing =>
+      'The MOSS QNN HTP v81 deployment package is not installed.';
+
+  @override
+  String get mossErrorSynthesis => 'MOSS speech synthesis failed. Try again.';
+
+  @override
+  String get mossErrorImport =>
+      'The MOSS deployment package could not be imported. Check the files and hashes.';
+
+  @override
+  String get mossErrorImportBusy =>
+      'Another MOSS import is already running. Wait for it to finish.';
+
+  @override
+  String get mossCancelled => 'The MOSS operation was cancelled.';
+
+  @override
+  String get mossErrorDelete =>
+      'The MOSS deployment package could not be deleted. Try again.';
+
+  @override
+  String get senseVoiceErrorCheck =>
+      'Could not check the SenseVoice model. Try again.';
+
+  @override
+  String get senseVoiceErrorRecognition =>
+      'SenseVoice recognition failed. Try again or reinstall the model.';
+
+  @override
+  String get senseVoiceErrorDownload =>
+      'The SenseVoice download was interrupted. Try again; partial data is kept.';
+
+  @override
+  String get senseVoiceErrorRecording =>
+      'Microphone recording failed. Check the permission and whether another app is using it.';
+
+  @override
+  String get senseVoiceErrorImport =>
+      'The SenseVoice model could not be imported. Check the ZIP file.';
+
+  @override
+  String get senseVoiceCancelled => 'The SenseVoice operation was cancelled.';
+
+  @override
   String get live2dDesktopHostMissing =>
       'The desktop Live2D host is not installed: assets/live2d/index.html and a licensed Cubism Core for Web are missing. Add them as described in the README and rebuild; Android is unaffected.';
 
@@ -96,7 +177,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get languageSystem => 'System language';
 
   @override
-  String get languageChinese => 'Simplified Chinese';
+  String get languageChinese => 'Chinese';
 
   @override
   String get languageEnglish => 'English';
@@ -112,6 +193,28 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get mossSpeech => 'MOSS on-device speech';
+
+  @override
+  String mossPackageMissing(String size) {
+    return 'Not installed · the package is about $size from your model source';
+  }
+
+  @override
+  String get mossRuntimeReady => 'MOSS QNN HTP initialized';
+
+  @override
+  String get mossChooseDirectory =>
+      'Choose the directory containing moss-qnn-deployment.json';
+
+  @override
+  String get mossChooseZip => 'Choose the moss-qnn-v81-streaming.zip file';
+
+  @override
+  String get mossImporting => 'Importing the model';
+
+  @override
+  String get mossImportedInitialized =>
+      'MOSS QNN HTP model imported and initialized';
 
   @override
   String get startupPreparing => 'Preparing local conversation...';
@@ -859,13 +962,377 @@ class AppLocalizationsEn extends AppLocalizations {
   String get live2dInvalidStatus => 'Live2D returned an invalid status';
 
   @override
-  String get callFullDuplex => 'Hands-free ? hardware AEC (interrupt anytime)';
+  String get callFullDuplex => 'Hands-free · hardware AEC (interrupt anytime)';
 
   @override
   String get callHalfDuplex =>
-      'Hands-free ? half duplex (mic paused during playback)';
+      'Hands-free · half duplex (mic paused during playback)';
 
   @override
   String get diagnosticsInvalidJson =>
       'Diagnostics result is not a JSON object';
+
+  @override
+  String get micPermissionDenied => 'Microphone permission was not granted';
+
+  @override
+  String get currentOnlinePlatform => 'the current online platform';
+
+  @override
+  String get offlineProviderName => 'On-device AI';
+
+  @override
+  String mossPackageIncomplete(String files) {
+    return 'The deployment package is incomplete. Missing: $files';
+  }
+
+  @override
+  String get captureReleased => 'Audio capture has been released';
+
+  @override
+  String get live2dImportUnsupported =>
+      'Importing Live2D ZIP files is not supported on this platform';
+
+  @override
+  String get live2dNativeListMissing =>
+      'The native layer returned no Live2D model list';
+
+  @override
+  String get live2dBuiltinPathMissing =>
+      'The native layer returned no bundled Live2D model path';
+
+  @override
+  String get live2dZipNotFound => 'ZIP file not found';
+
+  @override
+  String live2dZipTooLarge(int limitMb) {
+    return 'Live2D ZIP exceeds the $limitMb MB import limit';
+  }
+
+  @override
+  String get live2dZipEmpty => 'ZIP file is empty or malformed';
+
+  @override
+  String get live2dZipTooManyEntries => 'ZIP file contains too many entries';
+
+  @override
+  String live2dUnpackedTooLarge(int limitMb) {
+    return 'Unpacked model exceeds the $limitMb MB limit';
+  }
+
+  @override
+  String live2dZipUnsafeEntry(String entry) {
+    return 'ZIP contains an out-of-bounds path: $entry';
+  }
+
+  @override
+  String live2dZipUnsupportedLink(String entry) {
+    return 'ZIP contains an unsupported link entry: $entry';
+  }
+
+  @override
+  String get live2dZipNoModelJson => 'ZIP contains no .model3.json';
+
+  @override
+  String live2dZipAbsolutePath(String name) {
+    return 'ZIP contains an absolute path: $name';
+  }
+
+  @override
+  String live2dZipUnsafePath(String name) {
+    return 'ZIP contains an unsafe path: $name';
+  }
+
+  @override
+  String get live2dModelJsonNotObject => 'model3.json is not a JSON object';
+
+  @override
+  String get live2dModelJsonVersion =>
+      'Only Cubism .model3.json Version 3 is supported';
+
+  @override
+  String get live2dModelJsonFileReferences =>
+      'model3.json is missing FileReferences';
+
+  @override
+  String get live2dModelJsonMoc => 'model3.json has no Moc file reference';
+
+  @override
+  String get live2dModelJsonNoTextures =>
+      'model3.json has no texture references';
+
+  @override
+  String get live2dTextureReferenceInvalid => 'Texture reference is malformed';
+
+  @override
+  String live2dMocInvalid(String file) {
+    return '$file is not a valid moc3 file';
+  }
+
+  @override
+  String live2dMocVersionUnsupported(String version) {
+    return 'Cubism Core does not support moc3 version $version';
+  }
+
+  @override
+  String get live2dCdi3Version => 'cdi3.json Version must be 3';
+
+  @override
+  String live2dReferenceRemote(String ref) {
+    return 'Model references a non-local resource: $ref';
+  }
+
+  @override
+  String live2dReferenceTraversal(String ref) {
+    return 'Model reference escapes the model directory: $ref';
+  }
+
+  @override
+  String live2dReferenceConflict(String ref) {
+    return 'Model resource is missing or has a case conflict: $ref';
+  }
+
+  @override
+  String live2dReferenceInvalid(String ref) {
+    return 'Model reference path is invalid: $ref';
+  }
+
+  @override
+  String live2dReferenceMissing(String ref) {
+    return 'Model resource is missing: $ref';
+  }
+
+  @override
+  String senseVoiceCheckFailed(String error) {
+    return 'Unable to inspect the on-device recognition models: $error';
+  }
+
+  @override
+  String get senseVoiceUnsupported =>
+      'On-device speech recognition is not supported on this platform';
+
+  @override
+  String get senseVoiceModelIncomplete =>
+      'SenseVoice model files are incomplete';
+
+  @override
+  String get senseVoiceImportIncomplete => 'SenseVoice import did not finish';
+
+  @override
+  String get voiceDownloadRangeInvalid => 'Voice model resume range is invalid';
+
+  @override
+  String voiceDownloadHttp(int status) {
+    return 'Voice model download returned HTTP $status';
+  }
+
+  @override
+  String get voiceDownloadTruncated =>
+      'Voice model connection closed early; waiting to resume';
+
+  @override
+  String get voiceDownloadChecksumFailed =>
+      'Voice model SHA-256 verification failed';
+
+  @override
+  String get voiceDownloadSourcesUnavailable =>
+      'No voice model download source is reachable';
+
+  @override
+  String get voiceArchiveDirInvalid =>
+      'Speech model archive directory is invalid';
+
+  @override
+  String get senseVoiceContextIncomplete =>
+      'SenseVoice QNN context files are incomplete';
+
+  @override
+  String get voiceDownloadCancelled => 'Voice model download cancelled';
+
+  @override
+  String get speechStopFirst => 'Stop speech recognition first';
+
+  @override
+  String get senseVoiceNotInstalled =>
+      'Download the SenseVoice offline model first';
+
+  @override
+  String get senseVoiceInstallFirst =>
+      'Install the SenseVoice on-device recognition model first';
+
+  @override
+  String micStopFailed(String error) {
+    return 'Unable to stop microphone recording: $error';
+  }
+
+  @override
+  String get senseVoiceNoResult =>
+      'SenseVoice QNN returned no recognition result';
+
+  @override
+  String get offlineGenerationStopped => 'On-device generation stopped';
+
+  @override
+  String get qnnAccelVerified => 'Qualcomm QNN HTP/NPU (verified)';
+
+  @override
+  String get qnnAccelLoadedPending =>
+      'Qualcomm QNN HTP/NPU loaded, awaiting first-run verification';
+
+  @override
+  String get geniexNotLoaded => 'GenieX QAIRT/NPU not loaded yet';
+
+  @override
+  String get geniexNotInstalled => 'GenieX QAIRT/NPU model is not installed';
+
+  @override
+  String qwenCapabilitiesCheckFailed(String model, String error) {
+    return 'Unable to inspect the $model QAIRT/NPU model: $error';
+  }
+
+  @override
+  String qwenAndroidOnly(String model) {
+    return '$model QAIRT/NPU models are only supported on Android';
+  }
+
+  @override
+  String get qwenDownloadedNotDetected =>
+      'The Qwen3 QAIRT/NPU model was not detected after the download finished';
+
+  @override
+  String get qwenDownloadPausedDetail =>
+      'Download paused and the resume point was kept. Tap download to continue.';
+
+  @override
+  String qwenDownloadFailedDetail(String raw) {
+    return '$raw\nDownloaded bytes were kept. Tap download to resume from the breakpoint.';
+  }
+
+  @override
+  String get waitForCurrentReply =>
+      'Wait for the current on-device reply to finish';
+
+  @override
+  String qwenDownloadFirst(String model) {
+    return 'Download the $model QAIRT/NPU model first';
+  }
+
+  @override
+  String get geniexLoadResultMissing => 'GenieX returned no model load result';
+
+  @override
+  String get qwenBackendRejected =>
+      'Refusing a Qwen3 execution backend that is not QAIRT/NPU';
+
+  @override
+  String qwenLoadFailedDetail(String error) {
+    return 'Qwen3 QAIRT/NPU model load failed: $error';
+  }
+
+  @override
+  String get offlineModelBusy =>
+      'The on-device model is still generating the previous reply';
+
+  @override
+  String get qwenEmptyResponse => 'Qwen3 QAIRT/NPU returned no text';
+
+  @override
+  String qwenGenerateFailedDetail(String error) {
+    return 'Qwen3 QAIRT/NPU on-device generation failed: $error';
+  }
+
+  @override
+  String get mossAccelInitialized => 'Qualcomm QNN HTP + ORT CPU · initialized';
+
+  @override
+  String get mossAccelInitializing => 'QNN HTP initializing';
+
+  @override
+  String get mossAccelCandidate => 'QNN HTP candidate · not yet verified';
+
+  @override
+  String mossRuntimeInitFailed(String error) {
+    return 'Unable to initialize the MOSS QNN runtime automatically: $error';
+  }
+
+  @override
+  String get mossRuntimeNotReady => 'The native MOSS runtime is not ready';
+
+  @override
+  String get mossImportAndroidOnly =>
+      'Importing a MOSS QNN model is only supported on Android';
+
+  @override
+  String get mossZipImportAndroidOnly =>
+      'Importing a MOSS QNN ZIP is only supported on Android';
+
+  @override
+  String get mossImportFirst =>
+      'Import a MOSS QNN HTP v81 deployment package first';
+
+  @override
+  String get mossProviderMissing =>
+      'MOSS-TTS-Nano returned no valid execution provider';
+
+  @override
+  String get mossNoAudio => 'MOSS-TTS-Nano produced no playable audio';
+
+  @override
+  String get mossAudioInvalid =>
+      'The audio produced by MOSS-TTS-Nano is invalid';
+
+  @override
+  String get mossImportBusyWait =>
+      'Wait for the current model import to finish';
+
+  @override
+  String get mossWavInvalid => 'MOSS-TTS-Nano produced an invalid WAV file';
+
+  @override
+  String get mossWavNotPcm => 'The MOSS WAV file is not PCM';
+
+  @override
+  String get mossWavPcmInvalid => 'The MOSS WAV PCM parameters are invalid';
+
+  @override
+  String get mossWavPcmTruncated => 'The MOSS WAV PCM data is incomplete';
+
+  @override
+  String editResendFailed(String error) {
+    return 'Unable to resend the edited message: $error';
+  }
+
+  @override
+  String get responseInterrupted =>
+      'The AI response was interrupted. Tap retry.';
+
+  @override
+  String prepareChatFailed(String error) {
+    return 'Unable to prepare the conversation: $error';
+  }
+
+  @override
+  String get saveUserMessageFailed => 'Unable to save the user message';
+
+  @override
+  String get qwenModelMissingHint =>
+      'Install the Qwen3-4B-Instruct-2507 QAIRT/NPU model in Models & API first';
+
+  @override
+  String apiKeyMissingHint(String provider) {
+    return '$provider has no API key configured, and no ready Qwen3-4B-Instruct-2507 QAIRT/NPU model was detected';
+  }
+
+  @override
+  String get saveOfflineReplyFailed => 'Unable to save the on-device reply';
+
+  @override
+  String offlineGenerateFailed(String error) {
+    return 'On-device generation failed: $error';
+  }
+
+  @override
+  String stopGenerationFailed(String error) {
+    return 'Unable to stop generation: $error';
+  }
 }

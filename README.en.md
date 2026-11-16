@@ -172,6 +172,15 @@ MOSS deployment requires:
 
 Library presence or provider enumeration is never treated as execution proof.
 
+The repository ships the manifest and tokenizer metadata only: 9 of the 13 declared files (about 684 MiB of `*.data` / `*.qnn.onnx`) have to be obtained separately. Before importing, audit the package with exactly the rules the app enforces, so a missing file is named instead of surfacing as a generic import failure on the phone:
+
+```powershell
+python tools/check_moss_package.py model/TTS/moss-qnn-v81-streaming
+python tools/check_moss_package.py C:\Downloads\moss-qnn-v81-streaming.zip
+```
+
+Exit codes: `0` complete and verified, `2` missing file / wrong size / SHA-256 mismatch, `1` usage or manifest error. `--json` prints the machine-readable report and `--no-hashes` does a size-only pre-check. The Android importer reports the same list through the `moss_package_incomplete` error code, which the UI renders as "The deployment package is incomplete. Missing: …".
+
 ### Huawei and NNAPI
 
 The repository does not contain or directly integrate licensed Huawei HiAI DDK binaries. Generic NNAPI is not used as a substitute for Qualcomm QNN, so MOSS is unavailable on the Huawei Mate 10 Pro in the current implementation. NNAPI enumeration remains diagnostic only and is never used as evidence of MOSS hardware execution.
@@ -263,13 +272,20 @@ On the verified PLK110/SM8850/API 36 device, Mao rendered on the Adreno 840 and 
 
 ## Verification
 
-Completed automated checks for this change include:
+Reproduce every gate locally with the same command order as CI:
 
-- Rust tests, including GLM business-code and HTTP status error classification
-- Flutter speech planning and MOSS utility tests
-- Android Kotlin compilation
-- Android C++ external native build
-- Dart formatting and diff whitespace checks
+```powershell
+git clone https://github.com/blueokanna/Talk2u.git; cd Talk2u
+pwsh tools/run_quality_checks.ps1        # -SkipRust / -SkipFlutter / -SkipAndroid
+```
+
+That script runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --all-targets`, `flutter pub get`, `dart format --output=none --set-exit-if-changed lib test`, `flutter analyze lib test`, `flutter test --no-pub`, the desktop avatar frame gate, the Python host tooling tests, and `:app:testDebugUnitTest`. The same jobs are defined in `.github/workflows/quality.yml` and run on every push, pull request and manual dispatch.
+
+Current results in this workspace: 177 Rust tests passed (2 ignored), 156 Flutter tests passed, 20 Android JVM tests passed, 23 host-side Python tests passed, analyzer and formatter clean.
+
+Two CI details matter. The Gradle wrapper (`gradlew`, `gradlew.bat`, `gradle-wrapper.jar`) is committed on purpose: Flutter only regenerates it during a full build, which needs the licensed SDKs, so `android/.gitignore` un-ignores it. The Android job also writes `android/local.properties` (`sdk.dir` plus `flutter.sdk`) because Flutter only writes that file during `flutter build`.
+
+Automated checks cannot prove: third-party account quotas, regional network, model permissions, real QNN execution, audio latency, or thermal behaviour.
 
 Real-device acceptance must include:
 

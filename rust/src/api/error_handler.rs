@@ -3,6 +3,9 @@ use std::fmt;
 
 #[frb(opaque)]
 #[derive(Debug, Clone)]
+// The `*Error` postfix is part of the public FRB surface consumed by Dart; renaming
+// variants here would silently change generated bindings for no behavioural gain.
+#[allow(clippy::enum_variant_names)]
 pub enum ChatError {
     ApiError { status: u16, message: String },
     NetworkError { message: String },
@@ -95,7 +98,8 @@ impl ChatError {
     }
 
     fn classify_glm_error(status_code: u16, code: &str, message: &str) -> Self {
-        match code {            "1001" => ChatError::AuthError {
+        match code {
+            "1001" => ChatError::AuthError {
                 message: "请求头中未包含 Authorization 参数，请检查 API Key 配置".to_string(),
             },
             "1002" => ChatError::AuthError {
@@ -289,9 +293,7 @@ mod tests {
         // status line. This is the classification the transport has to
         // reproduce itself now that the Zhipu request goes through courierust.
         for code in ["1302", "1303", "1305"] {
-            let body = format!(
-                r#"{{"error":{{"code":"{code}","message":"并发或频率限制"}}}}"#
-            );
+            let body = format!(r#"{{"error":{{"code":"{code}","message":"并发或频率限制"}}}}"#);
             let error = ChatError::from_http_error(200, &body);
             assert!(
                 matches!(error, ChatError::RateLimitError { .. }),

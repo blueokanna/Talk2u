@@ -39,7 +39,7 @@ class ProviderProfile {
 
   static const androidOffline = ProviderProfile(
     id: androidOfflineId,
-    name: '设备离线 AI',
+    name: 'On-device AI',
     apiUrl: 'device://geniex-qairt-npu',
     chatModel: 'Qwen3-4B-Instruct-2507',
     protocol: 'local',
@@ -67,7 +67,7 @@ class ProviderProfile {
   factory ProviderProfile.fromJson(Map<String, dynamic> json) =>
       ProviderProfile(
         id: json['id'] as String? ?? 'custom',
-        name: json['name'] as String? ?? '自定义接口',
+        name: json['name'] as String? ?? 'Custom endpoint',
         apiKey: json['api_key'] as String?,
         apiUrl: json['api_url'] as String? ?? '',
         chatModel: json['chat_model'] as String? ?? '',

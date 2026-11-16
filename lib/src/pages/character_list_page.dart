@@ -115,10 +115,9 @@ class _CharacterListPageState extends State<CharacterListPage> {
     try {
       final path = await CharacterStore.instance.exportCharacter(character);
       if (!mounted) return;
-      await Share.shareXFiles(
-        [XFile(path)],
-        text: strings.shareCharacter(character.name),
-      );
+      await Share.shareXFiles([
+        XFile(path),
+      ], text: strings.shareCharacter(character.name));
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(

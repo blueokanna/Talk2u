@@ -6,13 +6,26 @@ use serde::{Deserialize, Serialize};
 pub enum ChatStreamEvent {
     ContentDelta(String),
     ThinkingDelta(String),
+    /// The provider asked to discard the partial reply of the current attempt
+    /// before retrying. Carried as a typed event, not as a magic string.
+    RetryReset,
+    /// The user cancelled generation; the partial answer may still be persisted.
+    GenerationCancelled,
     Done,
     Error(String),
 }
 
 #[derive(Default)]
 #[frb]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, nextjson::NsonSerialize, nextjson::NsonDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    nextjson::NsonSerialize,
+    nextjson::NsonDeserialize,
+)]
 pub enum MessageType {
     #[default]
     Say,
@@ -21,7 +34,15 @@ pub enum MessageType {
 }
 
 #[frb]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, nextjson::NsonSerialize, nextjson::NsonDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    nextjson::NsonSerialize,
+    nextjson::NsonDeserialize,
+)]
 pub struct Message {
     pub id: String,
     pub role: MessageRole,
@@ -34,7 +55,15 @@ pub struct Message {
 }
 
 #[frb]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, nextjson::NsonSerialize, nextjson::NsonDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    nextjson::NsonSerialize,
+    nextjson::NsonDeserialize,
+)]
 pub enum MessageRole {
     User,
     Assistant,
@@ -43,7 +72,15 @@ pub enum MessageRole {
 
 #[derive(Default)]
 #[frb]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, nextjson::NsonSerialize, nextjson::NsonDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    nextjson::NsonSerialize,
+    nextjson::NsonDeserialize,
+)]
 pub enum DialogueStyle {
     Free,
     SayOnly,
@@ -53,7 +90,15 @@ pub enum DialogueStyle {
 }
 
 #[frb]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, nextjson::NsonSerialize, nextjson::NsonDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    nextjson::NsonSerialize,
+    nextjson::NsonDeserialize,
+)]
 pub struct Conversation {
     pub id: String,
     pub title: String,
@@ -70,7 +115,15 @@ pub struct Conversation {
 }
 
 #[frb]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, nextjson::NsonSerialize, nextjson::NsonDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    nextjson::NsonSerialize,
+    nextjson::NsonDeserialize,
+)]
 pub struct MemorySummary {
     pub id: String,
     pub summary: String,

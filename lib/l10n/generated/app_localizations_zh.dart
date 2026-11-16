@@ -49,6 +49,71 @@ class AppLocalizationsZh extends AppLocalizations {
   String get cameraObservationClose => '关闭';
 
   @override
+  String pauseDownloadFailed(String error) {
+    return '暂停下载失败：$error';
+  }
+
+  @override
+  String get qwenCapabilitiesFailed => '无法检查 Qwen3 QAIRT/NPU 模型状态，请重试。';
+
+  @override
+  String get qwenDownloadFailed => 'Qwen3 模型下载中断，已保留断点；点按下载会从断点继续。';
+
+  @override
+  String get qwenDownloadPaused => '下载已暂停，已保留断点，点按下载可继续。';
+
+  @override
+  String get qwenLoadFailed => 'Qwen3 QAIRT/NPU 模型加载失败，请重试。';
+
+  @override
+  String get qwenGenerateFailed => '端侧 Qwen3 生成失败，请重试。';
+
+  @override
+  String get unknownError => '操作失败，请重试。';
+
+  @override
+  String get mossErrorRuntime => 'MOSS 所需的 Qualcomm QNN HTP 运行时不可用。';
+
+  @override
+  String get mossErrorInit => 'MOSS QNN 初始化失败，请重试或重新导入部署包。';
+
+  @override
+  String get mossErrorModelMissing => '尚未导入 MOSS QNN HTP v81 部署包。';
+
+  @override
+  String get mossErrorSynthesis => 'MOSS 语音合成失败，请重试。';
+
+  @override
+  String get mossErrorImport => 'MOSS 部署包导入失败，请检查文件与校验结果。';
+
+  @override
+  String get mossErrorImportBusy => '已有 MOSS 导入任务在进行中，请稍候。';
+
+  @override
+  String get mossCancelled => 'MOSS 操作已取消。';
+
+  @override
+  String get mossErrorDelete => '删除 MOSS 部署包失败，请重试。';
+
+  @override
+  String get senseVoiceErrorCheck => '无法检查 SenseVoice 识别模型，请重试。';
+
+  @override
+  String get senseVoiceErrorRecognition => 'SenseVoice 识别失败，请重试或重新安装模型。';
+
+  @override
+  String get senseVoiceErrorDownload => 'SenseVoice 模型下载中断，请重试；已保留断点。';
+
+  @override
+  String get senseVoiceErrorRecording => '麦克风录音失败，请检查权限与设备占用。';
+
+  @override
+  String get senseVoiceErrorImport => 'SenseVoice 模型导入失败，请检查 ZIP 文件。';
+
+  @override
+  String get senseVoiceCancelled => 'SenseVoice 操作已取消。';
+
+  @override
   String get live2dDesktopHostMissing =>
       '桌面端 Live2D 宿主资源未安装：缺少 assets/live2d/index.html 与合法的 Cubism Core for Web。请按 README 的桌面渲染说明补齐后重新构建；Android 不受影响。';
 
@@ -92,7 +157,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get languageSystem => '跟随系统语言';
 
   @override
-  String get languageChinese => '简体中文';
+  String get languageChinese => '中文';
 
   @override
   String get languageEnglish => 'English';
@@ -108,6 +173,26 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get mossSpeech => 'MOSS 端侧语音';
+
+  @override
+  String mossPackageMissing(String size) {
+    return '未导入 · 部署包约 $size，需从模型来源获取';
+  }
+
+  @override
+  String get mossRuntimeReady => 'MOSS QNN HTP 已初始化';
+
+  @override
+  String get mossChooseDirectory => '请选择包含 moss-qnn-deployment.json 的目录';
+
+  @override
+  String get mossChooseZip => '请选择 moss-qnn-v81-streaming.zip 文件';
+
+  @override
+  String get mossImporting => '正在导入模型';
+
+  @override
+  String get mossImportedInitialized => 'MOSS QNN HTP 模型已导入并初始化';
 
   @override
   String get startupPreparing => '正在准备本地对话...';
@@ -843,4 +928,339 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get diagnosticsInvalidJson => '诊断结果不是 JSON 对象';
+
+  @override
+  String get micPermissionDenied => '麦克风权限未授予';
+
+  @override
+  String get currentOnlinePlatform => '当前在线平台';
+
+  @override
+  String get offlineProviderName => '设备离线 AI';
+
+  @override
+  String mossPackageIncomplete(String files) {
+    return '部署包不完整，缺少：$files';
+  }
+
+  @override
+  String get captureReleased => '录音通道已释放';
+
+  @override
+  String get live2dImportUnsupported => '当前平台暂不支持导入 Live2D ZIP';
+
+  @override
+  String get live2dNativeListMissing => '原生端没有返回 Live2D 模型列表';
+
+  @override
+  String get live2dBuiltinPathMissing => '原生端没有返回内置 Live2D 模型路径';
+
+  @override
+  String get live2dZipNotFound => '找不到 ZIP 文件';
+
+  @override
+  String live2dZipTooLarge(int limitMb) {
+    return 'Live2D ZIP 超过 $limitMb MB 导入限制';
+  }
+
+  @override
+  String get live2dZipEmpty => 'ZIP 文件为空或格式无效';
+
+  @override
+  String get live2dZipTooManyEntries => 'ZIP 文件条目过多';
+
+  @override
+  String live2dUnpackedTooLarge(int limitMb) {
+    return '解压后模型超过 $limitMb MB 限制';
+  }
+
+  @override
+  String live2dZipUnsafeEntry(String entry) {
+    return 'ZIP 包含越界路径: $entry';
+  }
+
+  @override
+  String live2dZipUnsupportedLink(String entry) {
+    return 'ZIP 包含不支持的链接条目: $entry';
+  }
+
+  @override
+  String get live2dZipNoModelJson => 'ZIP 中没有 .model3.json';
+
+  @override
+  String live2dZipAbsolutePath(String name) {
+    return 'ZIP 包含绝对路径: $name';
+  }
+
+  @override
+  String live2dZipUnsafePath(String name) {
+    return 'ZIP 包含不安全路径: $name';
+  }
+
+  @override
+  String get live2dModelJsonNotObject => 'model3.json 不是 JSON 对象';
+
+  @override
+  String get live2dModelJsonVersion => '只支持 Cubism .model3.json Version 3';
+
+  @override
+  String get live2dModelJsonFileReferences => 'model3.json 缺少 FileReferences';
+
+  @override
+  String get live2dModelJsonMoc => 'model3.json 缺少 Moc 文件引用';
+
+  @override
+  String get live2dModelJsonNoTextures => 'model3.json 没有纹理引用';
+
+  @override
+  String get live2dTextureReferenceInvalid => '纹理引用格式无效';
+
+  @override
+  String live2dMocInvalid(String file) {
+    return '$file 不是有效的 moc3 文件';
+  }
+
+  @override
+  String live2dMocVersionUnsupported(String version) {
+    return '当前 Cubism Core 不支持 moc3 版本 $version';
+  }
+
+  @override
+  String get live2dCdi3Version => 'cdi3.json 的 Version 必须为 3';
+
+  @override
+  String live2dReferenceRemote(String ref) {
+    return '模型引用了非本地资源: $ref';
+  }
+
+  @override
+  String live2dReferenceTraversal(String ref) {
+    return '模型引用路径越界: $ref';
+  }
+
+  @override
+  String live2dReferenceConflict(String ref) {
+    return '模型资源缺失或大小写冲突: $ref';
+  }
+
+  @override
+  String live2dReferenceInvalid(String ref) {
+    return '模型资源路径无效: $ref';
+  }
+
+  @override
+  String live2dReferenceMissing(String ref) {
+    return '模型资源缺失: $ref';
+  }
+
+  @override
+  String senseVoiceCheckFailed(String error) {
+    return '无法检查 sherpa-onnx 识别模型: $error';
+  }
+
+  @override
+  String get senseVoiceUnsupported => '当前平台不支持 sherpa-onnx 语音识别';
+
+  @override
+  String get senseVoiceModelIncomplete => 'SenseVoice 模型文件不完整';
+
+  @override
+  String get senseVoiceImportIncomplete => 'SenseVoice 模型导入未完成';
+
+  @override
+  String get voiceDownloadRangeInvalid => '语音模型断点续传范围无效';
+
+  @override
+  String voiceDownloadHttp(int status) {
+    return '语音模型下载返回 HTTP $status';
+  }
+
+  @override
+  String get voiceDownloadTruncated => '语音模型连接提前结束，等待断点续传';
+
+  @override
+  String get voiceDownloadChecksumFailed => '语音模型 SHA-256 校验失败';
+
+  @override
+  String get voiceDownloadSourcesUnavailable => '语音模型下载源均不可用';
+
+  @override
+  String get voiceArchiveDirInvalid => '语音识别模型归档目录无效';
+
+  @override
+  String get senseVoiceContextIncomplete => 'SenseVoice QNN context 文件不完整';
+
+  @override
+  String get voiceDownloadCancelled => '语音模型下载已取消';
+
+  @override
+  String get speechStopFirst => '请先停止语音识别';
+
+  @override
+  String get senseVoiceNotInstalled => '请先下载 SenseVoice 离线识别模型';
+
+  @override
+  String get senseVoiceInstallFirst => '请先安装 SenseVoice 中英文端侧识别模型';
+
+  @override
+  String micStopFailed(String error) {
+    return '停止麦克风录音失败：$error';
+  }
+
+  @override
+  String get senseVoiceNoResult => 'SenseVoice QNN 未返回识别结果';
+
+  @override
+  String get offlineGenerationStopped => '端侧生成已停止';
+
+  @override
+  String get qnnAccelVerified => 'Qualcomm QNN HTP/NPU（已验证）';
+
+  @override
+  String get qnnAccelLoadedPending => 'Qualcomm QNN HTP/NPU 已加载，等待首轮执行验证';
+
+  @override
+  String get geniexNotLoaded => 'GenieX QAIRT/NPU 尚未加载';
+
+  @override
+  String get geniexNotInstalled => 'GenieX QAIRT/NPU 模型尚未安装';
+
+  @override
+  String qwenCapabilitiesCheckFailed(String model, String error) {
+    return '无法检查 $model QAIRT/NPU 模型：$error';
+  }
+
+  @override
+  String qwenAndroidOnly(String model) {
+    return '$model QAIRT/NPU 模型当前仅支持 Android';
+  }
+
+  @override
+  String get qwenDownloadedNotDetected => 'GenieX 下载完成后未检测到 Qwen3 QAIRT/NPU 模型';
+
+  @override
+  String get qwenDownloadPausedDetail => '下载已暂停，已保留断点，点按下载可继续。';
+
+  @override
+  String qwenDownloadFailedDetail(String raw) {
+    return '$raw\n已保留已下载部分，点按下载会从断点继续。';
+  }
+
+  @override
+  String get waitForCurrentReply => '请先等待当前端侧回复完成';
+
+  @override
+  String qwenDownloadFirst(String model) {
+    return '请先下载 $model QAIRT/NPU 模型';
+  }
+
+  @override
+  String get geniexLoadResultMissing => 'GenieX 没有返回模型加载结果';
+
+  @override
+  String get qwenBackendRejected => '拒绝非 QAIRT/NPU 的 Qwen3 执行后端';
+
+  @override
+  String qwenLoadFailedDetail(String error) {
+    return 'Qwen3 QAIRT/NPU 模型加载失败：$error';
+  }
+
+  @override
+  String get offlineModelBusy => '端侧模型正在生成上一条回复';
+
+  @override
+  String get qwenEmptyResponse => 'Qwen3 QAIRT/NPU 没有返回文本';
+
+  @override
+  String qwenGenerateFailedDetail(String error) {
+    return 'Qwen3 QAIRT/NPU 端侧生成失败：$error';
+  }
+
+  @override
+  String get mossAccelInitialized => 'Qualcomm QNN HTP + ORT CPU · 已初始化';
+
+  @override
+  String get mossAccelInitializing => 'QNN HTP 正在初始化';
+
+  @override
+  String get mossAccelCandidate => 'QNN HTP 候选 · 尚未执行验证';
+
+  @override
+  String mossRuntimeInitFailed(String error) {
+    return '无法自动初始化 MOSS QNN 运行时: $error';
+  }
+
+  @override
+  String get mossRuntimeNotReady => 'Native MOSS runtime 未就绪';
+
+  @override
+  String get mossImportAndroidOnly => 'MOSS QNN 模型导入仅支持 Android';
+
+  @override
+  String get mossZipImportAndroidOnly => 'MOSS QNN ZIP 导入仅支持 Android';
+
+  @override
+  String get mossImportFirst => '请先导入 MOSS QNN HTP v81 部署包';
+
+  @override
+  String get mossProviderMissing => 'MOSS-TTS-Nano 未返回有效的执行 provider';
+
+  @override
+  String get mossNoAudio => 'MOSS-TTS-Nano 没有生成可播放音频';
+
+  @override
+  String get mossAudioInvalid => 'MOSS-TTS-Nano 生成的音频文件无效';
+
+  @override
+  String get mossImportBusyWait => '请等待当前模型导入结束';
+
+  @override
+  String get mossWavInvalid => 'MOSS-TTS-Nano 输出 WAV 无效';
+
+  @override
+  String get mossWavNotPcm => 'MOSS WAV 不是 PCM';
+
+  @override
+  String get mossWavPcmInvalid => 'MOSS WAV PCM 参数无效';
+
+  @override
+  String get mossWavPcmTruncated => 'MOSS WAV PCM 数据不完整';
+
+  @override
+  String editResendFailed(String error) {
+    return '编辑重发失败: $error';
+  }
+
+  @override
+  String get responseInterrupted => 'AI 响应中断，请点击重试';
+
+  @override
+  String prepareChatFailed(String error) {
+    return '准备对话失败: $error';
+  }
+
+  @override
+  String get saveUserMessageFailed => '无法保存用户消息';
+
+  @override
+  String get qwenModelMissingHint =>
+      '请先在“模型与接口”中安装 Qwen3-4B-Instruct-2507 QAIRT/NPU 模型';
+
+  @override
+  String apiKeyMissingHint(String provider) {
+    return '$provider 尚未配置 API Key；也未检测到已就绪的 Qwen3-4B-Instruct-2507 QAIRT/NPU 模型';
+  }
+
+  @override
+  String get saveOfflineReplyFailed => '无法保存端侧 AI 回复';
+
+  @override
+  String offlineGenerateFailed(String error) {
+    return '端侧 AI 生成失败: $error';
+  }
+
+  @override
+  String stopGenerationFailed(String error) {
+    return '停止生成失败: $error';
+  }
 }

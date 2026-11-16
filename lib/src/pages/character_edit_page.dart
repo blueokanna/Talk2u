@@ -97,9 +97,7 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(
+        ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(strings.characterSaveFailed('$e'))),
         );
       }
@@ -138,13 +136,13 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
       if (modelPath == null || !mounted) return;
       setState(() => _live2dModelController.text = modelPath);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(strings.live2dModelsImported(modelPaths.length))),
+        SnackBar(
+          content: Text(strings.live2dModelsImported(modelPaths.length)),
+        ),
       );
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(
+      ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(strings.live2dModelImportFailed('$error'))),
       );
     } finally {
@@ -221,9 +219,7 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
       ).showSnackBar(SnackBar(content: Text(strings.maoInstalled)));
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(
+      ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(strings.maoInstallFailed('$error'))),
       );
     } finally {
@@ -314,7 +310,9 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
                   maxLength: 1000,
                   maxLines: 5,
                   minLines: 3,
-                  decoration: _inputDecoration(strings.characterDescriptionHint),
+                  decoration: _inputDecoration(
+                    strings.characterDescriptionHint,
+                  ),
                 ),
               ],
             ),

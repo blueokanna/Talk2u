@@ -1,10 +1,13 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:talk2u/src/models/character.dart';
 import 'package:talk2u/src/models/provider_profile.dart';
+import 'package:talk2u/src/l10n/app_strings.dart';
+import 'package:talk2u/src/prompts/persona_prompts.dart';
 import 'package:talk2u/src/rust/api/chat_api.dart' as rust_api;
 import 'package:talk2u/src/rust/api/data_models.dart';
 import 'package:talk2u/src/services/offline_llm_service.dart';
@@ -12,27 +15,68 @@ import 'package:talk2u/src/services/offline_llm_service.dart';
 @visibleForTesting
 typedef TestStreamSetup = void Function(Stream<ChatStreamEvent>, String);
 
-class ChatState extends ChangeNotifier {
+class ChatState extends ChangeNotifier with WidgetsBindingObserver {
   ChatState({Future<Conversation?> Function(String)? readConversation})
     : _readConversation =
           readConversation ?? ((id) => rust_api.getConversation(id: id));
 
   final Future<Conversation?> Function(String) _readConversation;
   bool _disposed = false;
+  bool _observingLifecycle = false;
+  bool _appActive = true;
   bool _preparingSend = false;
   int _selectionToken = 0;
 
   @override
   void notifyListeners() {
-    if (!_disposed) super.notifyListeners();
+    if (_disposed) return;
+    // Only structural changes need a new immutable view; streaming content
+    // updates keep the same message list and must not allocate one per frame.
+    if (!identical(_messagesViewSource, _messages)) {
+      _messagesView = UnmodifiableListView(_messages);
+      _messagesViewSource = _messages;
+    }
+    super.notifyListeners();
   }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _appActive = true;
+      // Materialise whatever streamed while the app was in the background and
+      // repaint once; no timer was running during that time.
+      if (_isStreaming) notifyListeners();
+      return;
+    }
+    // A backgrounded app has no visible transcript. Cancelling the repaint
+    // timer avoids 20 Hz wakeups while deltas keep buffering in memory.
+    _appActive = false;
+    _streamFlushTimer?.cancel();
+    _streamFlushTimer = null;
+  }
+
+  @visibleForTesting
+  bool get hasScheduledStreamFlush => _streamFlushTimer != null;
 
   String? _currentConversationId;
   bool _enableThinking = true;
   bool _isStreaming = false;
+  // Deltas are appended to buffers; the materialised strings are produced at
+  // most once per read, so a long reply does not allocate O(n) per token.
+  final StringBuffer _streamingBuffer = StringBuffer();
+  final StringBuffer _thinkingBuffer = StringBuffer();
   String _currentStreamingContent = '';
   String _currentThinkingContent = '';
+  bool _streamingTextDirty = false;
+  bool _thinkingTextDirty = false;
   List<Message> _messages = [];
+  late UnmodifiableListView<Message> _messagesView = UnmodifiableListView(
+    _messages,
+  );
+  Object? _messagesViewSource;
+  List<Message>? _displayMessagesCache;
+  Object? _displayCacheKey;
+  int _displayMessagesBuildCount = 0;
   String? _errorMessage;
   String? _lastFailedContent;
   List<ConversationSummary> _conversations = [];
@@ -65,9 +109,23 @@ class ChatState extends ChangeNotifier {
   String? get currentConversationId => _currentConversationId;
   bool get enableThinking => _enableThinking;
   bool get isStreaming => _isStreaming;
-  String get currentStreamingContent => _currentStreamingContent;
-  String get currentThinkingContent => _currentThinkingContent;
-  List<Message> get messages => List.unmodifiable(_messages);
+  String get currentStreamingContent {
+    if (_streamingTextDirty) {
+      _currentStreamingContent = _streamingBuffer.toString();
+      _streamingTextDirty = false;
+    }
+    return _currentStreamingContent;
+  }
+
+  String get currentThinkingContent {
+    if (_thinkingTextDirty) {
+      _currentThinkingContent = _thinkingBuffer.toString();
+      _thinkingTextDirty = false;
+    }
+    return _currentThinkingContent;
+  }
+
+  List<Message> get messages => _messagesView;
   String? get errorMessage => _errorMessage;
   String? get lastFailedContent => _lastFailedContent;
   int get completedResponseRevision => _completedResponseRevision;
@@ -90,12 +148,31 @@ class ChatState extends ChangeNotifier {
 
   DialogueStyle get dialogueStyle => _dialogueStyle;
 
-  List<Message> get displayMessages => _messages
-      .where((m) => m.role != MessageRole.system)
-      .where((m) => !(isStreaming && m.id == _regeneratingMessageId))
-      .toList();
+  List<Message> get displayMessages {
+    final key = Object.hash(
+      identityHashCode(_messages),
+      _isStreaming,
+      _regeneratingMessageId,
+    );
+    if (_displayMessagesCache == null || _displayCacheKey != key) {
+      _displayCacheKey = key;
+      _displayMessagesBuildCount++;
+      _displayMessagesCache = _messages
+          .where((m) => m.role != MessageRole.system)
+          .where((m) => !(isStreaming && m.id == _regeneratingMessageId))
+          .toList(growable: false);
+    }
+    return _displayMessagesCache!;
+  }
+
+  @visibleForTesting
+  int get displayMessagesBuildCount => _displayMessagesBuildCount;
 
   Future<void> initialize() async {
+    if (!_observingLifecycle) {
+      WidgetsBinding.instance.addObserver(this);
+      _observingLifecycle = true;
+    }
     try {
       final settings = await rust_api.getSettings();
       _applyProviderSettings(settings);
@@ -252,8 +329,7 @@ class ChatState extends ChangeNotifier {
       if (_disposed || selectionToken != _selectionToken) return;
       _currentConversationId = conv.id;
       _messages = [];
-      _currentStreamingContent = '';
-      _currentThinkingContent = '';
+      _resetStreamText();
       _errorMessage = null;
       _currentCharacter = null;
       await refreshConversationList();
@@ -271,8 +347,7 @@ class ChatState extends ChangeNotifier {
       if (_disposed || selectionToken != _selectionToken) return;
       _currentConversationId = conv.id;
       _messages = [];
-      _currentStreamingContent = '';
-      _currentThinkingContent = '';
+      _resetStreamText();
       _errorMessage = null;
       _currentCharacter = character;
 
@@ -330,8 +405,7 @@ class ChatState extends ChangeNotifier {
         if (!preserveError) {
           _errorMessage = null;
         }
-        _currentStreamingContent = '';
-        _currentThinkingContent = '';
+        _resetStreamText();
         _dialogueStyle = conv.dialogueStyle;
 
         final characterId = _conversationCharacterMap[id];
@@ -441,7 +515,7 @@ class ChatState extends ChangeNotifier {
       if (_disposed || selectionToken != _selectionToken) return;
     } catch (error) {
       if (!_disposed && selectionToken == _selectionToken) {
-        setError('编辑重发失败: $error');
+        setError(AppStrings.current.editResendFailed('$error'));
       }
       return;
     } finally {
@@ -579,8 +653,7 @@ class ChatState extends ChangeNotifier {
     _loadToken++;
     _streamToken++;
     _isStreaming = true;
-    _currentStreamingContent = '';
-    _currentThinkingContent = '';
+    _resetStreamText();
     _errorMessage = null;
     _doneEventReceived = false;
     _generationWasCancelled = false;
@@ -591,6 +664,7 @@ class ChatState extends ChangeNotifier {
 
   /// One repaint per ~48 ms of deltas, with no timer while the stream is idle.
   void _scheduleStreamFlush() {
+    if (!_appActive) return;
     if (_streamFlushTimer != null) return;
     _streamFlushTimer = Timer(_streamFlushInterval, () {
       _streamFlushTimer = null;
@@ -600,18 +674,35 @@ class ChatState extends ChangeNotifier {
   }
 
   void appendStreamingContent(String delta) {
-    _currentStreamingContent += delta;
+    if (delta.isEmpty) return;
+    _streamingBuffer.write(delta);
+    _streamingTextDirty = true;
     _scheduleStreamFlush();
   }
 
   void _replaceStreamingContent(String content) {
+    _streamingBuffer
+      ..clear()
+      ..write(content);
     _currentStreamingContent = content;
+    _streamingTextDirty = false;
     _scheduleStreamFlush();
   }
 
   void appendThinkingContent(String delta) {
-    _currentThinkingContent += delta;
+    if (delta.isEmpty) return;
+    _thinkingBuffer.write(delta);
+    _thinkingTextDirty = true;
     _scheduleStreamFlush();
+  }
+
+  void _resetStreamText() {
+    _streamingBuffer.clear();
+    _thinkingBuffer.clear();
+    _currentStreamingContent = '';
+    _currentThinkingContent = '';
+    _streamingTextDirty = false;
+    _thinkingTextDirty = false;
   }
 
   void endStreaming() {
@@ -642,6 +733,13 @@ class ChatState extends ChangeNotifier {
             thinkingDelta: (delta) {
               if (!_generationWasCancelled) appendThinkingContent(delta);
             },
+            retryReset: () {
+              _resetStreamText();
+              _scheduleStreamFlush();
+            },
+            generationCancelled: () {
+              _generationWasCancelled = true;
+            },
             done: () {
               _doneEventReceived = true;
               final wasCancelled = _generationWasCancelled;
@@ -666,16 +764,6 @@ class ChatState extends ChangeNotifier {
               });
             },
             error: (msg) {
-              if (msg == '__RETRY_RESET__') {
-                _currentStreamingContent = '';
-                _currentThinkingContent = '';
-                _scheduleStreamFlush();
-                return;
-              }
-              if (msg == '__GENERATION_CANCELLED__') {
-                _generationWasCancelled = true;
-                return;
-              }
               _errorMessage = msg;
               debugPrint('[ChatState] Stream error event: $msg');
               notifyListeners();
@@ -746,7 +834,7 @@ class ChatState extends ChangeNotifier {
             _checkAndTriggerMemorySummarize(conversationId);
           }
         } else if (!_generationWasCancelled) {
-          _errorMessage ??= 'AI 响应中断，请点击重试';
+          _errorMessage ??= AppStrings.current.responseInterrupted;
         }
         notifyListeners();
       });
@@ -786,7 +874,10 @@ class ChatState extends ChangeNotifier {
       }
     } catch (error) {
       if (!_disposed && selectionToken == _selectionToken) {
-        setError('准备对话失败: $error', failedContent: content);
+        setError(
+          AppStrings.current.prepareChatFailed('$error'),
+          failedContent: content,
+        );
       }
       return;
     } finally {
@@ -820,7 +911,9 @@ class ChatState extends ChangeNotifier {
           model: _selectedModel,
         );
         if (streamToken != _streamToken || _disposed) return;
-        if (!saved) throw StateError('无法保存用户消息');
+        if (!saved) {
+          throw StateError(AppStrings.current.saveUserMessageFailed);
+        }
         await _generateOfflineAssistant(conversationId);
         return;
       }
@@ -870,10 +963,12 @@ class ChatState extends ChangeNotifier {
       }
     }
 
+    final strings = AppStrings.current;
     _errorMessage = provider?.isLocal == true
-        ? '请先在“模型与接口”中安装 Qwen3-4B-Instruct-2507 QAIRT/NPU 模型'
-        : '${provider?.name ?? '当前在线平台'}尚未配置 API Key；'
-              '也未检测到已就绪的 Qwen3-4B-Instruct-2507 QAIRT/NPU 模型';
+        ? strings.qwenModelMissingHint
+        : strings.apiKeyMissingHint(
+            provider?.name ?? strings.currentOnlinePlatform,
+          );
     notifyListeners();
     return false;
   }
@@ -939,9 +1034,7 @@ class ChatState extends ChangeNotifier {
       messages.add(
         OfflineChatMessage(
           role: 'system',
-          content:
-              '用户要求重写你上一条回复。下面这段内容已经被用户否决，'
-              '不要重复它、不要改写它，必须换一个角度和说法，给出全新的回复。\n$excerpt',
+          content: offlineRewriteDirective(excerpt),
         ),
       );
     }
@@ -1009,7 +1102,9 @@ class ChatState extends ChangeNotifier {
         content: response,
         model: model,
       );
-      if (!saved) throw StateError('无法保存端侧 AI 回复');
+      if (!saved) {
+        throw StateError(AppStrings.current.saveOfflineReplyFailed);
+      }
 
       if (isCurrent() && !_generationWasCancelled) {
         _replaceStreamingContent(response);
@@ -1046,7 +1141,7 @@ class ChatState extends ChangeNotifier {
           preserveError: true,
         );
         if (!applied || !isCurrent()) return;
-        _errorMessage = '端侧 AI 生成失败: $error';
+        _errorMessage = AppStrings.current.offlineGenerateFailed('$error');
         notifyListeners();
       }
     }
@@ -1141,7 +1236,7 @@ class ChatState extends ChangeNotifier {
     } catch (error) {
       debugPrint('[ChatState] Failed to stop generation: $error');
       if (!_disposed && streamToken == _streamToken) {
-        _errorMessage = '停止生成失败: $error';
+        _errorMessage = AppStrings.current.stopGenerationFailed('$error');
       }
     } finally {
       if (!_disposed &&
@@ -1156,6 +1251,10 @@ class ChatState extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    if (_observingLifecycle) {
+      WidgetsBinding.instance.removeObserver(this);
+      _observingLifecycle = false;
+    }
     _abortActiveGeneration();
     _cancelExistingSubscription();
     _streamFlushTimer?.cancel();

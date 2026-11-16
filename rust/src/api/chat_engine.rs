@@ -42,6 +42,15 @@ struct ReplyGeneration<'a> {
     sampling: SamplingProfile,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct SendMessageRequest<'a> {
+    pub conversation_id: &'a str,
+    pub content: &'a str,
+    pub chat_model: &'a str,
+    pub thinking_model: &'a str,
+    pub enable_thinking: bool,
+}
+
 pub struct ChatEngine {
     provider: ProviderRuntime,
     auxiliary_model: String,
@@ -79,10 +88,13 @@ impl ChatEngine {
         match event {
             // Transport completion is not application completion: validation,
             // fallback and the durable reply commit must finish first.
-            ChatStreamEvent::Error(_) | ChatStreamEvent::Done => {}
+            ChatStreamEvent::Error(_)
+            | ChatStreamEvent::Done
+            | ChatStreamEvent::RetryReset
+            | ChatStreamEvent::GenerationCancelled => {}
             ChatStreamEvent::ContentDelta(_) | ChatStreamEvent::ThinkingDelta(_) => {
                 if need_content_reset.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                    on_event(ChatStreamEvent::Error("__RETRY_RESET__".to_string()));
+                    on_event(ChatStreamEvent::RetryReset);
                 }
                 on_event(event);
             }
@@ -1136,22 +1148,19 @@ impl ChatEngine {
         const MAX_SYSTEM_MESSAGES: usize = 8;
         const MAX_SYSTEM_TOKENS: usize = 12_000;
         let mut system_token_budget: usize = 0;
-        let mut system_count: usize = 0;
-        for msg in conv
+        for (index, msg) in conv
             .messages
             .iter()
             .filter(|message| message.role == MessageRole::System)
+            .take(MAX_SYSTEM_MESSAGES)
+            .enumerate()
         {
-            if system_count >= MAX_SYSTEM_MESSAGES {
-                break;
-            }
             let message_tokens = Self::estimate_content_tokens(&msg.content);
-            if system_count > 0 && system_token_budget + message_tokens > MAX_SYSTEM_TOKENS {
+            if index > 0 && system_token_budget + message_tokens > MAX_SYSTEM_TOKENS {
                 break;
             }
             enhanced_messages.push(msg.clone());
             system_token_budget += message_tokens;
-            system_count += 1;
         }
 
         let short_term = MemoryEngine::build_short_term_context(&conv.messages);
@@ -1619,11 +1628,13 @@ impl ChatEngine {
         on_event: impl Fn(ChatStreamEvent),
     ) -> Result<(), ChatError> {
         self.send_message_with_snapshot(
-            conversation_id,
-            content,
-            chat_model,
-            thinking_model,
-            enable_thinking,
+            SendMessageRequest {
+                conversation_id,
+                content,
+                chat_model,
+                thinking_model,
+                enable_thinking,
+            },
             |_| {},
             on_event,
         )
@@ -1632,14 +1643,17 @@ impl ChatEngine {
 
     pub(crate) async fn send_message_with_snapshot(
         &self,
-        conversation_id: &str,
-        content: &str,
-        chat_model: &str,
-        thinking_model: &str,
-        enable_thinking: bool,
+        request: SendMessageRequest<'_>,
         on_snapshot: impl Fn(&Conversation),
         on_event: impl Fn(ChatStreamEvent),
     ) -> Result<(), ChatError> {
+        let SendMessageRequest {
+            conversation_id,
+            content,
+            chat_model,
+            thinking_model,
+            enable_thinking,
+        } = request;
         Self::validate_message(content)?;
 
         let message_type = Self::detect_message_type(content);
@@ -2123,7 +2137,7 @@ mod tests {
         );
         let events = events.borrow();
         assert_eq!(events.len(), 3);
-        assert!(matches!(&events[0], ChatStreamEvent::Error(text) if text == "__RETRY_RESET__"));
+        assert!(matches!(&events[0], ChatStreamEvent::RetryReset));
         assert!(matches!(&events[1], ChatStreamEvent::ThinkingDelta(_)));
         assert!(matches!(&events[2], ChatStreamEvent::ContentDelta(_)));
     }

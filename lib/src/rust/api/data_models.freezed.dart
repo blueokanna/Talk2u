@@ -55,12 +55,14 @@ extension ChatStreamEventPatterns on ChatStreamEvent {
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeMap<TResult extends Object?>({TResult Function( ChatStreamEvent_ContentDelta value)?  contentDelta,TResult Function( ChatStreamEvent_ThinkingDelta value)?  thinkingDelta,TResult Function( ChatStreamEvent_Done value)?  done,TResult Function( ChatStreamEvent_Error value)?  error,required TResult orElse(),}){
+@optionalTypeArgs TResult maybeMap<TResult extends Object?>({TResult Function( ChatStreamEvent_ContentDelta value)?  contentDelta,TResult Function( ChatStreamEvent_ThinkingDelta value)?  thinkingDelta,TResult Function( ChatStreamEvent_RetryReset value)?  retryReset,TResult Function( ChatStreamEvent_GenerationCancelled value)?  generationCancelled,TResult Function( ChatStreamEvent_Done value)?  done,TResult Function( ChatStreamEvent_Error value)?  error,required TResult orElse(),}){
 final _that = this;
 switch (_that) {
 case ChatStreamEvent_ContentDelta() when contentDelta != null:
 return contentDelta(_that);case ChatStreamEvent_ThinkingDelta() when thinkingDelta != null:
-return thinkingDelta(_that);case ChatStreamEvent_Done() when done != null:
+return thinkingDelta(_that);case ChatStreamEvent_RetryReset() when retryReset != null:
+return retryReset(_that);case ChatStreamEvent_GenerationCancelled() when generationCancelled != null:
+return generationCancelled(_that);case ChatStreamEvent_Done() when done != null:
 return done(_that);case ChatStreamEvent_Error() when error != null:
 return error(_that);case _:
   return orElse();
@@ -80,12 +82,14 @@ return error(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult map<TResult extends Object?>({required TResult Function( ChatStreamEvent_ContentDelta value)  contentDelta,required TResult Function( ChatStreamEvent_ThinkingDelta value)  thinkingDelta,required TResult Function( ChatStreamEvent_Done value)  done,required TResult Function( ChatStreamEvent_Error value)  error,}){
+@optionalTypeArgs TResult map<TResult extends Object?>({required TResult Function( ChatStreamEvent_ContentDelta value)  contentDelta,required TResult Function( ChatStreamEvent_ThinkingDelta value)  thinkingDelta,required TResult Function( ChatStreamEvent_RetryReset value)  retryReset,required TResult Function( ChatStreamEvent_GenerationCancelled value)  generationCancelled,required TResult Function( ChatStreamEvent_Done value)  done,required TResult Function( ChatStreamEvent_Error value)  error,}){
 final _that = this;
 switch (_that) {
 case ChatStreamEvent_ContentDelta():
 return contentDelta(_that);case ChatStreamEvent_ThinkingDelta():
-return thinkingDelta(_that);case ChatStreamEvent_Done():
+return thinkingDelta(_that);case ChatStreamEvent_RetryReset():
+return retryReset(_that);case ChatStreamEvent_GenerationCancelled():
+return generationCancelled(_that);case ChatStreamEvent_Done():
 return done(_that);case ChatStreamEvent_Error():
 return error(_that);}
 }
@@ -101,12 +105,14 @@ return error(_that);}
 /// }
 /// ```
 
-@optionalTypeArgs TResult? mapOrNull<TResult extends Object?>({TResult? Function( ChatStreamEvent_ContentDelta value)?  contentDelta,TResult? Function( ChatStreamEvent_ThinkingDelta value)?  thinkingDelta,TResult? Function( ChatStreamEvent_Done value)?  done,TResult? Function( ChatStreamEvent_Error value)?  error,}){
+@optionalTypeArgs TResult? mapOrNull<TResult extends Object?>({TResult? Function( ChatStreamEvent_ContentDelta value)?  contentDelta,TResult? Function( ChatStreamEvent_ThinkingDelta value)?  thinkingDelta,TResult? Function( ChatStreamEvent_RetryReset value)?  retryReset,TResult? Function( ChatStreamEvent_GenerationCancelled value)?  generationCancelled,TResult? Function( ChatStreamEvent_Done value)?  done,TResult? Function( ChatStreamEvent_Error value)?  error,}){
 final _that = this;
 switch (_that) {
 case ChatStreamEvent_ContentDelta() when contentDelta != null:
 return contentDelta(_that);case ChatStreamEvent_ThinkingDelta() when thinkingDelta != null:
-return thinkingDelta(_that);case ChatStreamEvent_Done() when done != null:
+return thinkingDelta(_that);case ChatStreamEvent_RetryReset() when retryReset != null:
+return retryReset(_that);case ChatStreamEvent_GenerationCancelled() when generationCancelled != null:
+return generationCancelled(_that);case ChatStreamEvent_Done() when done != null:
 return done(_that);case ChatStreamEvent_Error() when error != null:
 return error(_that);case _:
   return null;
@@ -125,11 +131,13 @@ return error(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function( String field0)?  contentDelta,TResult Function( String field0)?  thinkingDelta,TResult Function()?  done,TResult Function( String field0)?  error,required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function( String field0)?  contentDelta,TResult Function( String field0)?  thinkingDelta,TResult Function()?  retryReset,TResult Function()?  generationCancelled,TResult Function()?  done,TResult Function( String field0)?  error,required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case ChatStreamEvent_ContentDelta() when contentDelta != null:
 return contentDelta(_that.field0);case ChatStreamEvent_ThinkingDelta() when thinkingDelta != null:
-return thinkingDelta(_that.field0);case ChatStreamEvent_Done() when done != null:
+return thinkingDelta(_that.field0);case ChatStreamEvent_RetryReset() when retryReset != null:
+return retryReset();case ChatStreamEvent_GenerationCancelled() when generationCancelled != null:
+return generationCancelled();case ChatStreamEvent_Done() when done != null:
 return done();case ChatStreamEvent_Error() when error != null:
 return error(_that.field0);case _:
   return orElse();
@@ -149,11 +157,13 @@ return error(_that.field0);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function( String field0)  contentDelta,required TResult Function( String field0)  thinkingDelta,required TResult Function()  done,required TResult Function( String field0)  error,}) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function( String field0)  contentDelta,required TResult Function( String field0)  thinkingDelta,required TResult Function()  retryReset,required TResult Function()  generationCancelled,required TResult Function()  done,required TResult Function( String field0)  error,}) {final _that = this;
 switch (_that) {
 case ChatStreamEvent_ContentDelta():
 return contentDelta(_that.field0);case ChatStreamEvent_ThinkingDelta():
-return thinkingDelta(_that.field0);case ChatStreamEvent_Done():
+return thinkingDelta(_that.field0);case ChatStreamEvent_RetryReset():
+return retryReset();case ChatStreamEvent_GenerationCancelled():
+return generationCancelled();case ChatStreamEvent_Done():
 return done();case ChatStreamEvent_Error():
 return error(_that.field0);}
 }
@@ -169,11 +179,13 @@ return error(_that.field0);}
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function( String field0)?  contentDelta,TResult? Function( String field0)?  thinkingDelta,TResult? Function()?  done,TResult? Function( String field0)?  error,}) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function( String field0)?  contentDelta,TResult? Function( String field0)?  thinkingDelta,TResult? Function()?  retryReset,TResult? Function()?  generationCancelled,TResult? Function()?  done,TResult? Function( String field0)?  error,}) {final _that = this;
 switch (_that) {
 case ChatStreamEvent_ContentDelta() when contentDelta != null:
 return contentDelta(_that.field0);case ChatStreamEvent_ThinkingDelta() when thinkingDelta != null:
-return thinkingDelta(_that.field0);case ChatStreamEvent_Done() when done != null:
+return thinkingDelta(_that.field0);case ChatStreamEvent_RetryReset() when retryReset != null:
+return retryReset();case ChatStreamEvent_GenerationCancelled() when generationCancelled != null:
+return generationCancelled();case ChatStreamEvent_Done() when done != null:
 return done();case ChatStreamEvent_Error() when error != null:
 return error(_that.field0);case _:
   return null;
@@ -188,7 +200,7 @@ return error(_that.field0);case _:
 
 class ChatStreamEvent_ContentDelta extends ChatStreamEvent {
   const ChatStreamEvent_ContentDelta(this.field0): super._();
-  
+
 
  final  String field0;
 
@@ -254,7 +266,7 @@ as String,
 
 class ChatStreamEvent_ThinkingDelta extends ChatStreamEvent {
   const ChatStreamEvent_ThinkingDelta(this.field0): super._();
-  
+
 
  final  String field0;
 
@@ -318,9 +330,73 @@ as String,
 /// @nodoc
 
 
+class ChatStreamEvent_RetryReset extends ChatStreamEvent {
+  const ChatStreamEvent_RetryReset(): super._();
+
+
+
+
+
+
+
+@override
+bool operator ==(Object other) {
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is ChatStreamEvent_RetryReset);
+}
+
+
+@override
+int get hashCode => runtimeType.hashCode;
+
+@override
+String toString() {
+  return 'ChatStreamEvent.retryReset()';
+}
+
+
+}
+
+
+
+
+/// @nodoc
+
+
+class ChatStreamEvent_GenerationCancelled extends ChatStreamEvent {
+  const ChatStreamEvent_GenerationCancelled(): super._();
+
+
+
+
+
+
+
+@override
+bool operator ==(Object other) {
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is ChatStreamEvent_GenerationCancelled);
+}
+
+
+@override
+int get hashCode => runtimeType.hashCode;
+
+@override
+String toString() {
+  return 'ChatStreamEvent.generationCancelled()';
+}
+
+
+}
+
+
+
+
+/// @nodoc
+
+
 class ChatStreamEvent_Done extends ChatStreamEvent {
   const ChatStreamEvent_Done(): super._();
-  
+
 
 
 
@@ -352,7 +428,7 @@ String toString() {
 
 class ChatStreamEvent_Error extends ChatStreamEvent {
   const ChatStreamEvent_Error(this.field0): super._();
-  
+
 
  final  String field0;
 

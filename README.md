@@ -24,7 +24,7 @@ Talk2U 是一个 Flutter + Rust 的本地角色聊天应用。聊天记录、角
 | 离线 STT | 已实现 | Android SM8850 上使用 sherpa-onnx + SenseVoice 2024-07-17 INT8 QNN context，提供 ASR/LID/SER/AED |
 | 持续语音通话 | Android 有条件实现 | `CallSession` 状态机；确认硬件 AEC 后全双工，否则半双工；参考信号双讲检测 + 文本自回音过滤；可语音/点按打断 |
 | 重新生成 | 已实现 | 旧回复不进入新 prompt，附带“禁止复用开头/句式/收尾”的显式指令，并以 temperature/top_p 0.95 重新采样；成功后原位替换旧消息 |
-| 空闲资源占用 | 已实现 | 启动只探测 MOSS/QNN 能力，首次朗读才加载 HTP 上下文；无 1 Hz 硬件遥测轮询、无全程 30 ms 流式定时器、非通话模式不自动合成语音；Live2D 在后台、离页或系统要求减少动画时停止持续渲染 |
+| 空闲资源占用 | 已实现 | 启动只探测 MOSS/QNN 能力，首次朗读才加载 HTP 上下文；无 1 Hz 硬件遥测轮询、无全程 30 ms 流式定时器、非通话模式不自动合成语音；Live2D 在后台、离页或系统要求减少动画时停止持续渲染；流式增量在后台只入缓冲，回前台一次性重绘 |
 | Android/Windows/Linux Live2D | 有条件实现 | Android 使用 Cubism SDK for Native 5 R.5 + C++ + OpenGL ES；Windows 使用 WebView2，Linux 使用 CEF |
 | Cubism 5 moc3 | 已实现 | 导入时读取 `MOC3` 头并接受 moc3 版本 1-5；运行时拒绝 Core 4 |
 | `.cdi3.json` | 已实现 | 校验 Version 3，并用于发现 LipSync 参数 |
@@ -402,6 +402,15 @@ flutter build apk --debug --target-platform android-arm64
 
 应用设置页选择包含 `moss-qnn-deployment.json` 的目录后，先在 staging 目录复制并验证全部文件，再原子替换旧部署。首次初始化可能因 QNN context 生成耗时较长；后续会复用与模型哈希绑定的私有缓存。
 
+仓库不包含 MOSS 权重：`model/TTS/moss-qnn-v81-streaming` 只有清单与 tokenizer 元数据，13 个声明文件里 9 个约 684 MiB 的 `*.data` / `*.qnn.onnx` 需要按清单另行获取。导入前用与 App 完全相同的规则离线检查，缺文件会按名字列出，而不是等到手机上才报“导入失败”：
+
+```powershell
+python tools/check_moss_package.py model/TTS/moss-qnn-v81-streaming
+python tools/check_moss_package.py C:\Downloads\moss-qnn-v81-streaming.zip
+```
+
+退出码：`0` 完整且校验通过，`2` 缺文件/大小不符/SHA-256 不符，`1` 参数或清单错误。`--json` 输出机器可读报告，`--no-hashes` 只做大小预检。手机端导入失败时，Kotlin 侧用 `moss_package_incomplete` 错误码回传完整缺失列表，界面显示“部署包不完整，缺少：…”，链路与这个脚本一致。
+
 华为 Mate 10 Pro 当前不接入许可受限的 HiAI DDK 二进制，也不使用通用 NNAPI 代替 Qualcomm QNN，因此 MOSS 在该设备上不可用。仓库没有在一加 15 或 Mate 10 Pro 上完成 MOSS 真机验收，不能把可构建路径写成真机已通过。
 
 端侧 Qwen LLM 是独立的 llama.cpp Vulkan 推理链路，不会因为 MOSS-TTS 使用 QNN HTP 就继承其 NPU 状态。Windows/Linux 尚未接入本项目的端侧 LLM 后端。
@@ -644,7 +653,9 @@ Flutter: CameraObservationService (MethodChannel/EventChannel)
 
 ### MOSS-TTS
 
-设置页的文件夹按钮用于导入准备好的 `moss-qnn-v81` 目录。目录必须包含 `moss-qnn-deployment.json`、MOSS TTS/codec 元数据、tokenizer、共享权重和 `.qnn.onnx` 图。导入器拒绝目录穿越、版本不匹配、错误 SoC/HTP 架构、缺失文件、大小或 SHA-256 不匹配。
+设置页 MOSS 卡片右侧的文件夹按钮提供两种导入方式：“从 ZIP 文件导入”与“从解压目录导入”。目录必须包含 `moss-qnn-deployment.json`、MOSS TTS/codec 元数据、tokenizer、共享权重和 `.qnn.onnx` 图。导入器拒绝目录穿越、版本不匹配、错误 SoC/HTP 架构、缺失文件、大小或 SHA-256 不匹配。
+
+**权重不在仓库里。** `model/TTS/moss-qnn-v81-streaming/` 只跟踪清单、tokenizer 与浏览器元数据；`*.data`、`*.onnx`、`*.bin` 被 `.gitignore` 排除，完整部署包约 684 MB，需从模型来源获取后自行导入。设置页在未安装时显示的是“部署包约 X”的提示，不是已安装体积；安装完成后显示 native 实测字节数。
 
 成功导入后可选择 MOSS 内置中英文音色并试听。系统 TTS 不再作为后备路径；QNN 初始化或合成失败会直接显示错误。
 
@@ -761,16 +772,65 @@ Push-Location rust
 cargo test --all-targets
 Pop-Location
 
-cd rust; cargo build --release --target aarch64-linux-android; cd ..
-
 flutter test
 flutter analyze lib test
-python -m unittest discover -s tools -p test_verify_android_native.py -v
+python -m unittest discover -s tools -p "test_*.py" -v
 node --test --test-isolation=none test/rendering/avatar_frame_gate_test.cjs
-flutter build apk --debug --target-platform android-arm64
+
+Push-Location android
+.\gradlew.bat :app:testDebugUnitTest
+Pop-Location
 ```
 
+`tools/run_quality_checks.ps1` 按 CI 顺序跑同一组门禁（可用 `-SkipRust`、`-SkipFlutter`、`-SkipAndroid` 跳过），任何一步失败都会给出失败命令与退出码：
+
+```powershell
+pwsh tools/run_quality_checks.ps1
+```
+
+`tools` 下的 23 项主机侧测试全部只用 Python 标准库：ELF/ZIP 16 KB 审计 10 项，MOSS 部署包审计 13 项（目录与 ZIP、缺失/截断/SHA-256、越界路径、命令行退出码、真实仓库清单）。
+
+Android 侧现在也有纯 JVM 单测（`android/app/src/test/kotlin`），共 20 项：芯片代号解析（`ChipsetTest` 7）、ZIP/SAF 路径越界防护（`SafeRelativePathTest` 5）、MOSS 清单校验（`MossDeploymentParserTest` 8，覆盖 schema、provider plan、重复/穿越路径、大小与 SHA-256、必需文件、文件数上限）。它们不依赖设备，也不需要 Cubism SDK；在 CI 或没有许可 SDK 的机器上用以下命令即可运行：
+
+```powershell
+cd android
+.\gradlew.bat :app:testDebugUnitTest -Ptalk2u.cubismSdkRoot=/nonexistent -Ptalk2u.requireCubism=false
+```
+
+> PowerShell 里带点的 `-P` 参数要用引号包住，否则会被拆成 `-Ptalk2u`：`"-Ptalk2u.requireCubism=false"`。cmd/bash 无此问题。
+
+### 生成 FRB 绑定
+
+`rust/src/frb_generated.rs` 与 `lib/src/rust/**` 必须和 `flutter_rust_bridge` 版本一致（当前 2.11.1）。codegen 默认会**自动升级依赖**，曾把 `Cargo.toml`/`pubspec.yaml` 改到 2.13 并在网络受限时卡住，因此本地生成必须显式关闭该行为：
+
+```powershell
+flutter_rust_bridge_codegen generate --no-deps-check --no-auto-upgrade-dependency --no-build-runner --no-dart-format --no-rust-format
+```
+
+升级 FRB 是一个独立任务：Rust 依赖、`pubspec.yaml`、codegen 二进制与生成物必须同时切换版本，并跑完整回归；不要只改其中一处。
+
+### 流式事件协议
+
+`ChatStreamEvent` 现在是类型化枚举：`contentDelta` / `thinkingDelta` / `retryReset` / `generationCancelled` / `done` / `error`。重试清空与用户取消不再通过 `__RETRY_RESET__`、`__GENERATION_CANCELLED__` 这类字符串哨兵传递，Dart 侧也不需要再做子串匹配。
+
 Rust 测试覆盖供应商鉴权/请求转换、Anthropic 和 OpenAI-compatible SSE、跨模型上下文、记忆、知识、错误重试和 Discord 分片，并新增三类一致性回归：传输层 `Done` 不能被提前转发、取消后旧回复不能写入新轮次、并发写入只能有一个赢家。Flutter 测试覆盖聊天状态竞态、语音/MOSS 生命周期与取消、PCM 采集、摄像头观察竞态、动效策略和动作 cue 推断。Python 用例保证 16 KB 检查器在坏 ELF、4 KB 对齐、错误 ABI 和缺失输入上会失败关闭，而不是放行。
+
+这些门禁已固化在 `.github/workflows/quality.yml`：Rust 执行 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all-targets`；Flutter 执行格式检查、`flutter analyze`、`flutter test`，并运行桌面 RAF 门控测试与 `tools` 下的主机侧审计器；`android-unit` 在无 Cubism SDK 的情况下跑 `:app:testDebugUnitTest`。Android 打包仍留在发布清单中，因为它依赖外部许可的 Cubism/QNN 产物和真机。
+
+CI 里有两处工程约束值得注意：Gradle wrapper（`gradlew`、`gradlew.bat`、`gradle-wrapper.jar`）是**提交进仓库**的——Flutter 只在完整构建时才会重新生成它，而完整构建需要许可 SDK，所以 `android/.gitignore` 用 `!` 规则把它们放行；`android-unit` 先 `flutter pub get`，再由 CI 写 `android/local.properties`（`sdk.dir` + `flutter.sdk`），因为 Flutter 只在 `flutter build` 时写这个文件。
+
+### UI 文案与重绘约束
+
+- `test/l10n/no_hardcoded_cjk_test.dart` 扫描整个 `lib/`：除 `lib/src/lexicon`（语言数据）、`lib/src/prompts`（模型提示词）、`lib/src/rust` 与 `lib/l10n/generated`（生成物）外，禁止出现中文字符；同一个测试还校验 en/zh 两份 ARB 的键集合完全一致。
+- 服务层没有 `BuildContext`，通过 `lib/src/l10n/app_strings.dart` 的 `AppStrings.current` 取当前语言的 `AppLocalizations`；`main()` 在 `runApp` 前按 `UiPreferences.locale`（或系统语言）配置一次，语言切换与系统语言变化时再同步。默认英文，因此单元测试与启动早期也不会漏出未翻译文案。
+- MOSS 的初始化/导入阶段已从字符串改为 `MossOperation` 枚举，由设置页映射到 ARB；`moss_status_l10n_test.dart` 校验每个阶段的英文文案不含 CJK。SenseVoice 的“是否正在下载 ASR”也从 `operationLabel.contains(...)` 改为 `asrDownloading` 布尔量，不再用文案做逻辑判断。
+- Qwen、MOSS 与 SenseVoice 的失败状态改为稳定错误码（`lastErrorCode`），设置页通过 `serviceErrorText` 映射到 ARB；未知原生错误才回退到原始详情。`service_error_text_test.dart` 锁定已知错误码的英文文案不含 CJK。
+- 语言数据与模型输入不放进 ARB：情感/cue 词表在 `lib/src/lexicon`（`emotion_lexicon.dart`、`speech_cue_lexicon.dart`、`moss_voice_catalog.dart`），角色系统提示词与离线重写指令在 `lib/src/prompts/persona_prompts.dart`。它们是“喂给模型/用于匹配的中文数据”，不是界面文案，翻译它们只会改变人设的推理语言。
+- 内置 provider 名称（如 `android-offline`）在磁盘上保持稳定英文标识，显示时经 `lib/src/l10n/provider_names.dart` 本地化，避免持久化配置把某一种语言写死。
+
+- 消息气泡只在“已完成”的消息上渲染 Markdown；流式阶段用纯文本，避免每个 token 重建 AST。
+- 完成态 Markdown 按 `content + ThemeData 实例 + TextScaler` 缓存 widget 实例，父级每 48 ms 重绘时不会重复解析历史消息；`message_bubble_cache_test.dart` 用构建计数验证这一点。
+- `ChatState.messages` 的不可变视图与 `displayMessages` 只在消息列表结构或流式状态变化时重建；流式 delta 通知不会每 48 ms 重新过滤整张消息表（`displayMessagesBuildCount` 测试锁定）。
 
 ### 没有真实 Key 时的验收边界
 

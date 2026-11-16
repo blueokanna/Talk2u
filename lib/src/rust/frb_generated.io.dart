@@ -132,6 +132,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  PartialReply dco_decode_partial_reply(dynamic raw);
+
+  @protected
   ProviderConfig dco_decode_provider_config(dynamic raw);
 
   @protected
@@ -279,6 +282,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   MemoryContextCard? sse_decode_opt_box_autoadd_memory_context_card(
     SseDeserializer deserializer,
   );
+
+  @protected
+  PartialReply sse_decode_partial_reply(SseDeserializer deserializer);
 
   @protected
   ProviderConfig sse_decode_provider_config(SseDeserializer deserializer);
@@ -459,6 +465,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     MemoryContextCard? self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_partial_reply(PartialReply self, SseSerializer serializer);
 
   @protected
   void sse_encode_provider_config(

@@ -11,6 +11,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
+import 'package:talk2u/src/l10n/app_strings.dart';
 import 'package:talk2u/src/services/pcm_capture.dart';
 
 @immutable
@@ -73,10 +74,11 @@ class SherpaSpeechService extends ChangeNotifier {
 
   static final instance = SherpaSpeechService._();
   static const activeProvider = 'QNN_HTP (SM8750/SM8850 v81)';
-  static const engineName = 'sherpa-onnx 端侧识别';
+  static const engineName = 'sherpa-onnx';
   static const engineLicense = 'Apache-2.0';
   static const asrModelName = 'SenseVoice 2024-07-17 INT8 (SM8750/SM8850 QNN)';
   static const _sampleRate = 16000;
+
   /// Ceiling for one utterance. The QNN window is 10 s and Kotlin transcribes
   /// longer audio window by window, so this only bounds memory.
   static const _maxAudioSeconds = 60;
@@ -145,14 +147,25 @@ class SherpaSpeechService extends ChangeNotifier {
   bool extracting = false;
   bool listening = false;
   bool recognizing = false;
+
   /// True unless a recognition attempt failed. The QNN link is checked at build
   /// time and at load time; this flag only tracks whether the last attempt worked.
   bool hardwareAccelerationVerified = true;
   int downloadedBytes = 0;
   int totalDownloadBytes = 0;
-  String operationLabel = '';
+
+  /// True while an ASR archive is being transferred; ZIP import is separate.
+  bool asrDownloading = false;
   String? lastError;
+
+  /// Stable failure code; settings maps it to localized text via ARB.
+  String? lastErrorCode;
   SenseVoiceRecognition? lastRecognition;
+
+  void _setLastError(String? code, String? message) {
+    lastErrorCode = code;
+    lastError = message;
+  }
 
   /// How many ten-second QNN windows the last utterance needed, and how long it
   /// was. Both come from the native side, so a truncated request is visible
@@ -218,8 +231,13 @@ class SherpaSpeechService extends ChangeNotifier {
       asrReady = await _validateAsr();
       await _deleteRemovedTtsAssets();
       lastError = null;
+      lastErrorCode = null;
+      lastErrorCode = null;
     } catch (error) {
-      lastError = '无法检查 sherpa-onnx 识别模型: $error';
+      _setLastError(
+        'sensevoice_capabilities_failed',
+        AppStrings.current.senseVoiceCheckFailed('$error'),
+      );
     } finally {
       initialized = true;
       notifyListeners();
@@ -284,40 +302,48 @@ class SherpaSpeechService extends ChangeNotifier {
   }
 
   Future<void> downloadAsr() async {
-    if (!supported) throw UnsupportedError('当前平台不支持 sherpa-onnx 语音识别');
+    if (!supported) {
+      throw UnsupportedError(AppStrings.current.senseVoiceUnsupported);
+    }
     if (downloading || extracting) return;
     final package = _asrPackage;
     await _downloadAndInstallArchive(
       package.asset,
       expectedDirectoryName: package.directoryName,
-      label: '正在下载 SenseVoice',
     );
     if (_cancelRequested) return;
     asrReady = await _validateAsr();
-    if (!asrReady) throw const FormatException('SenseVoice 模型文件不完整');
+    if (!asrReady) {
+      throw FormatException(AppStrings.current.senseVoiceModelIncomplete);
+    }
     notifyListeners();
   }
 
   /// Import SenseVoice model from a local ZIP file
   /// (e.g., sherpa-onnx-qnn-SM8850.zip placed on the device).
   Future<void> importAsrFromZip() async {
-    if (!supported) throw UnsupportedError('当前平台不支持 sherpa-onnx 语音识别');
+    if (!supported) {
+      throw UnsupportedError(AppStrings.current.senseVoiceUnsupported);
+    }
     if (downloading || extracting) return;
     downloading = true;
-    operationLabel = '请选择 sherpa-onnx-qnn-SM8850.zip 文件';
     lastError = null;
+    lastErrorCode = null;
     notifyListeners();
     try {
       final result = await _runtimeChannel.invokeMethod<bool>('importZip');
       if (result != true) {
-        throw const FormatException('SenseVoice 模型导入未完成');
+        throw FormatException(AppStrings.current.senseVoiceImportIncomplete);
       }
       await initialize();
       asrReady = await _validateAsr();
-      if (!asrReady) throw const FormatException('SenseVoice 模型文件不完整');
+      if (!asrReady) {
+        throw FormatException(AppStrings.current.senseVoiceModelIncomplete);
+      }
     } on PlatformException catch (error) {
       if (error.code != 'sherpa_import_cancelled') {
         lastError = error.message ?? error.code;
+        lastErrorCode = error.code;
         rethrow;
       }
     } finally {
@@ -326,21 +352,19 @@ class SherpaSpeechService extends ChangeNotifier {
     }
   }
 
-  Future<File> _downloadAsset(
-    _SpeechAsset asset, {
-    required String label,
-  }) async {
+  Future<File> _downloadAsset(_SpeechAsset asset) async {
     final root = await _rootDirectory();
     final destination = File(
       '${root.path}${Platform.pathSeparator}${asset.fileName}',
     );
     final partial = File('${destination.path}.part');
     downloading = true;
+    asrDownloading = true;
     _cancelRequested = false;
     downloadedBytes = 0;
     totalDownloadBytes = asset.size;
-    operationLabel = label;
     lastError = null;
+    lastErrorCode = null;
     notifyListeners();
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 20);
@@ -370,9 +394,6 @@ class SherpaSpeechService extends ChangeNotifier {
             existingBytes = 0;
           }
           downloadedBytes = existingBytes;
-          operationLabel = sourceIndex == 0
-              ? label
-              : '$label（备用源 $sourceIndex）';
           notifyListeners();
           final request = await client
               .getUrl(Uri.parse(asset.downloadUrls[sourceIndex]))
@@ -397,7 +418,7 @@ class SherpaSpeechService extends ChangeNotifier {
             if (contentRange == null ||
                 !contentRange.startsWith('bytes $existingBytes-')) {
               await response.drain<void>();
-              throw const HttpException('语音模型断点续传范围无效');
+              throw HttpException(AppStrings.current.voiceDownloadRangeInvalid);
             }
             append = true;
           } else if (response.statusCode == HttpStatus.ok) {
@@ -407,7 +428,9 @@ class SherpaSpeechService extends ChangeNotifier {
             downloadedBytes = 0;
           } else {
             await response.drain<void>();
-            throw HttpException('语音模型下载返回 HTTP ${response.statusCode}');
+            throw HttpException(
+              AppStrings.current.voiceDownloadHttp(response.statusCode),
+            );
           }
           sink = partial.openWrite(
             mode: append ? FileMode.append : FileMode.write,
@@ -428,12 +451,14 @@ class SherpaSpeechService extends ChangeNotifier {
           await sink.close();
           sink = null;
           if (await partial.length() != asset.size) {
-            throw const HttpException('语音模型连接提前结束，等待断点续传');
+            throw HttpException(AppStrings.current.voiceDownloadTruncated);
           }
           final digest = await sha256.bind(partial.openRead()).first;
           if (digest.toString() != asset.sha256) {
             await partial.delete();
-            throw const FormatException('语音模型 SHA-256 校验失败');
+            throw FormatException(
+              AppStrings.current.voiceDownloadChecksumFailed,
+            );
           }
           if (await destination.exists()) await destination.delete();
           return await partial.rename(destination.path);
@@ -454,9 +479,14 @@ class SherpaSpeechService extends ChangeNotifier {
       if (lastFailure != null) {
         Error.throwWithStackTrace(lastFailure, StackTrace.current);
       }
-      throw const HttpException('语音模型下载源均不可用');
+      throw HttpException(AppStrings.current.voiceDownloadSourcesUnavailable);
     } catch (error) {
-      lastError = _cancelRequested ? null : error.toString();
+      if (_cancelRequested) {
+        lastError = null;
+        lastErrorCode = null;
+      } else {
+        _setLastError('sensevoice_download_failed', error.toString());
+      }
       if (_cancelRequested && await partial.exists()) await partial.delete();
       if (!_cancelRequested) rethrow;
       throw const _SpeechDownloadCancelled();
@@ -465,6 +495,7 @@ class SherpaSpeechService extends ChangeNotifier {
       _downloadRequest = null;
       client.close(force: true);
       downloading = false;
+      asrDownloading = false;
       notifyListeners();
     }
   }
@@ -472,10 +503,9 @@ class SherpaSpeechService extends ChangeNotifier {
   Future<void> _downloadAndInstallArchive(
     _SpeechAsset asset, {
     required String expectedDirectoryName,
-    required String label,
   }) async {
     try {
-      final archive = await _downloadAsset(asset, label: label);
+      final archive = await _downloadAsset(asset);
       final root = await _rootDirectory();
       final staging = Directory(
         '${root.path}${Platform.pathSeparator}.$expectedDirectoryName-installing',
@@ -483,7 +513,6 @@ class SherpaSpeechService extends ChangeNotifier {
       if (await staging.exists()) await staging.delete(recursive: true);
       await staging.create(recursive: true);
       extracting = true;
-      operationLabel = '正在安装语音识别模型';
       notifyListeners();
       try {
         await Isolate.run(() => extractFileToDisk(archive.path, staging.path));
@@ -491,7 +520,7 @@ class SherpaSpeechService extends ChangeNotifier {
           '${staging.path}${Platform.pathSeparator}$expectedDirectoryName',
         );
         if (!await extracted.exists()) {
-          throw const FormatException('语音识别模型归档目录无效');
+          throw FormatException(AppStrings.current.voiceArchiveDirInvalid);
         }
         final model = File(
           '${extracted.path}${Platform.pathSeparator}model.bin',
@@ -500,7 +529,7 @@ class SherpaSpeechService extends ChangeNotifier {
           '${extracted.path}${Platform.pathSeparator}tokens.txt',
         );
         if (!await model.exists() || !await tokens.exists()) {
-          throw const FormatException('SenseVoice QNN context 文件不完整');
+          throw FormatException(AppStrings.current.senseVoiceContextIncomplete);
         }
         final modelDigest = await sha256.bind(model.openRead()).first;
         final tokensDigest = await sha256.bind(tokens.openRead()).first;
@@ -542,11 +571,15 @@ class SherpaSpeechService extends ChangeNotifier {
 
   void cancelDownload() {
     _cancelRequested = true;
-    _downloadRequest?.abort(const HttpException('用户取消语音识别模型下载'));
+    _downloadRequest?.abort(
+      HttpException(AppStrings.current.voiceDownloadCancelled),
+    );
   }
 
   Future<void> deleteAsr() async {
-    if (listening || recognizing) throw StateError('请先停止语音识别');
+    if (listening || recognizing) {
+      throw StateError(AppStrings.current.speechStopFirst);
+    }
     await _releaseRuntime();
     final directory = await _asrDirectory();
     if (await directory.exists()) await directory.delete(recursive: true);
@@ -562,6 +595,7 @@ class SherpaSpeechService extends ChangeNotifier {
     }
     listening = true;
     lastError = null;
+    lastErrorCode = null;
     notifyListeners();
     final operation = _startListeningOnce();
     _startOperation = operation;
@@ -573,9 +607,11 @@ class SherpaSpeechService extends ChangeNotifier {
   Future<void> _startListeningOnce() async {
     try {
       await initialize();
-      if (!asrReady) throw StateError('请先下载 SenseVoice 离线识别模型');
+      if (!asrReady) {
+        throw StateError(AppStrings.current.senseVoiceNotInstalled);
+      }
       if (!await _permissionRecorder.hasPermission()) {
-        throw StateError('麦克风权限未授予');
+        throw StateError(AppStrings.current.micPermissionDenied);
       }
       _recordedAudio = BytesBuilder(copy: false);
       _speechDetected = false;
@@ -610,6 +646,7 @@ class SherpaSpeechService extends ChangeNotifier {
         },
         onError: (Object error) {
           lastError = error.toString();
+          lastErrorCode = 'sensevoice_recognition_failed';
           if (listening) {
             unawaited(stopListening().catchError((_) => null));
           } else {
@@ -630,7 +667,7 @@ class SherpaSpeechService extends ChangeNotifier {
       _recordedAudio = null;
       await _capture?.stop();
       _capture = null;
-      lastError = error.toString();
+      _setLastError('sensevoice_recognition_failed', error.toString());
       notifyListeners();
       rethrow;
     }
@@ -710,7 +747,7 @@ class SherpaSpeechService extends ChangeNotifier {
   void _stopListeningInBackground() {
     unawaited(
       stopListening().catchError((Object error) {
-        lastError = error.toString();
+        _setLastError('sensevoice_recording_failed', error.toString());
         notifyListeners();
         return null;
       }),
@@ -757,9 +794,9 @@ class SherpaSpeechService extends ChangeNotifier {
     final recordedBytes = _recordedAudio?.takeBytes() ?? Uint8List(0);
     _recordedAudio = null;
     if (recorderError != null) {
-      lastError = recorderError.toString();
+      _setLastError('sensevoice_recording_failed', recorderError.toString());
       notifyListeners();
-      throw StateError('停止麦克风录音失败：$recorderError');
+      throw StateError(AppStrings.current.micStopFailed('$recorderError'));
     }
     if (recordedBytes.isEmpty) {
       notifyListeners();
@@ -782,7 +819,9 @@ class SherpaSpeechService extends ChangeNotifier {
         'recognize',
         {'modelRoot': directory.path, 'pcm16le': bytes},
       );
-      if (value == null) throw StateError('SenseVoice QNN 未返回识别结果');
+      if (value == null) {
+        throw StateError(AppStrings.current.senseVoiceNoResult);
+      }
       final recognition = SenseVoiceRecognition.fromMap(value);
       // The QNN build is verified at build time (the AAR check in
       // app/build.gradle.kts refuses a JNI without the QNN interface) and the
@@ -798,7 +837,7 @@ class SherpaSpeechService extends ChangeNotifier {
       return recognition.text;
     } catch (error) {
       hardwareAccelerationVerified = false;
-      lastError = error.toString();
+      _setLastError('sensevoice_recognition_failed', error.toString());
       rethrow;
     } finally {
       // The recognizer stays loaded: releasing it here made every turn pay for a

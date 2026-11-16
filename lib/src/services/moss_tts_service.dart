@@ -8,28 +8,27 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:talk2u/src/l10n/app_strings.dart';
+import 'package:talk2u/src/lexicon/moss_voice_catalog.dart';
+import 'package:talk2u/src/lexicon/speech_cue_lexicon.dart';
 import 'package:talk2u/src/services/speech_text_normalizer.dart';
 
-@immutable
-class MossVoice {
-  final String id;
-  final String label;
-  final String locale;
-  final String gender;
+export 'package:talk2u/src/lexicon/moss_voice_catalog.dart' show MossVoice;
 
-  const MossVoice({
-    required this.id,
-    required this.label,
-    required this.locale,
-    required this.gender,
-  });
-
-  String get displayLabel {
-    final genderLabel = gender == 'male' ? '男声' : '女声';
-    return '$label · $genderLabel';
-  }
+/// Setup stages surfaced by the settings card. User-visible text lives in ARB;
+/// services only report the stage.
+enum MossOperation {
+  idle,
+  initializingRuntime,
+  runtimeReady,
+  chooseDirectory,
+  chooseZip,
+  importing,
+  imported,
+  importedAndInitialized,
 }
 
+@immutable
 class _MossAudio {
   final File file;
   final List<double> amplitudeEnvelope;
@@ -113,7 +112,10 @@ class MossTtsService extends ChangeNotifier {
   static const engineLicense = 'Apache-2.0';
   static const modelName = 'MOSS-TTS-Nano 100M ONNX';
   static const amplitudeFrameMilliseconds = 20;
-  static const modelBytes = 717414286;
+
+  /// Nominal size of a full deployment package. Only a hint for the UI: the
+  /// installed size is measured by the native importer and replaces it.
+  static const estimatedModelBytes = 717414286;
   final MethodChannel _channel;
   final bool? _platformSupported;
   final Future<Directory> Function() _temporaryDirectory;
@@ -121,31 +123,7 @@ class MossTtsService extends ChangeNotifier {
   static const _rootName = 'moss-tts-nano';
   static const _preferencesName = 'preferences.json';
 
-  static const voices = <MossVoice>[
-    MossVoice(id: 'Junhao', label: '君豪', locale: 'zh-CN', gender: 'male'),
-    MossVoice(id: 'Zhiming', label: '志明·京味', locale: 'zh-CN', gender: 'male'),
-    MossVoice(id: 'Weiguo', label: '卫国·说书', locale: 'zh-CN', gender: 'male'),
-    MossVoice(id: 'Xiaoyu', label: '小雨', locale: 'zh-CN', gender: 'female'),
-    MossVoice(id: 'Yuewen', label: '悦雯·机车', locale: 'zh-CN', gender: 'female'),
-    MossVoice(
-      id: 'Lingyu',
-      label: '凌语·深夜电台',
-      locale: 'zh-CN',
-      gender: 'female',
-    ),
-    MossVoice(id: 'Trump', label: 'Trump', locale: 'en-US', gender: 'male'),
-    MossVoice(id: 'Ava', label: 'Ava', locale: 'en-US', gender: 'female'),
-    MossVoice(id: 'Bella', label: 'Bella', locale: 'en-US', gender: 'female'),
-    MossVoice(id: 'Adam', label: 'Adam', locale: 'en-US', gender: 'male'),
-    MossVoice(id: 'Nathan', label: 'Nathan', locale: 'en-US', gender: 'male'),
-    MossVoice(id: 'Soyo', label: 'Soyo', locale: 'ja-JP', gender: 'female'),
-    MossVoice(id: 'Saki', label: 'Saki', locale: 'ja-JP', gender: 'female'),
-    MossVoice(id: 'Mortis', label: 'Mortis', locale: 'ja-JP', gender: 'female'),
-    MossVoice(id: 'Umiri', label: 'Umiri', locale: 'ja-JP', gender: 'female'),
-    MossVoice(id: 'Mei', label: 'Mei', locale: 'ja-JP', gender: 'female'),
-    MossVoice(id: 'Anon', label: 'Anon', locale: 'ja-JP', gender: 'female'),
-    MossVoice(id: 'Arisa', label: 'Arisa', locale: 'ja-JP', gender: 'female'),
-  ];
+  static const voices = mossVoiceCatalog;
 
   final AudioPlayer _player;
   StreamSubscription<void>? _completeSubscription;
@@ -179,11 +157,14 @@ class MossTtsService extends ChangeNotifier {
   bool generating = false;
   bool speaking = false;
   int downloadedBytes = 0;
-  int totalDownloadBytes = modelBytes;
+  int totalDownloadBytes = 0;
   double playbackAmplitude = 0;
   double playbackProgress = 0;
-  String operationLabel = '';
+  MossOperation operation = MossOperation.idle;
   String? lastError;
+
+  /// Stable failure code; the settings card localizes it via ARB.
+  String? lastErrorCode;
   List<String> runtimeProviders = const [];
   String activeProvider = 'UNVERIFIED';
   bool _providerMeasured = false;
@@ -211,10 +192,12 @@ class MossTtsService extends ChangeNotifier {
       return 'Qualcomm QNN HTP + ORT CPU';
     }
     if (hardwareAccelerationVerified) return 'Qualcomm QNN HTP';
-    if (runtimeInitialized) return 'Qualcomm QNN HTP + ORT CPU · 已初始化';
-    if (initializing) return 'QNN HTP 正在初始化';
-    if (runtimeProviders.contains('QNN_HTP')) return 'QNN HTP 候选 · 尚未执行验证';
-    return 'QNN HTP 不可用';
+    if (runtimeInitialized) return AppStrings.current.mossAccelInitialized;
+    if (initializing) return AppStrings.current.mossAccelInitializing;
+    if (runtimeProviders.contains('QNN_HTP')) {
+      return AppStrings.current.mossAccelCandidate;
+    }
+    return AppStrings.current.mossRuntimeUnavailable;
   }
 
   static bool _isQnnProvider(String provider) {
@@ -272,10 +255,14 @@ class MossTtsService extends ChangeNotifier {
       }
       // Startup probes availability only. Load QNN contexts on first speech.
       await _cleanupAudioCache();
-      lastError = runtimeReady ? null : 'Qualcomm QNN HTP 运行时不可用';
+      lastError = runtimeReady
+          ? null
+          : AppStrings.current.mossRuntimeUnavailable;
+      lastErrorCode = runtimeReady ? null : 'moss_runtime_unavailable';
     } catch (error) {
       runtimeInitialized = false;
-      lastError = '无法自动初始化 MOSS QNN 运行时: $error';
+      lastError = AppStrings.current.mossRuntimeInitFailed('$error');
+      lastErrorCode = 'moss_initialization_failed';
     } finally {
       initializing = false;
       initialized = true;
@@ -300,7 +287,7 @@ class MossTtsService extends ChangeNotifier {
 
   Future<void> _initializeNativeRuntimeOnce() async {
     initializing = true;
-    operationLabel = '正在初始化 QNN HTP 上下文';
+    operation = MossOperation.initializingRuntime;
     notifyListeners();
     try {
       final state = await _channel.invokeMapMethod<dynamic, dynamic>(
@@ -309,10 +296,10 @@ class MossTtsService extends ChangeNotifier {
       runtimeInitialized = state?['initialized'] == true;
       if (!runtimeInitialized) {
         throw StateError(
-          state?['error']?.toString() ?? 'Native MOSS runtime 未就绪',
+          state?['error']?.toString() ?? AppStrings.current.mossRuntimeNotReady,
         );
       }
-      operationLabel = 'MOSS QNN HTP 已初始化';
+      operation = MossOperation.runtimeReady;
     } finally {
       initializing = false;
       notifyListeners();
@@ -321,12 +308,17 @@ class MossTtsService extends ChangeNotifier {
 
   Future<void> importModel() async {
     await initialize();
-    if (!supported) throw UnsupportedError('MOSS QNN 模型导入仅支持 Android');
-    if (!runtimeReady) throw StateError('Qualcomm QNN HTP 运行时不可用');
+    if (!supported) {
+      throw UnsupportedError(AppStrings.current.mossImportAndroidOnly);
+    }
+    if (!runtimeReady) {
+      throw StateError(AppStrings.current.mossRuntimeUnavailable);
+    }
     if (downloading) return;
     downloading = true;
-    operationLabel = '请选择包含 moss-qnn-deployment.json 的目录';
+    operation = MossOperation.chooseDirectory;
     lastError = null;
+    lastErrorCode = null;
     notifyListeners();
     try {
       final model = await _channel.invokeMapMethod<dynamic, dynamic>(
@@ -338,14 +330,15 @@ class MossTtsService extends ChangeNotifier {
         downloadedBytes = (model!['bytes'] as num).toInt();
         totalDownloadBytes = downloadedBytes;
       }
-      operationLabel = runtimeInitialized
-          ? 'MOSS QNN HTP 模型已导入并初始化'
+      operation = runtimeInitialized
+          ? MossOperation.importedAndInitialized
           : ready
-          ? 'MOSS QNN HTP 模型已导入'
-          : '';
+          ? MossOperation.imported
+          : MossOperation.idle;
     } on PlatformException catch (error) {
       if (error.code != 'moss_import_cancelled') {
         lastError = error.message ?? error.code;
+        lastErrorCode = error.code;
         rethrow;
       }
     } finally {
@@ -357,12 +350,17 @@ class MossTtsService extends ChangeNotifier {
   /// Import MOSS model from a ZIP archive (moss-qnn-v81-streaming.zip).
   Future<void> importModelFromZip() async {
     await initialize();
-    if (!supported) throw UnsupportedError('MOSS QNN ZIP 导入仅支持 Android');
-    if (!runtimeReady) throw StateError('Qualcomm QNN HTP 运行时不可用');
+    if (!supported) {
+      throw UnsupportedError(AppStrings.current.mossZipImportAndroidOnly);
+    }
+    if (!runtimeReady) {
+      throw StateError(AppStrings.current.mossRuntimeUnavailable);
+    }
     if (downloading) return;
     downloading = true;
-    operationLabel = '请选择 moss-qnn-v81-streaming.zip 文件';
+    operation = MossOperation.chooseZip;
     lastError = null;
+    lastErrorCode = null;
     notifyListeners();
     try {
       final model = await _channel.invokeMapMethod<dynamic, dynamic>(
@@ -374,14 +372,15 @@ class MossTtsService extends ChangeNotifier {
         downloadedBytes = (model!['bytes'] as num).toInt();
         totalDownloadBytes = downloadedBytes;
       }
-      operationLabel = runtimeInitialized
-          ? 'MOSS QNN HTP 模型已导入并初始化'
+      operation = runtimeInitialized
+          ? MossOperation.importedAndInitialized
           : ready
-          ? 'MOSS QNN HTP 模型已导入'
-          : '';
+          ? MossOperation.imported
+          : MossOperation.idle;
     } on PlatformException catch (error) {
       if (error.code != 'moss_import_cancelled') {
         lastError = error.message ?? error.code;
+        lastErrorCode = error.code;
         rethrow;
       }
     } finally {
@@ -391,11 +390,6 @@ class MossTtsService extends ChangeNotifier {
   }
 
   Future<void> downloadModel() => importModel();
-
-  void pauseDownload() {
-    operationLabel = '模型导入完成前请勿关闭应用';
-    notifyListeners();
-  }
 
   Future<void> selectVoice(String voiceId) async {
     if (!voices.any((voice) => voice.id == voiceId)) {
@@ -441,7 +435,7 @@ class MossTtsService extends ChangeNotifier {
     if (operation != _operation || _disposed) return;
     await initialize();
     if (operation != _operation || _disposed) return;
-    if (!ready) throw StateError('请先导入 MOSS QNN HTP v81 部署包');
+    if (!ready) throw StateError(AppStrings.current.mossImportFirst);
     if (!runtimeInitialized) await _initializeNativeRuntime();
     if (operation != _operation || _disposed) return;
     final startup = Completer<void>();
@@ -454,6 +448,7 @@ class MossTtsService extends ChangeNotifier {
     _playbackDuration = Duration.zero;
     _amplitudeEnvelope = const [];
     lastError = null;
+    lastErrorCode = null;
     notifyListeners();
     unawaited(_runSpeech(normalized, operation, startup, completion));
     await startup.future;
@@ -545,6 +540,7 @@ class MossTtsService extends ChangeNotifier {
       generating = false;
       speaking = false;
       lastError = error.message ?? error.code;
+      lastErrorCode = error.code;
       notifyListeners();
       if (!startup.isCompleted) {
         startup.completeError(error, StackTrace.current);
@@ -559,6 +555,7 @@ class MossTtsService extends ChangeNotifier {
       generating = false;
       speaking = false;
       lastError = error.toString();
+      lastErrorCode = 'moss_synthesis_failed';
       notifyListeners();
       if (!startup.isCompleted) startup.completeError(error, stackTrace);
     } finally {
@@ -613,13 +610,13 @@ class MossTtsService extends ChangeNotifier {
       if (operation != _operation) throw const _MossCancelled();
       final provider = response?['provider'] as String?;
       if (provider == null || provider.isEmpty) {
-        throw StateError('MOSS-TTS-Nano 未返回有效的执行 provider');
+        throw StateError(AppStrings.current.mossProviderMissing);
       }
       activeProvider = provider;
       _providerMeasured = true;
       final outputPath = response?['path'] as String?;
       if (outputPath == null) {
-        throw StateError('MOSS-TTS-Nano 没有生成可播放音频');
+        throw StateError(AppStrings.current.mossNoAudio);
       }
       final generatedOutput = File(outputPath);
       if (generatedOutput.path != output.path) {
@@ -628,7 +625,7 @@ class MossTtsService extends ChangeNotifier {
         _pendingOutputs[output] = operation;
       }
       if (!await isPlayableMossWav(output)) {
-        throw StateError('MOSS-TTS-Nano 生成的音频文件无效');
+        throw StateError(AppStrings.current.mossAudioInvalid);
       }
       final envelope = await Isolate.run(
         () => buildWavAmplitudeEnvelope(output.path),
@@ -769,7 +766,7 @@ class MossTtsService extends ChangeNotifier {
   }
 
   Future<void> deleteModel() async {
-    if (downloading) throw StateError('请等待当前模型导入结束');
+    if (downloading) throw StateError(AppStrings.current.mossImportBusyWait);
     await stopSpeaking();
     if (supported) {
       await _channel.invokeMethod<void>('deleteModel');
@@ -851,8 +848,8 @@ List<String> splitMossText(String source, {int maxCharacters = 110}) {
   if (text.isEmpty) return const [];
   final output = <String>[];
   final buffer = <int>[];
-  const strong = '。！？!?…\n';
-  const soft = '，、；：,;: ';
+  const strong = mossSentenceBreakCharacters;
+  const soft = mossClauseBreakCharacters;
   void flush() {
     final value = String.fromCharCodes(buffer).trim();
     if (value.isNotEmpty) output.add(value);
@@ -916,13 +913,13 @@ List<double> buildWavAmplitudeEnvelope(
   try {
     final fileLength = input.lengthSync();
     if (fileLength < 44) {
-      throw const FormatException('MOSS-TTS-Nano 输出 WAV 无效');
+      throw FormatException(AppStrings.current.mossWavInvalid);
     }
     final header = input.readSync(12);
     if (header.length != 12 ||
         ascii.decode(header.sublist(0, 4), allowInvalid: true) != 'RIFF' ||
         ascii.decode(header.sublist(8, 12), allowInvalid: true) != 'WAVE') {
-      throw const FormatException('MOSS-TTS-Nano 输出 WAV 无效');
+      throw FormatException(AppStrings.current.mossWavInvalid);
     }
     var offset = 12;
     var sampleRate = 0;
@@ -949,7 +946,7 @@ List<double> buildWavAmplitudeEnvelope(
         if (format.length != 16) break;
         final data = ByteData.sublistView(format);
         if (data.getUint16(0, Endian.little) != 1) {
-          throw const FormatException('MOSS WAV 不是 PCM');
+          throw FormatException(AppStrings.current.mossWavNotPcm);
         }
         channels = data.getUint16(2, Endian.little);
         sampleRate = data.getUint32(4, Endian.little);
@@ -966,7 +963,7 @@ List<double> buildWavAmplitudeEnvelope(
         bitsPerSample != 16 ||
         pcmOffset < 0 ||
         pcmLength <= 0) {
-      throw const FormatException('MOSS WAV PCM 参数无效');
+      throw FormatException(AppStrings.current.mossWavPcmInvalid);
     }
     final bytesPerFrame = channels * 2;
     final totalFrames = pcmLength ~/ bytesPerFrame;
@@ -978,7 +975,7 @@ List<double> buildWavAmplitudeEnvelope(
       final frameCount = math.min(envelopeFrames, remainingFrames);
       final pcm = input.readSync(frameCount * bytesPerFrame);
       if (pcm.length != frameCount * bytesPerFrame) {
-        throw const FormatException('MOSS WAV PCM 数据不完整');
+        throw FormatException(AppStrings.current.mossWavPcmTruncated);
       }
       final data = ByteData.sublistView(pcm);
       var sumSquares = 0.0;

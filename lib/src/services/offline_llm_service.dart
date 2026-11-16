@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:talk2u/src/l10n/app_strings.dart';
 
 @immutable
 class OfflineChatMessage {
@@ -17,7 +18,7 @@ class OfflineGenerationCancelled implements Exception {
   const OfflineGenerationCancelled();
 
   @override
-  String toString() => '端侧生成已停止';
+  String toString() => AppStrings.current.offlineGenerationStopped;
 }
 
 class OfflineLlmFailure implements Exception {
@@ -52,8 +53,22 @@ class OfflineLlmService extends ChangeNotifier {
   bool generating = false;
   int downloadedBytes = 0;
   int totalDownloadBytes = 0;
+
+  /// Smoothed bytes per second while a hub pull is running; 0 when unknown.
+  double downloadBytesPerSecond = 0;
+  DateTime? _lastSpeedSampleAt;
+  int _lastSpeedSampleBytes = 0;
   String? lastError;
+
+  /// Stable code for the current failure; settings maps it to localized text
+  /// instead of rendering the raw (often native-language) message.
+  String? lastErrorCode;
   Map<String, dynamic> runtimeCapabilities = const {};
+
+  void _setLastError(String? code, String? message) {
+    lastErrorCode = code;
+    lastError = message;
+  }
 
   Future<void>? _initializing;
   bool _runtimeLoaded = false;
@@ -73,16 +88,27 @@ class OfflineLlmService extends ChangeNotifier {
   String get accelerationDescription {
     final verified = runtimeCapabilities['activeBackendVerified'] == true;
     return switch (activeBackend) {
-      'geniex-qairt-npu' when verified => 'Qualcomm QNN HTP/NPU（已验证）',
-      'geniex-qairt-npu' => 'Qualcomm QNN HTP/NPU 已加载，等待首轮执行验证',
-      _ when modelReady => 'GenieX QAIRT/NPU 尚未加载',
-      _ => 'GenieX QAIRT/NPU 模型尚未安装',
+      'geniex-qairt-npu' when verified => AppStrings.current.qnnAccelVerified,
+      'geniex-qairt-npu' => AppStrings.current.qnnAccelLoadedPending,
+      _ when modelReady => AppStrings.current.geniexNotLoaded,
+      _ => AppStrings.current.geniexNotInstalled,
     };
   }
 
   double get downloadProgress => totalDownloadBytes <= 0
       ? 0
       : (downloadedBytes / totalDownloadBytes).clamp(0, 1);
+
+  /// Remaining transfer time at the current smoothed rate, or null when the
+  /// total size or rate is still unknown.
+  Duration? get downloadEta {
+    final total = totalDownloadBytes;
+    final speed = downloadBytesPerSecond;
+    if (!downloading || total <= 0 || speed <= 0) return null;
+    final remaining = total - downloadedBytes;
+    if (remaining <= 0) return Duration.zero;
+    return Duration(seconds: (remaining / speed).ceil());
+  }
 
   Future<void> initialize() {
     if (initialized) return Future.value();
@@ -108,10 +134,13 @@ class OfflineLlmService extends ChangeNotifier {
         downloadedBytes = bytes.toInt();
         totalDownloadBytes = bytes.toInt();
       }
-      lastError = null;
+      _setLastError(null, null);
     } catch (error) {
       modelReady = false;
-      lastError = '无法检查 $modelName QAIRT/NPU 模型：$error';
+      _setLastError(
+        'qwen3_capabilities_failed',
+        AppStrings.current.qwenCapabilitiesCheckFailed(modelName, '$error'),
+      );
     } finally {
       initialized = true;
       notifyListeners();
@@ -143,6 +172,7 @@ class OfflineLlmService extends ChangeNotifier {
       final total = arguments['totalBytes'];
       if (downloaded is num) downloadedBytes = downloaded.toInt();
       if (total is num) totalDownloadBytes = total.toInt();
+      _sampleDownloadSpeed();
       notifyListeners();
       return;
     }
@@ -158,9 +188,38 @@ class OfflineLlmService extends ChangeNotifier {
     _activeTextCallback?.call(text);
   }
 
+  /// Smoothed transfer rate over real time, so a slow hub is visible instead of
+  /// looking like a frozen percentage. Samples arrive far more often than 250 ms.
+  void _sampleDownloadSpeed() {
+    final now = DateTime.now();
+    final last = _lastSpeedSampleAt;
+    if (last == null) {
+      _lastSpeedSampleAt = now;
+      _lastSpeedSampleBytes = downloadedBytes;
+      return;
+    }
+    final elapsed = now.difference(last);
+    if (elapsed < const Duration(milliseconds: 250)) return;
+    final deltaBytes = downloadedBytes - _lastSpeedSampleBytes;
+    final seconds = elapsed.inMicroseconds / Duration.microsecondsPerSecond;
+    _lastSpeedSampleAt = now;
+    _lastSpeedSampleBytes = downloadedBytes;
+    if (deltaBytes < 0 || seconds <= 0) return;
+    final instant = deltaBytes / seconds;
+    downloadBytesPerSecond = downloadBytesPerSecond <= 0
+        ? instant
+        : downloadBytesPerSecond * 0.7 + instant * 0.3;
+  }
+
+  void _resetDownloadTelemetry() {
+    downloadBytesPerSecond = 0;
+    _lastSpeedSampleAt = null;
+    _lastSpeedSampleBytes = 0;
+  }
+
   Future<void> downloadModel() async {
     if (!supported) {
-      throw UnsupportedError('$modelName QAIRT/NPU 模型当前仅支持 Android');
+      throw UnsupportedError(AppStrings.current.qwenAndroidOnly(modelName));
     }
     if (downloading) return;
     await initialize();
@@ -168,14 +227,15 @@ class OfflineLlmService extends ChangeNotifier {
     downloading = true;
     downloadedBytes = 0;
     totalDownloadBytes = 0;
-    lastError = null;
+    _setLastError(null, null);
+    _resetDownloadTelemetry();
     notifyListeners();
     try {
       final status = await _runtimeChannel.invokeMapMethod<Object?, Object?>(
         'download',
       );
       if (status == null || status['modelReady'] != true) {
-        throw StateError('GenieX 下载完成后未检测到 Qwen3 QAIRT/NPU 模型');
+        throw StateError(AppStrings.current.qwenDownloadedNotDetected);
       }
       _mergeRuntimeState(status);
       modelReady = true;
@@ -185,17 +245,31 @@ class OfflineLlmService extends ChangeNotifier {
         totalDownloadBytes = bytes.toInt();
       }
     } on PlatformException catch (error) {
-      lastError = error.message ?? error.code;
+      final raw = error.message ?? error.code;
+      final cancelled = raw.toLowerCase().contains('cancel');
+      // The SDK keeps partial files and resumes on the next pull, so a paused or
+      // failed attempt never costs the bytes already transferred.
+      lastError = cancelled
+          ? AppStrings.current.qwenDownloadPausedDetail
+          : AppStrings.current.qwenDownloadFailedDetail(raw);
+      lastErrorCode = cancelled
+          ? 'qwen3_download_cancelled'
+          : 'qwen3_download_failed';
+      _resetDownloadTelemetry();
       throw OfflineLlmFailure(
         error.code,
-        'Qwen3 QAIRT/NPU 模型下载失败：${error.message ?? error.code}',
+        cancelled
+            ? AppStrings.current.qwenDownloadPaused
+            : AppStrings.current.qwenDownloadFailedDetail(raw),
         error.details,
       );
     } catch (error) {
-      lastError = error.toString();
+      _setLastError('qwen3_download_failed', error.toString());
+      _resetDownloadTelemetry();
       rethrow;
     } finally {
       downloading = false;
+      _resetDownloadTelemetry();
       notifyListeners();
     }
   }
@@ -206,7 +280,7 @@ class OfflineLlmService extends ChangeNotifier {
   }
 
   Future<void> deleteModel() async {
-    if (generating) throw StateError('请先等待当前端侧回复完成');
+    if (generating) throw StateError(AppStrings.current.waitForCurrentReply);
     await _runtimeChannel.invokeMethod<void>('deleteModel');
     _runtimeLoaded = false;
     modelReady = false;
@@ -219,32 +293,36 @@ class OfflineLlmService extends ChangeNotifier {
       'modelReady': false,
       'modelBytes': 0,
     };
-    lastError = null;
+    _setLastError(null, null);
     notifyListeners();
   }
 
   Future<void> _ensureRuntime() async {
     if (_runtimeLoaded) return;
     await initialize();
-    if (!modelReady) throw StateError('请先下载 $modelName QAIRT/NPU 模型');
+    if (!modelReady) {
+      throw StateError(AppStrings.current.qwenDownloadFirst(modelName));
+    }
     loadingModel = true;
-    lastError = null;
+    _setLastError(null, null);
     notifyListeners();
     try {
       final result = await _runtimeChannel.invokeMapMethod<Object?, Object?>(
         'load',
       );
-      if (result == null) throw StateError('GenieX 没有返回模型加载结果');
+      if (result == null) {
+        throw StateError(AppStrings.current.geniexLoadResultMissing);
+      }
       _mergeRuntimeState(result);
       if (activeBackend != 'geniex-qairt-npu') {
-        throw StateError('拒绝非 QAIRT/NPU 的 Qwen3 执行后端');
+        throw StateError(AppStrings.current.qwenBackendRejected);
       }
       _runtimeLoaded = true;
     } on PlatformException catch (error) {
-      lastError = error.message ?? error.code;
+      _setLastError('qwen3_load_failed', error.message ?? error.code);
       throw OfflineLlmFailure(
         error.code,
-        'Qwen3 QAIRT/NPU 模型加载失败：${error.message ?? error.code}',
+        AppStrings.current.qwenLoadFailedDetail(error.message ?? error.code),
         error.details,
       );
     } finally {
@@ -257,7 +335,7 @@ class OfflineLlmService extends ChangeNotifier {
     List<OfflineChatMessage> messages, {
     ValueChanged<String>? onText,
   }) async {
-    if (generating) throw StateError('端侧模型正在生成上一条回复');
+    if (generating) throw StateError(AppStrings.current.offlineModelBusy);
     final normalized = messages
         .where((message) => message.content.trim().isNotEmpty)
         .toList(growable: false);
@@ -270,7 +348,7 @@ class OfflineLlmService extends ChangeNotifier {
     _activeGenerationId = generationId;
     _activeTextCallback = onText;
     _lastStreamedText = '';
-    lastError = null;
+    _setLastError(null, null);
     notifyListeners();
     try {
       await _ensureRuntime();
@@ -285,7 +363,9 @@ class OfflineLlmService extends ChangeNotifier {
         await _loadRuntimeCapabilities();
         if (_stopRequested) throw const OfflineGenerationCancelled();
         final text = (result ?? '').trim();
-        if (text.isEmpty) throw StateError('Qwen3 QAIRT/NPU 没有返回文本');
+        if (text.isEmpty) {
+          throw StateError(AppStrings.current.qwenEmptyResponse);
+        }
         if (_lastStreamedText.trim() != text) onText?.call(text);
         return text;
       } on PlatformException catch (error) {
@@ -293,12 +373,16 @@ class OfflineLlmService extends ChangeNotifier {
         _runtimeLoaded = false;
         throw OfflineLlmFailure(
           error.code,
-          'Qwen3 QAIRT/NPU 端侧生成失败：${error.message ?? error.code}',
+          AppStrings.current.qwenGenerateFailedDetail(
+            error.message ?? error.code,
+          ),
           error.details,
         );
       }
     } catch (error) {
-      if (error is! OfflineGenerationCancelled) lastError = error.toString();
+      if (error is! OfflineGenerationCancelled) {
+        _setLastError('qwen3_generate_failed', error.toString());
+      }
       rethrow;
     } finally {
       _stopRequested = false;

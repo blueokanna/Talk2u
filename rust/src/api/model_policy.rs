@@ -113,7 +113,11 @@ mod tests {
     fn toggleable_models_honour_the_switch() {
         for model in ["glm-5.2", "glm-4.6", "glm-4.5-air"] {
             assert_eq!(thinking_for(model, true), ThinkingWire::Enabled, "{model}");
-            assert_eq!(thinking_for(model, false), ThinkingWire::Disabled, "{model}");
+            assert_eq!(
+                thinking_for(model, false),
+                ThinkingWire::Disabled,
+                "{model}"
+            );
             assert!(can_reason(model), "{model}");
         }
     }
@@ -134,7 +138,10 @@ mod tests {
         assert!(ThinkingWire::Omit.body().is_none());
 
         let enabled = ThinkingWire::Enabled.body().expect("enabled body");
-        assert_eq!(enabled.get("type").and_then(|v| v.as_str()), Some("enabled"));
+        assert_eq!(
+            enabled.get("type").and_then(|v| v.as_str()),
+            Some("enabled")
+        );
         assert!(enabled.get("budget_tokens").is_none());
 
         let disabled = ThinkingWire::Disabled.body().expect("disabled body");

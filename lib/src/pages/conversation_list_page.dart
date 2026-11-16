@@ -113,7 +113,9 @@ class ConversationListPage extends StatelessWidget {
       itemCount: conversations.length,
       itemBuilder: (context, index) {
         final conv = conversations[index];
-        final title = conv.title.isEmpty ? strings.untitledConversation : conv.title;
+        final title = conv.title.isEmpty
+            ? strings.untitledConversation
+            : conv.title;
         final isSelected = conv.id == currentConversationId;
 
         return Padding(

@@ -1,8 +1,12 @@
-gradle-wrapper.jar
+# The Gradle wrapper is committed on purpose: CI runs `gradlew` directly and
+# Flutter only regenerates the wrapper as a side effect of a full build, which
+# needs the licensed Cubism/QNN SDKs. Keeping the jar and the launch scripts in
+# version control makes `:app:testDebugUnitTest` reproducible on a bare runner.
+!gradle-wrapper.jar
+!gradlew
+!gradlew.bat
 /.gradle
 /captures/
-/gradlew
-/gradlew.bat
 /local.properties
 GeneratedPluginRegistrant.java
 .cxx/

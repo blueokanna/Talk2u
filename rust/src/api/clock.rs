@@ -60,5 +60,4 @@ mod tests {
         assert_eq!(format_utc(0), "1970-01-01 00:00:00 UTC");
         assert_eq!(format_utc(1_760_000_000_000), "2025-10-09 08:53:20 UTC");
     }
-
 }

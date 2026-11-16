@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:talk2u/src/lexicon/emotion_lexicon.dart';
 
 /// A silent stage direction extracted from a reply, positioned in the spoken
 /// text so the avatar can act while the matching phrase is being played.
@@ -36,142 +37,6 @@ class SpeechPlan {
 /// spoken content always matches what the user sees.
 abstract final class SpeechTextNormalizer {
   static const neutralEmotion = 'neutral';
-
-  static const _emotionCues = <String, List<String>>{
-    'happy': [
-      '开心',
-      '高兴',
-      '喜悦',
-      '兴奋',
-      '幸福',
-      '温暖',
-      '轻松',
-      '欢呼',
-      '哈哈',
-      '微笑',
-      '笑了',
-      '太好',
-      '喜欢',
-      '爱你',
-      '想你',
-      '安心',
-      '舒服',
-      '愉快',
-      'happy',
-      'great',
-      'love',
-      'nice',
-    ],
-    'sad': [
-      '难过',
-      '伤心',
-      '悲伤',
-      '哭泣',
-      '眼泪',
-      '失落',
-      '孤独',
-      '遗憾',
-      '沉重',
-      '委屈',
-      '心碎',
-      'sad',
-      'sorry',
-      'lonely',
-      'cry',
-    ],
-    'angry': [
-      '生气',
-      '愤怒',
-      '恼火',
-      '气愤',
-      '咬牙',
-      '争吵',
-      '怒吼',
-      '讨厌',
-      '烦死',
-      'angry',
-      'mad',
-      'annoyed',
-    ],
-    'surprise': [
-      '惊讶',
-      '震惊',
-      '意外',
-      '居然',
-      '竟然',
-      '真的吗',
-      '没想到',
-      '天哪',
-      'surprise',
-      'wow',
-      'really',
-    ],
-    'shy': ['害羞', '脸红', '不好意思', '低下头', '小声', '腼腆', 'shy', 'blush'],
-    'thinking': ['为什么', '怎么会', '想一想', '思考', '疑惑', '犹豫', 'question'],
-  };
-
-  static const _stageDirectionKeywords = [
-    '笑',
-    '哭',
-    '叹气',
-    '叹息',
-    '点头',
-    '摇头',
-    '挥手',
-    '招手',
-    '抱',
-    '转身',
-    '低头',
-    '抬头',
-    '脸红',
-    '害羞',
-    '开心',
-    '高兴',
-    '兴奋',
-    '生气',
-    '愤怒',
-    '难过',
-    '悲伤',
-    '惊讶',
-    '震惊',
-    '小声',
-    '轻声',
-    '低语',
-    '耳语',
-    '大声',
-    '喊',
-    '欢呼',
-    '沉默',
-    '停顿',
-    '微笑',
-    '苦笑',
-    '挑眉',
-    '歪头',
-    '耸肩',
-    '眨眼',
-    '撇嘴',
-    '鼓掌',
-    '拍手',
-    '咳嗽',
-    '呼吸',
-    '心跳',
-    '哽咽',
-    '颤抖',
-    'laugh',
-    'smile',
-    'cry',
-    'sigh',
-    'nod',
-    'wave',
-    'hug',
-    'whisper',
-    'shout',
-    'angry',
-    'happy',
-    'sad',
-    'excited',
-    'surprised',
-  ];
 
   /// Clean text without stage-direction bookkeeping.
   ///
@@ -548,7 +413,7 @@ abstract final class SpeechTextNormalizer {
   static bool _isStageDirection(String text) {
     final value = text.toLowerCase();
     if (value.isEmpty || value.length > 80) return false;
-    return _stageDirectionKeywords.any(value.contains) ||
+    return stageDirectionKeywords.any(value.contains) ||
         _emotionForRuneIn(value) != null;
   }
 
@@ -687,7 +552,7 @@ abstract final class SpeechTextNormalizer {
   static String _dominantEmotion(String text, List<String> emojiEmotions) {
     final scores = <String, double>{};
     final value = text.toLowerCase();
-    for (final entry in _emotionCues.entries) {
+    for (final entry in emotionCues.entries) {
       for (final term in entry.value) {
         var offset = 0;
         while (offset < value.length) {

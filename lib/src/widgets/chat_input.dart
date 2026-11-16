@@ -136,7 +136,9 @@ class _ChatInputState extends State<ChatInput> {
             ),
             const SizedBox(width: 6),
             IconButton.filled(
-              tooltip: widget.isStreaming ? strings.stopGenerating : strings.send,
+              tooltip: widget.isStreaming
+                  ? strings.stopGenerating
+                  : strings.send,
               onPressed: widget.isStreaming
                   ? widget.onStop
                   : (_hasText ? _handleSend : null),

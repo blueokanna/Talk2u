@@ -524,9 +524,7 @@ impl MemoryEngine {
             if chars.len() >= window_size {
                 for window in chars.windows(window_size) {
                     let phrase: String = window.iter().collect();
-                    if phrase.chars().any(is_cjk_char)
-                        && !is_stop_word(&phrase)
-                    {
+                    if phrase.chars().any(is_cjk_char) && !is_stop_word(&phrase) {
                         topics.push(phrase);
                     }
                 }
@@ -626,7 +624,7 @@ impl MemoryEngine {
         let paragraph_count = paragraphs.len();
 
         let sentences: Vec<&str> = content
-            .split(|c: char| c == '。' || c == '！' || c == '？' || c == '\n')
+            .split(['。', '！', '？', '\n'])
             .filter(|s| !s.trim().is_empty())
             .collect();
         let avg_sentence_len = if sentences.is_empty() {

@@ -4,9 +4,9 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:talk2u/l10n/generated/app_localizations.dart';
+import 'package:talk2u/src/l10n/provider_names.dart';
 import 'package:talk2u/src/state/chat_state.dart';
 import 'package:talk2u/src/rust/api/data_models.dart';
-import 'package:talk2u/src/widgets/message_bubble.dart';
 import 'package:talk2u/src/widgets/chat_input.dart';
 import 'package:talk2u/src/pages/conversation_list_page.dart';
 import 'package:talk2u/src/pages/character_list_page.dart';
@@ -16,9 +16,12 @@ import 'package:talk2u/src/services/camera_observation_service.dart';
 import 'package:talk2u/src/rendering/motion_policy.dart';
 import 'package:talk2u/src/services/offline_speech_service.dart';
 import 'package:talk2u/src/services/live2d_model_importer.dart';
-import 'package:talk2u/src/services/moss_tts_service.dart';
-import 'package:talk2u/src/services/offline_llm_service.dart';
 import 'package:talk2u/src/widgets/live2d_avatar.dart';
+import 'package:talk2u/src/widgets/chat_execution_status.dart';
+import 'package:talk2u/src/widgets/camera_observation_banner.dart';
+import 'package:talk2u/src/widgets/chat_message_area.dart';
+import 'package:talk2u/src/widgets/chat_error_banner.dart';
+import 'package:talk2u/src/widgets/chat_options_sheet.dart';
 
 class ChatPage extends StatefulWidget {
   const ChatPage({super.key});
@@ -494,312 +497,11 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
 
   void _showChatOptions() {
     final chatState = context.read<ChatState>();
-    final theme = Theme.of(context);
-    final strings = AppLocalizations.of(context);
-
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (ctx) {
-        return StatefulBuilder(
-          builder: (ctx, setSheetState) {
-            return SafeArea(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Center(
-                      child: Container(
-                        width: 40,
-                        height: 4,
-                        decoration: BoxDecoration(
-                          color: theme.colorScheme.outlineVariant,
-                          borderRadius: BorderRadius.circular(2),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-
-                    if (chatState.currentCharacter != null) ...[
-                      _buildOptionSection(
-                        theme,
-                        icon: Icons.person_rounded,
-                        title: chatState.currentCharacter!.name,
-                        subtitle: chatState.currentCharacter!.description,
-                      ),
-                      const Divider(height: 24),
-                    ],
-
-                    if (chatState.currentConversationId != null)
-                      ListTile(
-                        leading: Icon(
-                          Icons.refresh_rounded,
-                          color: theme.colorScheme.primary,
-                        ),
-                        title: Text(strings.restart),
-                        subtitle: Text(strings.restartConversationSubtitle),
-                        contentPadding: EdgeInsets.zero,
-                        onTap: () {
-                          Navigator.pop(ctx);
-                          _confirmRestartStory();
-                        },
-                      ),
-
-                    const Divider(height: 24),
-
-                    Text(
-                      strings.conversationStyle,
-                      style: theme.textTheme.titleSmall?.copyWith(
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: [
-                        _buildStyleChip(
-                          theme,
-                          strings.styleFree,
-                          DialogueStyle.free,
-                          chatState.dialogueStyle,
-                          (style) {
-                            chatState.setDialogueStyle(style);
-                            setSheetState(() {});
-                          },
-                        ),
-                        _buildStyleChip(
-                          theme,
-                          strings.styleDialogue,
-                          DialogueStyle.sayOnly,
-                          chatState.dialogueStyle,
-                          (style) {
-                            chatState.setDialogueStyle(style);
-                            setSheetState(() {});
-                          },
-                        ),
-                        _buildStyleChip(
-                          theme,
-                          strings.styleAction,
-                          DialogueStyle.doOnly,
-                          chatState.dialogueStyle,
-                          (style) {
-                            chatState.setDialogueStyle(style);
-                            setSheetState(() {});
-                          },
-                        ),
-                        _buildStyleChip(
-                          theme,
-                          strings.styleMixed,
-                          DialogueStyle.mixed,
-                          chatState.dialogueStyle,
-                          (style) {
-                            chatState.setDialogueStyle(style);
-                            setSheetState(() {});
-                          },
-                        ),
-                      ],
-                    ),
-
-                    const Divider(height: 24),
-
-                    Text(
-                      strings.providerAndModel,
-                      style: theme.textTheme.titleSmall?.copyWith(
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    DropdownButtonFormField<String>(
-                      initialValue: chatState.selectedProviderId,
-                      isExpanded: true,
-                      decoration: InputDecoration(
-                        labelText: strings.apiProvider,
-                        border: const OutlineInputBorder(),
-                        prefixIcon: const Icon(Icons.hub_outlined),
-                      ),
-                      items: chatState.providers
-                          .map(
-                            (provider) => DropdownMenuItem(
-                              value: provider.id,
-                              child: Text(
-                                provider.isConfigured
-                                    ? provider.name
-                                    : strings.providerNotConfigured(
-                                        provider.name,
-                                      ),
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          )
-                          .toList(),
-                      onChanged: chatState.isStreaming
-                          ? null
-                          : (value) {
-                              if (value == null) return;
-                              chatState.setSelectedProvider(value);
-                              setSheetState(() {});
-                            },
-                    ),
-                    const SizedBox(height: 12),
-                    RadioGroup<String>(
-                      groupValue: chatState.selectedModel,
-                      onChanged: (String? value) {
-                        if (value != null) {
-                          chatState.setSelectedModel(value);
-                          setSheetState(() {});
-                        }
-                      },
-                      child: Column(
-                        children: [
-                          _buildModelOption(
-                            theme,
-                            chatState.selectedProvider?.chatModel ??
-                                strings.notConfigured,
-                            strings.chatModel,
-                            chatState.selectedProvider?.chatModel ?? '',
-                            false,
-                          ),
-                          if (chatState.selectedProvider?.supportsThinking ==
-                              true)
-                            _buildModelOption(
-                              theme,
-                              chatState.selectedProvider!.thinkingModel!,
-                              strings.reasoningModelHint,
-                              chatState.selectedProvider!.thinkingModel!,
-                              true,
-                            ),
-                        ],
-                      ),
-                    ),
-
-                    const SizedBox(height: 8),
-                  ],
-                ),
-              ),
-            );
-          },
-        );
-      },
-    );
-  }
-
-  Widget _buildOptionSection(
-    ThemeData theme, {
-    required IconData icon,
-    required String title,
-    String? subtitle,
-  }) {
-    return Row(
-      children: [
-        CircleAvatar(
-          radius: 20,
-          backgroundColor: theme.colorScheme.primaryContainer,
-          child: Text(
-            title.characters.first,
-            style: TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.w600,
-              color: theme.colorScheme.onPrimaryContainer,
-            ),
-          ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                style: theme.textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              if (subtitle != null && subtitle.isNotEmpty)
-                Text(
-                  subtitle,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.outline,
-                  ),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildStyleChip(
-    ThemeData theme,
-    String label,
-    DialogueStyle style,
-    DialogueStyle current,
-    ValueChanged<DialogueStyle> onSelected,
-  ) {
-    final isSelected = style == current;
-    return ChoiceChip(
-      label: Text(label),
-      selected: isSelected,
-      onSelected: (_) => onSelected(style),
-      selectedColor: theme.colorScheme.primaryContainer,
-      checkmarkColor: theme.colorScheme.onPrimaryContainer,
-      labelStyle: theme.textTheme.labelLarge?.copyWith(
-        color: isSelected
-            ? theme.colorScheme.onPrimaryContainer
-            : theme.colorScheme.onSurfaceVariant,
-      ),
-      side: BorderSide(
-        color: isSelected
-            ? theme.colorScheme.primary
-            : theme.colorScheme.outlineVariant,
-      ),
-    );
-  }
-
-  Widget _buildModelOption(
-    ThemeData theme,
-    String name,
-    String description,
-    String modelId,
-    bool supportsThinking,
-  ) {
-    final strings = AppLocalizations.of(context);
-    return ListTile(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 4),
-      leading: Radio<String>(value: modelId),
-      title: Row(
-        children: [
-          Text(name),
-          if (supportsThinking) ...[
-            const SizedBox(width: 8),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-              decoration: BoxDecoration(
-                color: theme.colorScheme.tertiaryContainer,
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: Text(
-                strings.thinking,
-                style: theme.textTheme.labelSmall?.copyWith(
-                  color: theme.colorScheme.onTertiaryContainer,
-                ),
-              ),
-            ),
-          ],
-        ],
-      ),
-      subtitle: Text(
-        description,
-        style: theme.textTheme.bodySmall?.copyWith(
-          color: theme.colorScheme.outline,
-        ),
+    unawaited(
+      showChatOptionsSheet(
+        context,
+        chatState: chatState,
+        onRestartStory: _confirmRestartStory,
       ),
     );
   }
@@ -927,7 +629,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                   color: isThinking ? theme.colorScheme.primary : null,
                 ),
                 tooltip:
-                    '${state.selectedProvider?.name ?? strings.notConfigured} · ${state.selectedModel}',
+                    '${state.selectedProvider == null ? strings.notConfigured : providerDisplayName(state.selectedProvider!, strings)} · ${state.selectedModel}',
                 onPressed: () {
                   state.setEnableThinking(!state.enableThinking);
                 },
@@ -1184,50 +886,15 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                     ),
                     ValueListenableBuilder<CameraObservationState>(
                       valueListenable: _cameraState,
-                      builder: (context, state, _) {
-                        final label = switch (state.status) {
-                          'starting' || 'requestingPermission' =>
-                            strings.cameraObservationStarting,
-                          'observing' =>
-                            state.faceDetected
-                                ? strings.cameraObservationDetected
-                                : strings.cameraObservationSearching,
-                          'permissionDenied' => strings.cameraObservationDenied,
-                          'unsupported' => strings.cameraObservationUnsupported,
-                          'error' => strings.cameraObservationFailed,
-                          'stopped'
-                              when state.reason == 'background' ||
-                                  state.reason ==
-                                      'permission_granted_tap_to_start' =>
-                            strings.cameraObservationRestart,
-                          _ => null,
-                        };
-                        if (label == null) return const SizedBox.shrink();
-                        return Material(
-                          color: theme.colorScheme.surfaceContainer,
-                          child: Row(
-                            children: [
-                              const SizedBox(width: 12),
-                              const Icon(Icons.videocam_outlined, size: 18),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  label,
-                                  maxLines: 3,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                              IconButton(
-                                tooltip: strings.cameraObservationClose,
-                                onPressed: () => unawaited(_camera.stop()),
-                                icon: const Icon(Icons.close, size: 18),
-                              ),
-                            ],
-                          ),
-                        );
-                      },
+                      builder: (context, state, _) => CameraObservationBanner(
+                        state: state,
+                        onClose: () => unawaited(_camera.stop()),
+                      ),
                     ),
-                    _buildExecutionStatus(chatState),
+                    ChatExecutionStatus(
+                      chatState: chatState,
+                      session: _callSession,
+                    ),
                     if (chatState.errorMessage != null)
                       keyboardVisible
                           ? ConstrainedBox(
@@ -1269,95 +936,6 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     );
   }
 
-  Widget _buildExecutionStatus(ChatState chatState) {
-    final strings = AppLocalizations.of(context);
-    return AnimatedBuilder(
-      animation: Listenable.merge([
-        OfflineLlmService.instance,
-        MossTtsService.instance,
-      ]),
-      builder: (context, _) {
-        final llm = OfflineLlmService.instance;
-        final moss = MossTtsService.instance;
-        final colors = Theme.of(context).colorScheme;
-        final items = <({IconData icon, String label, Color color})>[];
-
-        if (chatState.usesAndroidOfflineProvider) {
-          items.add((
-            icon: llm.hardwareAccelerationVerified
-                ? Icons.memory
-                : Icons.pending_outlined,
-            label: strings.llmRoute(llm.accelerationDescription),
-            color: llm.hardwareAccelerationVerified
-                ? colors.primary
-                : colors.onSurfaceVariant,
-          ));
-        }
-        if (moss.ready) {
-          items.add((
-            icon: moss.hardwareAccelerationVerified
-                ? Icons.graphic_eq
-                : Icons.pending_outlined,
-            label: strings.ttsRoute(moss.accelerationLabel),
-            color: moss.hardwareAccelerationVerified
-                ? colors.primary
-                : colors.onSurfaceVariant,
-          ));
-        }
-        final session = _callSession;
-        if (session != null && session.active) {
-          final fullDuplex = session.acousticBargeIn;
-          items.add((
-            icon: fullDuplex ? Icons.record_voice_over : Icons.hearing,
-            label: fullDuplex ? strings.callFullDuplex : strings.callHalfDuplex,
-            color: fullDuplex ? colors.primary : colors.onSurfaceVariant,
-          ));
-        }
-        if (items.isEmpty) return const SizedBox.shrink();
-
-        final itemWidth = (MediaQuery.sizeOf(context).width - 24)
-            .clamp(0.0, 420.0)
-            .toDouble();
-        return ColoredBox(
-          color: colors.surfaceContainerLow,
-          child: SafeArea(
-            top: false,
-            bottom: false,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              child: Wrap(
-                spacing: 16,
-                runSpacing: 6,
-                children: items
-                    .map(
-                      (item) => SizedBox(
-                        width: itemWidth,
-                        child: Row(
-                          children: [
-                            Icon(item.icon, size: 16, color: item.color),
-                            const SizedBox(width: 6),
-                            Expanded(
-                              child: Text(
-                                item.label,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: Theme.of(context).textTheme.labelMedium
-                                    ?.copyWith(color: item.color),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    )
-                    .toList(growable: false),
-              ),
-            ),
-          ),
-        );
-      },
-    );
-  }
-
   Widget _buildTranscriptPanel(ChatState chatState) {
     final theme = Theme.of(context);
     final strings = AppLocalizations.of(context);
@@ -1385,349 +963,22 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
             ),
           ),
           const Divider(height: 1),
-          Expanded(child: _buildMessageArea(chatState)),
+          Expanded(
+            child: ChatMessageArea(
+              chatState: chatState,
+              scrollController: _scrollController,
+              onChooseCharacter: _openCharacterList,
+            ),
+          ),
         ],
       ),
     );
   }
 
-  Widget _buildMessageArea(ChatState chatState) {
-    final visibleMessages = chatState.displayMessages;
-    final hasContent = visibleMessages.isNotEmpty || chatState.isStreaming;
-
-    if (!hasContent) {
-      return _buildEmptyState();
-    }
-
-    final itemCount = visibleMessages.length + (chatState.isStreaming ? 1 : 0);
-
-    return ListView.builder(
-      controller: _scrollController,
-      padding: const EdgeInsets.only(top: 16, bottom: 16),
-      itemCount: itemCount,
-      itemBuilder: (context, index) {
-        if (index < visibleMessages.length) {
-          return _AnimatedMessageItem(
-            key: ValueKey(
-              visibleMessages[index].id.isEmpty
-                  ? 'msg-$index'
-                  : visibleMessages[index].id,
-            ),
-            child: _buildMessageBubble(visibleMessages[index]),
-          );
-        }
-        return _buildStreamingBubble(chatState);
-      },
-    );
-  }
-
-  Widget _buildEmptyState() {
-    final theme = Theme.of(context);
-    final strings = AppLocalizations.of(context);
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final minimumHeight = (constraints.maxHeight - 32)
-            .clamp(0.0, double.infinity)
-            .toDouble();
-        return SingleChildScrollView(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-          child: ConstrainedBox(
-            constraints: BoxConstraints(minHeight: minimumHeight),
-            child: Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.chat_bubble_outline_rounded,
-                    size: 64,
-                    color: theme.colorScheme.outline.withValues(alpha: 0.5),
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    strings.startNewConversation,
-                    style: theme.textTheme.titleMedium?.copyWith(
-                      color: theme.colorScheme.outline,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    strings.startNewConversationHint,
-                    textAlign: TextAlign.center,
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      color: theme.colorScheme.outline.withValues(alpha: 0.7),
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-                  FilledButton.tonalIcon(
-                    onPressed: _openCharacterList,
-                    icon: const Icon(Icons.person_add_rounded),
-                    label: Text(strings.chooseCharacter),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildErrorBanner(ChatState chatState) {
-    final theme = Theme.of(context);
-    final strings = AppLocalizations.of(context);
-    final errorMsg = chatState.errorMessage ?? '';
-    return AnimatedSize(
-      duration: const Duration(milliseconds: 200),
-      curve: Curves.easeOutCubic,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-        child: Material(
-          color: theme.colorScheme.errorContainer,
-          borderRadius: BorderRadius.circular(12),
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Row(
-                  children: [
-                    Icon(
-                      Icons.error_outline,
-                      color: theme.colorScheme.error,
-                      size: 20,
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        errorMsg,
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: theme.colorScheme.onErrorContainer,
-                        ),
-                        maxLines: 8,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.close, size: 18),
-                      onPressed: () => context.read<ChatState>().clearError(),
-                      color: theme.colorScheme.onErrorContainer,
-                      padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(),
-                    ),
-                  ],
-                ),
-                if (chatState.currentConversationId != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 8),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.end,
-                      children: [
-                        TextButton.icon(
-                          onPressed: _handleRetry,
-                          icon: const Icon(Icons.refresh, size: 18),
-                          label: Text(strings.retry),
-                          style: TextButton.styleFrom(
-                            foregroundColor: theme.colorScheme.error,
-                            padding: const EdgeInsets.symmetric(horizontal: 12),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildStreamingBubble(ChatState chatState) {
-    final hasContent = chatState.currentStreamingContent.isNotEmpty;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        if (hasContent)
-          MessageBubble(
-            content: chatState.currentStreamingContent,
-            thinkingContent: chatState.currentThinkingContent.isEmpty
-                ? null
-                : chatState.currentThinkingContent,
-            isUser: false,
-            model: chatState.selectedModel,
-            timestamp: DateTime.now().millisecondsSinceEpoch,
-            isStreaming: true,
-          ),
-        if (!hasContent) _buildTypingIndicator(),
-      ],
-    );
-  }
-
-  Widget _buildTypingIndicator() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: Row(mainAxisSize: MainAxisSize.min, children: [_TypingDots()]),
-    );
-  }
-
-  Widget _buildMessageBubble(Message msg) {
-    final isUser = msg.role == MessageRole.user;
-    final chatState = context.read<ChatState>();
-    return MessageBubble(
-      content: msg.content,
-      thinkingContent: msg.thinkingContent,
-      isUser: isUser,
-      model: msg.model,
-      timestamp: msg.timestamp.toInt(),
-      messageId: msg.id,
-      onDelete: msg.id.isNotEmpty
-          ? () => chatState.deleteMessage(msg.id)
-          : null,
-      onRegenerate: !isUser && msg.id.isNotEmpty
-          ? () => chatState.regenerateResponse(msg.id)
-          : null,
-      onEdit: isUser && msg.id.isNotEmpty
-          ? (newContent) => chatState.editAndResend(msg.id, newContent)
-          : null,
-      onRollback: isUser && msg.id.isNotEmpty
-          ? () => chatState.rollbackToMessage(msg.id)
-          : null,
-    );
-  }
-}
-
-class _AnimatedMessageItem extends StatefulWidget {
-  final Widget child;
-  const _AnimatedMessageItem({super.key, required this.child});
-
-  @override
-  State<_AnimatedMessageItem> createState() => _AnimatedMessageItemState();
-}
-
-class _AnimatedMessageItemState extends State<_AnimatedMessageItem>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _controller;
-  late Animation<double> _fadeAnimation;
-  late Animation<Offset> _slideAnimation;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 350),
-    );
-    _fadeAnimation = CurvedAnimation(
-      parent: _controller,
-      curve: Curves.easeOut,
-    );
-    _slideAnimation = Tween<Offset>(
-      begin: const Offset(0, 0.15),
-      end: Offset.zero,
-    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic));
-  }
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    if (AppMotionPolicy.of(context).animate) {
-      if (_controller.value < 1 && !_controller.isAnimating) {
-        _controller.forward();
-      }
-    } else {
-      _controller.value = 1;
-    }
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return FadeTransition(
-      opacity: _fadeAnimation,
-      child: SlideTransition(position: _slideAnimation, child: widget.child),
-    );
-  }
-}
-
-class _TypingDots extends StatefulWidget {
-  @override
-  State<_TypingDots> createState() => _TypingDotsState();
-}
-
-class _TypingDotsState extends State<_TypingDots>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _controller;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1200),
-    );
-  }
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    if (AppMotionPolicy.of(context).animate) {
-      if (!_controller.isAnimating) _controller.repeat();
-    } else {
-      _controller.stop();
-      _controller.value = 0.5;
-    }
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: AnimatedBuilder(
-        animation: _controller,
-        builder: (context, _) {
-          return Row(
-            mainAxisSize: MainAxisSize.min,
-            children: List.generate(3, (i) {
-              final delay = i * 0.2;
-              final t = (_controller.value - delay).clamp(0.0, 1.0);
-              final scale = 0.5 + 0.5 * (1 - (2 * t - 1).abs());
-              return Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 2),
-                child: Transform.scale(
-                  scale: scale,
-                  child: Container(
-                    width: 8,
-                    height: 8,
-                    decoration: BoxDecoration(
-                      color: theme.colorScheme.primary.withValues(
-                        alpha: 0.4 + 0.6 * scale,
-                      ),
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                ),
-              );
-            }),
-          );
-        },
-      ),
-    );
-  }
+  Widget _buildErrorBanner(ChatState chatState) => ChatErrorBanner(
+    message: chatState.errorMessage ?? '',
+    canRetry: chatState.currentConversationId != null,
+    onRetry: _handleRetry,
+    onDismiss: chatState.clearError,
+  );
 }

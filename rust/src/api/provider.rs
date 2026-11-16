@@ -1,5 +1,5 @@
-use courierust::courierust_http::header::{HeaderMap, HeaderName, HeaderValue};
 use crate::api::transport::validate_http_url;
+use courierust::courierust_http::header::{HeaderMap, HeaderName, HeaderValue};
 
 use super::data_models::{AppSettings, ProviderConfig};
 

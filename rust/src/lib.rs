@@ -7,4 +7,3 @@ mod frb_generated;
 pub(crate) fn is_cjk_char(c: char) -> bool {
     matches!(c, '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}')
 }
-

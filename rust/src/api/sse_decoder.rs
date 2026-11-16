@@ -84,7 +84,10 @@ mod tests {
     fn joins_frames_split_across_chunks() {
         let mut decoder = SseDecoder::default();
         assert!(push(&mut decoder, "data: {\"a\":1}").is_empty());
-        assert_eq!(push(&mut decoder, "\n\ndata: [DO"), vec!["data: {\"a\":1}", ""]);
+        assert_eq!(
+            push(&mut decoder, "\n\ndata: [DO"),
+            vec!["data: {\"a\":1}", ""]
+        );
         assert_eq!(push(&mut decoder, "NE]\n\n"), vec!["data: [DONE]", ""]);
     }
 

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:record/record.dart';
+import 'package:talk2u/src/l10n/app_strings.dart';
 
 const _channelName = 'talk2u/full_duplex_audio';
 const _framesChannelName = 'talk2u/full_duplex_frames';
@@ -73,7 +74,7 @@ class RecorderPcmCapture implements PcmCapture {
   @override
   Future<AudioCaptureCapabilities> start() async {
     if (!await _recorder.hasPermission()) {
-      throw StateError('麦克风权限未授予');
+      throw StateError(AppStrings.current.micPermissionDenied);
     }
     final stream = await _recorder.startStream(
       const RecordConfig(
@@ -155,10 +156,10 @@ class FullDuplexPcmCapture implements PcmCapture {
 
   @override
   Future<AudioCaptureCapabilities> start() async {
-    if (_disposed) throw StateError('full-duplex capture 已释放');
+    if (_disposed) throw StateError(AppStrings.current.captureReleased);
     final stopping = _stopOperation;
     if (stopping != null) await stopping;
-    if (_disposed) throw StateError('full-duplex capture 已释放');
+    if (_disposed) throw StateError(AppStrings.current.captureReleased);
     final starting = _startOperation;
     if (starting != null) return starting;
     if (_started) return _capabilities;

@@ -114,9 +114,16 @@ impl CognitiveEngine {
         let total = messages.len();
         if total == 0 {
             return EmotionVector {
-                joy: 0.0, sadness: 0.0, anger: 0.0, fear: 0.0,
-                surprise: 0.0, intimacy: 0.0, trust: 0.0, anticipation: 0.0,
-                valence: 0.0, arousal: 0.0,
+                joy: 0.0,
+                sadness: 0.0,
+                anger: 0.0,
+                fear: 0.0,
+                surprise: 0.0,
+                intimacy: 0.0,
+                trust: 0.0,
+                anticipation: 0.0,
+                valence: 0.0,
+                arousal: 0.0,
             };
         }
 

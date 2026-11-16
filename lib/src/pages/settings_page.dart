@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:talk2u/l10n/generated/app_localizations.dart';
+import 'package:talk2u/src/l10n/provider_names.dart';
 import 'package:talk2u/src/models/provider_profile.dart';
 import 'package:talk2u/src/rust/api/chat_api.dart' as rust_api;
 import 'package:talk2u/src/rust/api/data_models.dart';
@@ -9,6 +10,7 @@ import 'package:talk2u/src/services/offline_speech_service.dart';
 import 'package:talk2u/src/services/moss_tts_service.dart';
 import 'package:talk2u/src/services/sherpa_speech_service.dart';
 import 'package:talk2u/src/settings/ui_preferences.dart';
+import 'package:talk2u/src/widgets/settings/on_device_models_section.dart';
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
@@ -212,6 +214,19 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
+  Future<void> _cancelOfflineModelDownload() async {
+    try {
+      await OfflineLlmService.instance.cancelDownload();
+    } catch (error) {
+      if (mounted) {
+        _showMessage(
+          AppLocalizations.of(context).pauseDownloadFailed('$error'),
+          isError: true,
+        );
+      }
+    }
+  }
+
   Future<void> _deleteOfflineModel() async {
     try {
       await OfflineLlmService.instance.deleteModel();
@@ -335,16 +350,6 @@ class _SettingsPageState extends State<SettingsPage> {
         );
       }
     }
-  }
-
-  String _formatBytes(int bytes) {
-    if (bytes >= 1024 * 1024 * 1024) {
-      return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
-    }
-    if (bytes >= 1024 * 1024) {
-      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
-    }
-    return '${(bytes / 1024).toStringAsFixed(0)} KB';
   }
 
   @override
@@ -490,7 +495,7 @@ class _SettingsPageState extends State<SettingsPage> {
                                 : Theme.of(context).colorScheme.outline,
                           ),
                           const SizedBox(width: 8),
-                          Text(provider.name),
+                          Text(providerDisplayName(provider, strings)),
                         ],
                       ),
                     ),
@@ -637,348 +642,18 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
             ],
             const SizedBox(height: 32),
-            if (OfflineLlmService.instance.supported) ...[
-              Text(
-                strings.deviceAi,
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-              const SizedBox(height: 8),
-              AnimatedBuilder(
-                animation: OfflineLlmService.instance,
-                builder: (context, _) {
-                  final llm = OfflineLlmService.instance;
-                  final progress = (llm.downloadProgress * 100).round();
-                  return Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      ListTile(
-                        contentPadding: EdgeInsets.zero,
-                        leading: Icon(
-                          llm.modelReady
-                              ? Icons.offline_bolt_outlined
-                              : Icons.download_for_offline_outlined,
-                        ),
-                        title: const Text(OfflineLlmService.modelName),
-                        subtitle: Text(
-                          llm.downloading
-                              ? '${_formatBytes(llm.downloadedBytes)} / '
-                                    '${_formatBytes(llm.totalDownloadBytes)} ($progress%)'
-                              : llm.loadingModel
-                              ? strings.loadingModel
-                              : llm.modelReady
-                              ? strings.qwenModelReady(
-                                  OfflineLlmService.modelLicense,
-                                  llm.accelerationDescription,
-                                )
-                              : strings.qwenModelPackage(
-                                  OfflineLlmService.modelLicense,
-                                ),
-                        ),
-                        trailing: llm.downloading
-                            ? const SizedBox.square(
-                                dimension: 24,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : llm.modelReady
-                            ? PopupMenuButton<String>(
-                                tooltip: strings.manageModel,
-                                onSelected: (value) {
-                                  if (value == 'delete') {
-                                    _deleteOfflineModel();
-                                  }
-                                },
-                                itemBuilder: (context) => [
-                                  PopupMenuItem(
-                                    value: 'delete',
-                                    child: Text(strings.deleteModel),
-                                  ),
-                                ],
-                              )
-                            : IconButton(
-                                tooltip: strings.installQwen,
-                                onPressed: _downloadOfflineModel,
-                                icon: const Icon(Icons.download_outlined),
-                              ),
-                      ),
-                      if (llm.downloading)
-                        LinearProgressIndicator(value: llm.downloadProgress),
-                      if (llm.lastError != null) ...[
-                        const SizedBox(height: 8),
-                        Text(
-                          llm.lastError!,
-                          style: TextStyle(
-                            color: Theme.of(context).colorScheme.error,
-                          ),
-                        ),
-                      ],
-                    ],
-                  );
-                },
-              ),
-              const SizedBox(height: 24),
-            ],
-            if (SherpaSpeechService.instance.supported) ...[
-              Text(
-                strings.offlineRecognition,
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-              const SizedBox(height: 8),
-              AnimatedBuilder(
-                animation: SherpaSpeechService.instance,
-                builder: (context, _) {
-                  final sherpa = SherpaSpeechService.instance;
-                  return Column(
-                    children: [
-                      ListTile(
-                        contentPadding: EdgeInsets.zero,
-                        leading: Icon(
-                          sherpa.asrReady
-                              ? Icons.mic_outlined
-                              : Icons.download_for_offline_outlined,
-                        ),
-                        title: const Text(SherpaSpeechService.asrModelName),
-                        subtitle: Text(
-                          sherpa.downloading &&
-                                  sherpa.operationLabel.contains('SenseVoice')
-                              ? '${_formatBytes(sherpa.downloadedBytes)} / '
-                                    '${_formatBytes(sherpa.totalDownloadBytes)}'
-                              : sherpa.asrReady
-                              ? '${strings.senseVoiceReady}\n'
-                                    '${strings.senseVoiceQnnUnsupported}'
-                              : strings.senseVoiceSize,
-                        ),
-                        trailing: sherpa.downloading
-                            ? IconButton(
-                                tooltip: strings.cancelDownload,
-                                onPressed: sherpa.cancelDownload,
-                                icon: const Icon(Icons.stop_circle_outlined),
-                              )
-                            : sherpa.asrReady
-                            ? IconButton(
-                                tooltip: strings.deleteSenseVoice,
-                                onPressed: sherpa.deleteAsr,
-                                icon: const Icon(Icons.delete_outline),
-                              )
-                            : PopupMenuButton<String>(
-                                tooltip: strings.downloadSenseVoice,
-                                onSelected: (value) {
-                                  if (value == 'zip') {
-                                    _importSherpaZip();
-                                  } else if (value == 'download') {
-                                    _downloadSherpaAsr();
-                                  }
-                                },
-                                icon: const Icon(Icons.download_outlined),
-                                itemBuilder: (context) => [
-                                  PopupMenuItem(
-                                    value: 'zip',
-                                    child: Text(strings.importSherpaZip),
-                                  ),
-                                  PopupMenuItem(
-                                    value: 'download',
-                                    child: Text(strings.downloadFromInternet),
-                                  ),
-                                ],
-                              ),
-                      ),
-                      if (sherpa.downloading)
-                        LinearProgressIndicator(value: sherpa.downloadProgress),
-                      if (sherpa.extracting) const LinearProgressIndicator(),
-                      if (sherpa.lastError != null) ...[
-                        const SizedBox(height: 8),
-                        Text(
-                          sherpa.lastError!,
-                          style: TextStyle(
-                            color: Theme.of(context).colorScheme.error,
-                          ),
-                        ),
-                      ],
-                    ],
-                  );
-                },
-              ),
-              const SizedBox(height: 24),
-            ],
-            if (MossTtsService.instance.supported) ...[
-              Text(
-                strings.mossSpeech,
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-              const SizedBox(height: 8),
-              AnimatedBuilder(
-                animation: MossTtsService.instance,
-                builder: (context, _) {
-                  final moss = MossTtsService.instance;
-                  final busy = moss.downloading || moss.initializing;
-                  final status = moss.downloading
-                      ? '${moss.operationLabel}\n'
-                            '${_formatBytes(moss.downloadedBytes)} / '
-                            '${_formatBytes(moss.totalDownloadBytes)}'
-                      : moss.initializing
-                      ? strings.mossInitializing
-                      : moss.generating
-                      ? strings.mossGenerating
-                      : moss.ready
-                      ? strings.mossReady(moss.accelerationLabel)
-                      : '${_formatBytes(MossTtsService.modelBytes)} · '
-                            '${moss.accelerationLabel}';
-                  return Column(
-                    children: [
-                      ListTile(
-                        contentPadding: EdgeInsets.zero,
-                        leading: AnimatedSwitcher(
-                          duration: const Duration(milliseconds: 300),
-                          switchInCurve: Curves.easeOutCubic,
-                          switchOutCurve: Curves.easeInCubic,
-                          child: Icon(
-                            busy
-                                ? Icons.memory_outlined
-                                : moss.ready
-                                ? Icons.record_voice_over_outlined
-                                : Icons.folder_open_outlined,
-                            key: ValueKey((busy, moss.ready)),
-                          ),
-                        ),
-                        title: const Text(MossTtsService.modelName),
-                        subtitle: AnimatedSwitcher(
-                          duration: const Duration(milliseconds: 250),
-                          child: Text(status, key: ValueKey(status)),
-                        ),
-                        trailing: AnimatedSwitcher(
-                          duration: const Duration(milliseconds: 250),
-                          child: busy
-                              ? const SizedBox.square(
-                                  key: ValueKey('moss-busy'),
-                                  dimension: 48,
-                                  child: Padding(
-                                    padding: EdgeInsets.all(12),
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                    ),
-                                  ),
-                                )
-                              : moss.ready
-                              ? IconButton(
-                                  key: const ValueKey('moss-delete'),
-                                  tooltip: strings.deleteMoss,
-                                  onPressed: _deleteMossTts,
-                                  icon: const Icon(Icons.delete_outline),
-                                )
-                              : PopupMenuButton<String>(
-                                  key: const ValueKey('moss-import'),
-                                  tooltip: strings.importMoss,
-                                  onSelected: (value) {
-                                    if (value == 'zip') {
-                                      _importMossZip();
-                                    } else if (value == 'dir') {
-                                      _downloadMossTts();
-                                    }
-                                  },
-                                  icon: const Icon(Icons.folder_open_outlined),
-                                  itemBuilder: (context) => [
-                                    PopupMenuItem(
-                                      value: 'zip',
-                                      child: Text(strings.importMossZip),
-                                    ),
-                                    PopupMenuItem(
-                                      value: 'dir',
-                                      child: Text(strings.importMossDir),
-                                    ),
-                                  ],
-                                ),
-                        ),
-                      ),
-                      if (moss.ready)
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 12),
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Expanded(
-                                child: DropdownButtonFormField<String>(
-                                  key: ValueKey(moss.voiceId),
-                                  initialValue: moss.voiceId,
-                                  isExpanded: true,
-                                  decoration: InputDecoration(
-                                    labelText: strings.mossVoice,
-                                    prefixIcon: const Icon(
-                                      Icons.record_voice_over,
-                                    ),
-                                    border: const OutlineInputBorder(),
-                                  ),
-                                  items: MossTtsService.voices
-                                      .map(
-                                        (voice) => DropdownMenuItem(
-                                          value: voice.id,
-                                          child: Text(
-                                            voice.displayLabel,
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                          ),
-                                        ),
-                                      )
-                                      .toList(growable: false),
-                                  onChanged: moss.generating || moss.speaking
-                                      ? null
-                                      : _selectMossVoice,
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                              IconButton.filledTonal(
-                                tooltip: moss.generating || moss.speaking
-                                    ? strings.stopPreview
-                                    : strings.previewVoice,
-                                onPressed: moss.generating || moss.speaking
-                                    ? moss.stopSpeaking
-                                    : _previewMossVoice,
-                                icon: Icon(
-                                  moss.generating || moss.speaking
-                                      ? Icons.stop
-                                      : Icons.volume_up_outlined,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      AnimatedSize(
-                        duration: const Duration(milliseconds: 300),
-                        curve: Curves.easeInOutCubic,
-                        child: busy || moss.generating
-                            ? LinearProgressIndicator(
-                                key: ValueKey(
-                                  moss.downloading
-                                      ? 'moss-import'
-                                      : 'moss-work',
-                                ),
-                                value: moss.downloading
-                                    ? moss.downloadProgress
-                                    : null,
-                              )
-                            : const SizedBox.shrink(),
-                      ),
-                      AnimatedSwitcher(
-                        duration: const Duration(milliseconds: 250),
-                        child: moss.lastError == null
-                            ? const SizedBox.shrink()
-                            : Padding(
-                                key: ValueKey(moss.lastError),
-                                padding: const EdgeInsets.only(top: 8),
-                                child: Text(
-                                  moss.lastError!,
-                                  style: TextStyle(
-                                    color: Theme.of(context).colorScheme.error,
-                                  ),
-                                ),
-                              ),
-                      ),
-                    ],
-                  );
-                },
-              ),
-              const SizedBox(height: 24),
-            ],
+            OnDeviceModelsSection(
+              onDownloadQwen: _downloadOfflineModel,
+              onCancelQwenDownload: _cancelOfflineModelDownload,
+              onDeleteQwen: _deleteOfflineModel,
+              onImportSenseVoiceZip: _importSherpaZip,
+              onDownloadSenseVoice: _downloadSherpaAsr,
+              onDeleteMoss: _deleteMossTts,
+              onImportMossZip: _importMossZip,
+              onImportMossDir: _downloadMossTts,
+              onSelectMossVoice: _selectMossVoice,
+              onPreviewMossVoice: _previewMossVoice,
+            ),
           ],
         ),
       ),

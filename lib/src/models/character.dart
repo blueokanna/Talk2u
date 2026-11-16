@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:talk2u/src/prompts/persona_prompts.dart';
 
 enum CharacterGender { male, female, other }
 
@@ -37,37 +38,19 @@ class Character {
     required this.updatedAt,
   });
 
-  String buildSystemPrompt() {
-    final parts = <String>[];
-
-    parts.add('你是"$name"，一个AI角色。请始终以该角色的身份进行对话，不要跳出角色。');
-
-    if (gender != CharacterGender.other) {
-      parts.add('你的性别是${gender == CharacterGender.male ? "男" : "女"}。');
-    }
-
-    if (setting.isNotEmpty) {
-      parts.add('角色设定：$setting');
-    }
-
-    if (description.isNotEmpty) {
-      parts.add('角色简介：$description');
-    }
-
-    if (dialogueExample.isNotEmpty) {
-      parts.add('对话风格示例：$dialogueExample');
-    }
-
-    if (userName.isNotEmpty) {
-      parts.add('请称呼用户为"$userName"。');
-    }
-
-    if (userSetting.isNotEmpty) {
-      parts.add('用户的人设信息：$userSetting');
-    }
-
-    return parts.join('\n');
-  }
+  String buildSystemPrompt() => characterSystemPrompt(
+    name: name,
+    gender: switch (gender) {
+      CharacterGender.male => 'male',
+      CharacterGender.female => 'female',
+      CharacterGender.other => '',
+    },
+    setting: setting,
+    description: description,
+    dialogueExample: dialogueExample,
+    userName: userName,
+    userSetting: userSetting,
+  );
 
   Map<String, dynamic> toJson() => {
     'id': id,
@@ -171,8 +154,7 @@ class CharacterStore {
         final content = await File(file.path).readAsString();
         final json = jsonDecode(content) as Map<String, dynamic>;
         _characters.add(Character.fromJson(json));
-      } catch (_) {
-      }
+      } catch (_) {}
     }
     _characters.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
     _loaded = true;

@@ -9,6 +9,7 @@ import 'package:talk2u/src/rust/api/chat_api.dart' as rust_api;
 import 'package:talk2u/src/rust/frb_generated.dart';
 import 'package:talk2u/src/state/chat_state.dart';
 import 'package:talk2u/src/theme/app_theme.dart';
+import 'package:talk2u/src/l10n/app_strings.dart';
 import 'package:talk2u/src/rendering/motion_policy.dart';
 import 'package:talk2u/src/pages/chat_page.dart';
 import 'package:talk2u/src/services/offline_llm_service.dart';
@@ -26,8 +27,19 @@ final class _StartupException implements Exception {
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final preferences = await UiPreferences.load();
+  // Services have no BuildContext, so the resolved language is mirrored into
+  // AppStrings before any of them can produce a message.
+  _syncAppStrings(preferences);
+  preferences.addListener(() => _syncAppStrings(preferences));
+  WidgetsBinding.instance.platformDispatcher.onLocaleChanged = () =>
+      _syncAppStrings(preferences);
   runApp(Talk2UApp(preferences: preferences));
 }
+
+void _syncAppStrings(UiPreferences preferences) => AppStrings.configure(
+  preferences.locale,
+  systemLocale: WidgetsBinding.instance.platformDispatcher.locale,
+);
 
 class Talk2UApp extends StatelessWidget {
   const Talk2UApp({required this.preferences, super.key});

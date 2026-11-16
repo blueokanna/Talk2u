@@ -228,13 +228,13 @@ fn walk_addresses(host: &str) -> (Vec<IpAddr>, u8, bool, bool) {
                 ran = true;
                 rcode = resolution.rcode.to_u8();
                 validated &= resolution.validated;
-                addresses.extend(resolution.answers.iter().filter_map(|record| {
-                    match record.rdata {
+                addresses.extend(resolution.answers.iter().filter_map(
+                    |record| match record.rdata {
                         RData::A(v4) => Some(IpAddr::V4(v4)),
                         RData::Aaaa(v6) => Some(IpAddr::V6(v6)),
                         _ => None,
-                    }
-                }));
+                    },
+                ));
             }
             // One family failing does not invalidate the other; validation is
             // only claimed when every answered family was covered.
@@ -272,10 +272,7 @@ mod tests {
     fn disjoint_public_answers_are_a_disagreement_not_a_verdict() {
         let device = [ip("120.232.48.61")];
         let walk = [ip("120.232.48.62")];
-        assert_eq!(
-            classify(&device, Some(&walk), 0),
-            DnsVerdict::Disagreement
-        );
+        assert_eq!(classify(&device, Some(&walk), 0), DnsVerdict::Disagreement);
     }
 
     #[test]
@@ -287,7 +284,13 @@ mod tests {
 
     #[test]
     fn loopback_and_private_answers_are_suspicious() {
-        for address in ["127.0.0.1", "10.1.2.3", "192.168.1.1", "169.254.1.1", "0.0.0.0"] {
+        for address in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "192.168.1.1",
+            "169.254.1.1",
+            "0.0.0.0",
+        ] {
             assert_eq!(
                 classify(&[ip(address)], Some(&[]), 0),
                 DnsVerdict::Suspicious,

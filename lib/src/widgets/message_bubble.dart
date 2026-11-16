@@ -33,6 +33,15 @@ class MessageBubble extends StatefulWidget {
 
   @override
   State<MessageBubble> createState() => _MessageBubbleState();
+
+  /// Counts full Markdown render constructions; tests assert that a parent
+  /// rebuild with unchanged input reuses the cached widget.
+  @visibleForTesting
+  static int get markdownBuildCount => _MessageBubbleState._markdownBuildCount;
+
+  @visibleForTesting
+  static void resetMarkdownBuildCount() =>
+      _MessageBubbleState._markdownBuildCount = 0;
 }
 
 class _MessageBubbleState extends State<MessageBubble> {
@@ -141,7 +150,10 @@ class _MessageBubbleState extends State<MessageBubble> {
                 color: theme.colorScheme.tertiary,
               ),
               const SizedBox(width: 12),
-              Text(strings.rollback, style: TextStyle(color: theme.colorScheme.tertiary)),
+              Text(
+                strings.rollback,
+                style: TextStyle(color: theme.colorScheme.tertiary),
+              ),
             ],
           ),
         ),
@@ -160,7 +172,10 @@ class _MessageBubbleState extends State<MessageBubble> {
                 color: theme.colorScheme.primary,
               ),
               const SizedBox(width: 12),
-              Text(strings.regenerate, style: TextStyle(color: theme.colorScheme.primary)),
+              Text(
+                strings.regenerate,
+                style: TextStyle(color: theme.colorScheme.primary),
+              ),
             ],
           ),
         ),
@@ -179,7 +194,10 @@ class _MessageBubbleState extends State<MessageBubble> {
                 color: theme.colorScheme.error,
               ),
               const SizedBox(width: 12),
-              Text(strings.delete, style: TextStyle(color: theme.colorScheme.error)),
+              Text(
+                strings.delete,
+                style: TextStyle(color: theme.colorScheme.error),
+              ),
             ],
           ),
         ),
@@ -530,6 +548,67 @@ class _MessageBubbleState extends State<MessageBubble> {
     return '$hour:$minute';
   }
 
+  Widget? _markdownCache;
+  String? _markdownContent;
+  ThemeData? _markdownTheme;
+  TextScaler? _markdownTextScaler;
+
+  /// Counts full Markdown render constructions; exposed through [MessageBubble].
+  static int _markdownBuildCount = 0;
+
+  Widget _buildMarkdown(
+    BuildContext context,
+    ThemeData theme,
+    Color textColor,
+    bool isUser,
+  ) {
+    final textScaler = MediaQuery.textScalerOf(context);
+    final cached = _markdownCache;
+    if (cached != null &&
+        _markdownContent == widget.content &&
+        identical(_markdownTheme, theme) &&
+        _markdownTextScaler == textScaler) {
+      return cached;
+    }
+    _markdownBuildCount++;
+    _markdownContent = widget.content;
+    _markdownTheme = theme;
+    _markdownTextScaler = textScaler;
+    final markdown = MarkdownBody(
+      data: widget.content,
+      selectable: true,
+      styleSheet: MarkdownStyleSheet(
+        p: theme.textTheme.bodyMedium?.copyWith(color: textColor, height: 1.5),
+        code: theme.textTheme.bodySmall?.copyWith(
+          color: textColor,
+          backgroundColor: textColor.withValues(alpha: 0.08),
+          fontFamily: 'monospace',
+        ),
+        codeblockDecoration: BoxDecoration(
+          color: textColor.withValues(alpha: 0.06),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        blockquoteDecoration: BoxDecoration(
+          border: Border(
+            left: BorderSide(color: textColor.withValues(alpha: 0.3), width: 3),
+          ),
+        ),
+        h1: theme.textTheme.titleLarge?.copyWith(color: textColor),
+        h2: theme.textTheme.titleMedium?.copyWith(color: textColor),
+        h3: theme.textTheme.titleSmall?.copyWith(color: textColor),
+        listBullet: theme.textTheme.bodyMedium?.copyWith(color: textColor),
+        a: TextStyle(
+          color: isUser
+              ? theme.colorScheme.inversePrimary
+              : theme.colorScheme.primary,
+          decoration: TextDecoration.underline,
+        ),
+      ),
+    );
+    _markdownCache = markdown;
+    return markdown;
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -592,7 +671,9 @@ class _MessageBubbleState extends State<MessageBubble> {
                       )
                     : widget.content.isEmpty
                     ? Text(
-                        widget.isStreaming ? strings.typing : strings.emptyReply,
+                        widget.isStreaming
+                            ? strings.typing
+                            : strings.emptyReply,
                         style: theme.textTheme.bodyMedium?.copyWith(
                           color: textColor.withValues(alpha: 0.5),
                           fontStyle: FontStyle.italic,
@@ -610,51 +691,7 @@ class _MessageBubbleState extends State<MessageBubble> {
                           height: 1.5,
                         ),
                       )
-                    : MarkdownBody(
-                        data: widget.content,
-                        selectable: true,
-                        styleSheet: MarkdownStyleSheet(
-                          p: theme.textTheme.bodyMedium?.copyWith(
-                            color: textColor,
-                            height: 1.5,
-                          ),
-                          code: theme.textTheme.bodySmall?.copyWith(
-                            color: textColor,
-                            backgroundColor: textColor.withValues(alpha: 0.08),
-                            fontFamily: 'monospace',
-                          ),
-                          codeblockDecoration: BoxDecoration(
-                            color: textColor.withValues(alpha: 0.06),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          blockquoteDecoration: BoxDecoration(
-                            border: Border(
-                              left: BorderSide(
-                                color: textColor.withValues(alpha: 0.3),
-                                width: 3,
-                              ),
-                            ),
-                          ),
-                          h1: theme.textTheme.titleLarge?.copyWith(
-                            color: textColor,
-                          ),
-                          h2: theme.textTheme.titleMedium?.copyWith(
-                            color: textColor,
-                          ),
-                          h3: theme.textTheme.titleSmall?.copyWith(
-                            color: textColor,
-                          ),
-                          listBullet: theme.textTheme.bodyMedium?.copyWith(
-                            color: textColor,
-                          ),
-                          a: TextStyle(
-                            color: isUser
-                                ? theme.colorScheme.inversePrimary
-                                : theme.colorScheme.primary,
-                            decoration: TextDecoration.underline,
-                          ),
-                        ),
-                      ),
+                    : _buildMarkdown(context, theme, textColor, isUser),
               ),
 
             Padding(

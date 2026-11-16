@@ -234,10 +234,8 @@ impl DiscordBridge {
                 enable_thinking,
                 move |event| {
                     if let ChatStreamEvent::Error(message) = event {
-                        if message != "__RETRY_RESET__" {
-                            if let Ok(mut slot) = error_slot.lock() {
-                                *slot = Some(message);
-                            }
+                        if let Ok(mut slot) = error_slot.lock() {
+                            *slot = Some(message);
                         }
                     }
                 },

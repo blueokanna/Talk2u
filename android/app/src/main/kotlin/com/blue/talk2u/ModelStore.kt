@@ -13,6 +13,19 @@ import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.util.zip.ZipInputStream
 
+/**
+ * Raised when the selected package does not contain every file declared by the
+ * deployment manifest.
+ *
+ * Carries the complete list so the UI can name the missing files instead of
+ * showing a generic import failure.
+ */
+internal class MossPackageIncomplete(
+    val missing: List<String>,
+) : IllegalStateException(
+        "The deployment package is incomplete. Missing: ${missing.joinToString(", ")}",
+    )
+
 class ModelStore(private val context: Context) {
     data class Voice(val id: String, val label: String)
 
@@ -28,7 +41,6 @@ class ModelStore(private val context: Context) {
     data class ImportProgress(val fileName: String, val copiedBytes: Long, val totalBytes: Long)
 
     private data class SourceDocument(val uri: Uri, val size: Long)
-    private data class ManifestFile(val path: String, val size: Long, val sha256: String)
 
     private val modelParent = File(context.noBackupFilesDir, "models")
     val installedRoot: File = File(modelParent, "moss-qnn-v81")
@@ -66,7 +78,7 @@ class ModelStore(private val context: Context) {
 
                         val name = entry.name.trimStart('/').replace('\\', '/')
                         require(name.isNotBlank()) { "ZIP contains empty file name" }
-                        val normalizedName = normalizeRelativePath(name)
+                        val normalizedName = SafeRelativePath.normalize(name)
                         require(extractedPaths.add(normalizedName)) {
                             "ZIP contains a duplicate file: $normalizedName"
                         }
@@ -187,7 +199,11 @@ class ModelStore(private val context: Context) {
             ?: error("Cannot read $DEPLOYMENT_MANIFEST")
         require(manifestBytes.size.toLong() <= MAX_MANIFEST_BYTES) { "Deployment manifest is too large" }
         val manifest = JSONObject(manifestBytes.toString(Charsets.UTF_8))
-        val files = parseAndValidateManifest(manifest)
+        val files = MossDeploymentParser.parse(manifest).files
+        // The document tree is fully indexed, so the whole missing set is known
+        // before a single byte is copied.
+        val missing = files.map { it.path }.filter { documents[it] == null }
+        if (missing.isNotEmpty()) throw MossPackageIncomplete(missing)
         normalizeProviderPlan(manifest)
         val totalBytes = files.sumOf { it.size }
         require(totalBytes in 1..MAX_PACKAGE_BYTES) { "Prepared model package has an invalid total size" }
@@ -288,15 +304,25 @@ class ModelStore(private val context: Context) {
             "Installed deployment manifest is missing"
         }
         val manifest = JSONObject(manifestFile.readText(Charsets.UTF_8))
-        val files = parseAndValidateManifest(manifest)
-        for (entry in files) {
+        val deployment = MossDeploymentParser.parse(manifest)
+        val files = deployment.files
+        // Report every absent or truncated file at once: a partial download is the
+        // most common import failure, and naming the files is what makes the error
+        // actionable for the user.
+        val incomplete = files.filter { entry ->
             val file = resolveSafe(root, entry.path)
-            require(file.isFile && file.length() == entry.size) { "Installed file is invalid: ${entry.path}" }
-            if (verifyHashes) require(sha256(file) == entry.sha256) {
-                "Installed file failed SHA-256 verification: ${entry.path}"
+            !file.isFile || file.length() != entry.size
+        }
+        if (incomplete.isNotEmpty()) {
+            throw MossPackageIncomplete(incomplete.map { it.path })
+        }
+        if (verifyHashes) {
+            for (entry in files) {
+                require(sha256(resolveSafe(root, entry.path)) == entry.sha256) {
+                    "Installed file failed SHA-256 verification: ${entry.path}"
+                }
             }
         }
-        val target = manifest.getJSONObject("target")
         val browserManifest = File(root, TTS_DIR + "/browser_poc_manifest.json")
         val browser = JSONObject(browserManifest.readText(Charsets.UTF_8))
         val voiceArray = browser.getJSONArray("builtin_voices")
@@ -313,56 +339,10 @@ class ModelStore(private val context: Context) {
             root = root,
             totalBytes = files.sumOf { it.size },
             voices = voices,
-            target = "${target.getString("soc")} / HTP ${target.getString("htpArchitecture")}",
-            qnnSdkVersion = manifest.getString("qnnSdkVersion"),
-            ortVersion = manifest.getString("ortVersion"),
+            target = "${deployment.soc} / HTP ${deployment.htpArchitecture}",
+            qnnSdkVersion = deployment.qnnSdkVersion,
+            ortVersion = deployment.ortVersion,
         )
-    }
-
-    private fun parseAndValidateManifest(manifest: JSONObject): List<ManifestFile> {
-        require(manifest.getInt("schemaVersion") == 1) { "Unsupported deployment schema" }
-        require(manifest.getString("runtime") == "onnxruntime-qnn-plugin-ep") {
-            "Deployment does not target the ONNX Runtime QNN Plugin EP"
-        }
-        require(manifest.getString("qnnSdkVersion") == "2.48.0") {
-            "This app requires a QAIRT/QNN SDK 2.48.0 deployment"
-        }
-        require(manifest.getString("ortVersion").startsWith("1.26.")) {
-            "This app requires an ONNX Runtime 1.26 deployment"
-        }
-        require(manifest.optString("onnxruntimeQnnVersion") == "2.4.0") {
-            "This app requires QNN Plugin EP 2.4.0"
-        }
-        val target = manifest.getJSONObject("target")
-        require(target.getString("soc") == "SM8850" &&
-            target.getString("htpArchitecture").equals("v81", ignoreCase = true)) {
-            "This build accepts only SM8850 HTP v81 deployments"
-        }
-        val plan = manifest.getJSONObject("providerPlan")
-        require(plan.getString("prefill") == "QNN_HTP" &&
-            plan.getString("decode") == "QNN_HTP" &&
-            plan.getString("sampler") == "ORT_CPU" &&
-            plan.getString("codec") in ACCEPTED_CODEC_PROVIDERS) {
-            "Unexpected execution-provider plan"
-        }
-        val array = manifest.getJSONArray("files")
-        require(array.length() in REQUIRED_PATHS.size..MAX_FILE_COUNT) { "Invalid deployment file count" }
-        val paths = HashSet<String>()
-        val files = ArrayList<ManifestFile>(array.length())
-        for (index in 0 until array.length()) {
-            val item = array.getJSONObject(index)
-            val path = normalizeRelativePath(item.getString("path"))
-            require(paths.add(path)) { "Duplicate deployment path: $path" }
-            val size = item.getLong("size")
-            val hash = item.getString("sha256").lowercase()
-            require(size > 0 && size <= MAX_FILE_BYTES) { "Invalid file size for $path" }
-            require(hash.matches(Regex("[0-9a-f]{64}"))) { "Invalid SHA-256 for $path" }
-            files.add(ManifestFile(path, size, hash))
-        }
-        require(paths.containsAll(REQUIRED_PATHS)) {
-            "Deployment is missing required runtime files: ${(REQUIRED_PATHS - paths).joinToString()}"
-        }
-        return files
     }
 
     private fun normalizeProviderPlan(manifest: JSONObject) {
@@ -385,7 +365,9 @@ class ModelStore(private val context: Context) {
                 val sizeColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_SIZE)
                 while (cursor.moveToNext()) {
                     val id = cursor.getString(idColumn)
-                    val name = validateSegment(cursor.getString(nameColumn))
+                    val name = SafeRelativePath.validateSegment(
+                        cursor.getString(nameColumn),
+                    )
                     val path = if (parentPath.isEmpty()) name else "$parentPath/$name"
                     val mime = cursor.getString(mimeColumn)
                     if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
@@ -405,13 +387,8 @@ class ModelStore(private val context: Context) {
         return result
     }
 
-    private fun resolveSafe(root: File, relative: String): File {
-        val normalized = normalizeRelativePath(relative)
-        val file = File(root, normalized.replace('/', File.separatorChar)).canonicalFile
-        val canonicalRoot = root.canonicalFile
-        require(file.path.startsWith(canonicalRoot.path + File.separator)) { "Path escapes model root" }
-        return file
-    }
+    private fun resolveSafe(root: File, relative: String): File =
+        SafeRelativePath.resolveIn(root, relative)
 
     private fun deletePrivateTree(file: File) {
         if (!file.exists()) return
@@ -419,23 +396,6 @@ class ModelStore(private val context: Context) {
         val canonical = file.canonicalFile
         require(canonical.parentFile == canonicalParent) { "Refusing to delete outside the private model directory" }
         check(file.deleteRecursively()) { "Cannot clean private model staging data" }
-    }
-
-    private fun normalizeRelativePath(value: String): String {
-        require(value.isNotBlank() && !value.startsWith('/') && !value.startsWith('\\')) {
-            "Invalid deployment path"
-        }
-        val segments = value.replace('\\', '/').split('/')
-        require(segments.isNotEmpty() && segments.all { it.isNotEmpty() }) { "Invalid deployment path: $value" }
-        return segments.joinToString("/") { validateSegment(it) }
-    }
-
-    private fun validateSegment(segment: String): String {
-        require(segment != "." && segment != ".." &&
-            segment.none { it == '/' || it == '\\' || it.code < 32 }) {
-            "Unsafe document name"
-        }
-        return segment
     }
 
     private fun sha256(file: File): String {
@@ -454,34 +414,19 @@ class ModelStore(private val context: Context) {
     private fun MessageDigest.hexDigest(): String = digest().joinToString("") { "%02x".format(it) }
 
     companion object {
-        const val DEPLOYMENT_MANIFEST = "moss-qnn-deployment.json"
-        private const val TTS_DIR = "MOSS-TTS-Nano-100M-ONNX"
-        private const val CODEC_DIR = "MOSS-Audio-Tokenizer-Nano-ONNX"
+        const val DEPLOYMENT_MANIFEST = MossDeploymentParser.MANIFEST
+        private const val TTS_DIR = MossDeploymentParser.TTS_DIR
         private const val MAX_MANIFEST_BYTES = 2L * 1024 * 1024
-        private const val MAX_FILE_BYTES = 2L * 1024 * 1024 * 1024
+        private const val MAX_FILE_BYTES = MossDeploymentParser.MAX_FILE_BYTES
         private const val MAX_PACKAGE_BYTES = 4L * 1024 * 1024 * 1024
-        private const val MAX_FILE_COUNT = 64
+        private const val MAX_FILE_COUNT = MossDeploymentParser.MAX_FILE_COUNT
         private const val MAX_TREE_DEPTH = 8
         private const val COPY_BUFFER_BYTES = 1024 * 1024
-        private val ACCEPTED_CODEC_PROVIDERS = setOf("ORT_CPU", "QNN_HTP")
         private val QUERY_COLUMNS = arrayOf(
             DocumentsContract.Document.COLUMN_DOCUMENT_ID,
             DocumentsContract.Document.COLUMN_DISPLAY_NAME,
             DocumentsContract.Document.COLUMN_MIME_TYPE,
             DocumentsContract.Document.COLUMN_SIZE,
-        )
-        private val REQUIRED_PATHS = setOf(
-            "$TTS_DIR/browser_poc_manifest.json",
-            "$TTS_DIR/tts_browser_onnx_meta.json",
-            "$TTS_DIR/tokenizer.model",
-            "$TTS_DIR/moss_tts_prefill.qnn.onnx",
-            "$TTS_DIR/moss_tts_decode_step.qnn.onnx",
-            "$TTS_DIR/moss_tts_local_fixed_sampled_frame.onnx",
-            "$TTS_DIR/moss_tts_global_shared.data",
-            "$TTS_DIR/moss_tts_local_shared.data",
-            "$CODEC_DIR/codec_browser_onnx_meta.json",
-            "$CODEC_DIR/moss_audio_tokenizer_decode_step.qnn.onnx",
-            "$CODEC_DIR/moss_audio_tokenizer_decode_shared.data",
         )
     }
 }

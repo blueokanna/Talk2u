@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -354311235;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1674597569;
 
 // Section: executor
 
@@ -747,6 +747,39 @@ fn wire__crate__api__data_models__message_type_default_impl(
         },
     )
 }
+fn wire__crate__api__chat_api__partial_reply_default_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "partial_reply_default",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok =
+                        Result::<_, ()>::Ok(crate::api::chat_api::PartialReply::default())?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__data_models__provider_config_is_configured_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -1345,9 +1378,15 @@ impl SseDecode for crate::api::data_models::ChatStreamEvent {
                 return crate::api::data_models::ChatStreamEvent::ThinkingDelta(var_field0);
             }
             2 => {
-                return crate::api::data_models::ChatStreamEvent::Done;
+                return crate::api::data_models::ChatStreamEvent::RetryReset;
             }
             3 => {
+                return crate::api::data_models::ChatStreamEvent::GenerationCancelled;
+            }
+            4 => {
+                return crate::api::data_models::ChatStreamEvent::Done;
+            }
+            5 => {
                 let mut var_field0 = <String>::sse_decode(deserializer);
                 return crate::api::data_models::ChatStreamEvent::Error(var_field0);
             }
@@ -1739,6 +1778,18 @@ impl SseDecode for Option<crate::api::data_models::MemoryContextCard> {
     }
 }
 
+impl SseDecode for crate::api::chat_api::PartialReply {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_content = <String>::sse_decode(deserializer);
+        let mut var_thinking = <String>::sse_decode(deserializer);
+        return crate::api::chat_api::PartialReply {
+            content: var_content,
+            thinking: var_thinking,
+        };
+    }
+}
+
 impl SseDecode for crate::api::data_models::ProviderConfig {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1861,45 +1912,51 @@ fn pde_ffi_dispatcher_primary_impl(
             rust_vec_len,
             data_len,
         ),
-        21 => wire__crate__api__data_models__provider_config_is_configured_impl(
+        21 => wire__crate__api__chat_api__partial_reply_default_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        22 => wire__crate__api__data_models__provider_config_requires_api_key_impl(
+        22 => wire__crate__api__data_models__provider_config_is_configured_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        23 => {
+        23 => wire__crate__api__data_models__provider_config_requires_api_key_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        24 => {
             wire__crate__api__chat_api__regenerate_response_impl(port, ptr, rust_vec_len, data_len)
         }
-        24 => wire__crate__api__chat_api__restart_story_impl(port, ptr, rust_vec_len, data_len),
-        25 => {
+        25 => wire__crate__api__chat_api__restart_story_impl(port, ptr, rust_vec_len, data_len),
+        26 => {
             wire__crate__api__chat_api__rollback_to_message_impl(port, ptr, rust_vec_len, data_len)
         }
-        26 => wire__crate__api__chat_api__save_settings_impl(port, ptr, rust_vec_len, data_len),
-        27 => wire__crate__api__chat_api__search_memories_impl(port, ptr, rust_vec_len, data_len),
-        28 => wire__crate__api__chat_api__send_message_impl(port, ptr, rust_vec_len, data_len),
-        29 => wire__crate__api__chat_api__set_api_key_impl(port, ptr, rust_vec_len, data_len),
-        30 => {
+        27 => wire__crate__api__chat_api__save_settings_impl(port, ptr, rust_vec_len, data_len),
+        28 => wire__crate__api__chat_api__search_memories_impl(port, ptr, rust_vec_len, data_len),
+        29 => wire__crate__api__chat_api__send_message_impl(port, ptr, rust_vec_len, data_len),
+        30 => wire__crate__api__chat_api__set_api_key_impl(port, ptr, rust_vec_len, data_len),
+        31 => {
             wire__crate__api__chat_api__set_dialogue_style_impl(port, ptr, rust_vec_len, data_len)
         }
-        31 => wire__crate__api__chat_api__should_summarize_memory_impl(
+        32 => wire__crate__api__chat_api__should_summarize_memory_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        32 => wire__crate__api__chat_api__trigger_memory_summarize_impl(
+        33 => wire__crate__api__chat_api__trigger_memory_summarize_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        33 => wire__crate__api__chat_api__validate_api_key_impl(port, ptr, rust_vec_len, data_len),
+        34 => wire__crate__api__chat_api__validate_api_key_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -1954,9 +2011,13 @@ impl flutter_rust_bridge::IntoDart for crate::api::data_models::ChatStreamEvent 
             crate::api::data_models::ChatStreamEvent::ThinkingDelta(field0) => {
                 [1.into_dart(), field0.into_into_dart().into_dart()].into_dart()
             }
-            crate::api::data_models::ChatStreamEvent::Done => [2.into_dart()].into_dart(),
+            crate::api::data_models::ChatStreamEvent::RetryReset => [2.into_dart()].into_dart(),
+            crate::api::data_models::ChatStreamEvent::GenerationCancelled => {
+                [3.into_dart()].into_dart()
+            }
+            crate::api::data_models::ChatStreamEvent::Done => [4.into_dart()].into_dart(),
             crate::api::data_models::ChatStreamEvent::Error(field0) => {
-                [3.into_dart(), field0.into_into_dart().into_dart()].into_dart()
+                [5.into_dart(), field0.into_into_dart().into_dart()].into_dart()
             }
             _ => {
                 unimplemented!("");
@@ -2244,6 +2305,27 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::data_models::ModelInfo>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::chat_api::PartialReply {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.content.into_into_dart().into_dart(),
+            self.thinking.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::chat_api::PartialReply
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::chat_api::PartialReply>
+    for crate::api::chat_api::PartialReply
+{
+    fn into_into_dart(self) -> crate::api::chat_api::PartialReply {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::data_models::ProviderConfig {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -2329,11 +2411,17 @@ impl SseEncode for crate::api::data_models::ChatStreamEvent {
                 <i32>::sse_encode(1, serializer);
                 <String>::sse_encode(field0, serializer);
             }
-            crate::api::data_models::ChatStreamEvent::Done => {
+            crate::api::data_models::ChatStreamEvent::RetryReset => {
                 <i32>::sse_encode(2, serializer);
             }
-            crate::api::data_models::ChatStreamEvent::Error(field0) => {
+            crate::api::data_models::ChatStreamEvent::GenerationCancelled => {
                 <i32>::sse_encode(3, serializer);
+            }
+            crate::api::data_models::ChatStreamEvent::Done => {
+                <i32>::sse_encode(4, serializer);
+            }
+            crate::api::data_models::ChatStreamEvent::Error(field0) => {
+                <i32>::sse_encode(5, serializer);
                 <String>::sse_encode(field0, serializer);
             }
             _ => {
@@ -2644,6 +2732,14 @@ impl SseEncode for Option<crate::api::data_models::MemoryContextCard> {
         if let Some(value) = self {
             <crate::api::data_models::MemoryContextCard>::sse_encode(value, serializer);
         }
+    }
+}
+
+impl SseEncode for crate::api::chat_api::PartialReply {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.content, serializer);
+        <String>::sse_encode(self.thinking, serializer);
     }
 }
 

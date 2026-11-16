@@ -2,16 +2,8 @@ use super::error_handler::ChatError;
 use nextjson::{NsonDeserialize, NsonSerialize};
 use rustbinary::Config;
 
-/// On-disk envelope written by [`encode`].
-///
-/// `T2UB` + a format byte keeps the payload self-describing: a file written by
-/// a future schema is rejected instead of being decoded into nonsense, and a
-/// corrupted header fails before rustbinary ever sees the bytes.
 const MAGIC: [u8; 4] = *b"T2UB";
 const FORMAT_VERSION: u8 = 1;
-
-/// Both limits are mandatory at this boundary: the payload comes from disk and
-/// may be attacker-controlled on a rooted device or through a synced backup.
 const MAX_DOCUMENT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_COLLECTION_ITEMS: u64 = 1_000_000;
 

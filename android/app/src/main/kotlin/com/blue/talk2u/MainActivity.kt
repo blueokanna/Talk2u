@@ -1117,11 +1117,7 @@ class MainActivity : FlutterActivity() {
                 onFailure = { error ->
                     Log.e("Talk2U/MOSS", "MOSS deployment import failed", error)
                     deliverMossResult(pending) {
-                        pending.error(
-                            "moss_import_failed",
-                            error.message ?: error.javaClass.simpleName,
-                            null,
-                        )
+                        reportMossImportFailure(pending, error)
                     }
                 },
             )
@@ -1156,11 +1152,7 @@ class MainActivity : FlutterActivity() {
                 onFailure = { error ->
                     Log.e("Talk2U/MOSS", "MOSS ZIP import failed", error)
                     deliverMossResult(pending) {
-                        pending.error(
-                            "moss_import_failed",
-                            error.message ?: error.javaClass.simpleName,
-                            null,
-                        )
+                        reportMossImportFailure(pending, error)
                     }
                 },
             )
@@ -1378,6 +1370,25 @@ class MainActivity : FlutterActivity() {
         if (activityDestroyed) return
         runOnUiThread {
             if (!activityDestroyed) runCatching(action)
+        }
+    }
+
+    /**
+     * Reports a MOSS import failure.
+     *
+     * An incomplete package is the most common cause, so it gets a dedicated code
+     * and a payload listing the missing files; everything else keeps the generic
+     * `moss_import_failed` code. The UI localizes both.
+     */
+    private fun reportMossImportFailure(result: MethodChannel.Result, error: Throwable) {
+        if (error is MossPackageIncomplete) {
+            result.error("moss_package_incomplete", error.missing.joinToString(", "), null)
+        } else {
+            result.error(
+                "moss_import_failed",
+                error.message ?: error.javaClass.simpleName,
+                null,
+            )
         }
     }
 

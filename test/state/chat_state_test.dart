@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:talk2u/src/rust/api/data_models.dart';
 import 'package:talk2u/src/state/chat_state.dart';
@@ -88,6 +89,108 @@ void main() {
       disposable.dispose();
       read.complete(conversation('old'));
       expect(await pending, isFalse);
+    });
+  });
+
+  group('mobile memory behaviour', () {
+    test('streaming deltas keep message views stable', () async {
+      state.startStreaming();
+      final firstView = state.messages;
+      final firstList = state.displayMessages;
+      expect(state.displayMessagesBuildCount, 1);
+
+      state.appendStreamingContent('delta');
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+
+      // Content-only notifications must not rebuild the message list.
+      expect(identical(firstView, state.messages), isTrue);
+      expect(identical(firstList, state.displayMessages), isTrue);
+      expect(state.displayMessagesBuildCount, 1);
+
+      state.endStreaming();
+      expect(identical(firstList, state.displayMessages), isFalse);
+      expect(state.displayMessagesBuildCount, 2);
+    });
+
+    test('background pauses repaint timer and resume flushes once', () async {
+      state.startStreaming();
+      var notifications = 0;
+      state.addListener(() => notifications++);
+
+      state.appendStreamingContent('hello');
+      expect(state.hasScheduledStreamFlush, isTrue);
+
+      state.didChangeAppLifecycleState(AppLifecycleState.paused);
+      expect(state.hasScheduledStreamFlush, isFalse);
+
+      state.appendStreamingContent(' world');
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+      // Deltas are buffered without waking the UI while backgrounded.
+      expect(notifications, 0);
+      expect(state.currentStreamingContent, 'hello world');
+
+      state.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      expect(notifications, 1);
+    });
+
+    test('many deltas accumulate without losing content', () {
+      state.startStreaming();
+      for (var index = 0; index < 4000; index++) {
+        state.appendStreamingContent('a');
+      }
+      expect(state.currentStreamingContent.length, 4000);
+      // Repeated reads while idle must not rebuild the string.
+      expect(
+        identical(state.currentStreamingContent, state.currentStreamingContent),
+        isTrue,
+      );
+    });
+
+    test('reset clears both buffers for a new turn', () {
+      state.startStreaming();
+      state.appendStreamingContent('old');
+      state.appendThinkingContent('old thought');
+      state.startStreaming();
+      expect(state.currentStreamingContent, '');
+      expect(state.currentThinkingContent, '');
+      state.appendThinkingContent('fresh');
+      expect(state.currentThinkingContent, 'fresh');
+    });
+
+    test('retry reset discards only the partial reply', () async {
+      final events = StreamController<ChatStreamEvent>();
+      state.startStreaming();
+      state.listenToChatStreamForTest(events.stream, 'conv-reset');
+      state.appendStreamingContent('discarded');
+      events.add(const ChatStreamEvent.retryReset());
+      await Future<void>.delayed(Duration.zero);
+      expect(state.currentStreamingContent, '');
+      state.appendStreamingContent('kept');
+      expect(state.currentStreamingContent, 'kept');
+      await events.close();
+    });
+
+    test('displayMessages is cached between notifications', () {
+      final first = state.displayMessages;
+      expect(identical(first, state.displayMessages), isTrue);
+      state.startStreaming();
+      expect(identical(first, state.displayMessages), isFalse);
+    });
+
+    test('the exposed message list is unmodifiable', () {
+      expect(
+        () => state.messages.add(
+          Message(
+            id: 'x',
+            role: MessageRole.user,
+            content: 'x',
+            model: 'test',
+            timestamp: 0,
+            messageType: MessageType.say,
+          ),
+        ),
+        throwsUnsupportedError,
+      );
     });
   });
 
@@ -308,7 +411,7 @@ void main() {
     });
 
     test(
-      '__RETRY_RESET__ clears streaming content without setting error',
+      'retry reset clears streaming content without setting error',
       () async {
         final controller = StreamController<ChatStreamEvent>();
 
@@ -319,7 +422,7 @@ void main() {
         await Future.delayed(const Duration(milliseconds: 50));
         expect(state.currentStreamingContent, 'old content');
 
-        controller.add(const ChatStreamEvent.error('__RETRY_RESET__'));
+        controller.add(const ChatStreamEvent.retryReset());
         await Future.delayed(const Duration(milliseconds: 50));
 
         expect(state.currentStreamingContent, '');
@@ -338,7 +441,7 @@ void main() {
       state.listenToChatStreamForTest(controller.stream, 'conv-cancel');
 
       controller.add(const ChatStreamEvent.contentDelta('Partial'));
-      controller.add(const ChatStreamEvent.error('__GENERATION_CANCELLED__'));
+      controller.add(const ChatStreamEvent.generationCancelled());
       controller.add(const ChatStreamEvent.done());
       await Future.delayed(const Duration(milliseconds: 50));
 

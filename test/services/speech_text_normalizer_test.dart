@@ -14,14 +14,15 @@ void main() {
       expect(plan.emotion, 'happy');
     });
 
-    test('turns blank lines into sentence pauses, never newline characters', () {
-      final plan = SpeechTextNormalizer.prepare(
-        '第一段。\n\n\n第二段，\n还有一句。',
-      );
+    test(
+      'turns blank lines into sentence pauses, never newline characters',
+      () {
+        final plan = SpeechTextNormalizer.prepare('第一段。\n\n\n第二段，\n还有一句。');
 
-      expect(plan.spokenText, isNot(contains('\n')));
-      expect(plan.spokenText, '第一段。第二段，还有一句。');
-    });
+        expect(plan.spokenText, isNot(contains('\n')));
+        expect(plan.spokenText, '第一段。第二段，还有一句。');
+      },
+    );
 
     test('drops reasoning, code fences, inline code, markdown and URLs', () {
       final plan = SpeechTextNormalizer.prepare(
@@ -42,14 +43,10 @@ void main() {
     });
 
     test('keeps explanatory parentheses but removes stage directions', () {
-      final explanatory = SpeechTextNormalizer.prepare(
-        'NNAPI（神经网络 API）仍然兼容。',
-      );
+      final explanatory = SpeechTextNormalizer.prepare('NNAPI（神经网络 API）仍然兼容。');
       expect(explanatory.spokenText, contains('神经网络 API'));
 
-      final direction = SpeechTextNormalizer.prepare(
-        '女生：（哈哈大笑）你说得太好了！',
-      );
+      final direction = SpeechTextNormalizer.prepare('女生：（哈哈大笑）你说得太好了！');
       expect(direction.spokenText, '你说得太好了！');
       expect(direction.stageDirections.single.text, '哈哈大笑');
       expect(direction.emotion, 'happy');
@@ -68,16 +65,11 @@ void main() {
     });
 
     test('cleans streaming transcripts without touching normal words', () {
-      expect(
-        SpeechTextNormalizer.cleanTranscript(' 你好 😊 世界 \n'),
-        '你好 世界',
-      );
+      expect(SpeechTextNormalizer.cleanTranscript(' 你好 😊 世界 \n'), '你好 世界');
     });
 
     test('cleaned replies split into speakable MOSS chunks', () {
-      final plan = SpeechTextNormalizer.prepare(
-        '她笑了😊。\n\n然后说：我们可以出发了。',
-      );
+      final plan = SpeechTextNormalizer.prepare('她笑了😊。\n\n然后说：我们可以出发了。');
       final chunks = splitMossText(plan.spokenText, maxCharacters: 12);
 
       expect(chunks, isNotEmpty);

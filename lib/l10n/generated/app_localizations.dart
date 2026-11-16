@@ -176,6 +176,132 @@ abstract class AppLocalizations {
   /// **'Close'**
   String get cameraObservationClose;
 
+  /// No description provided for @pauseDownloadFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not pause the download: {error}'**
+  String pauseDownloadFailed(String error);
+
+  /// No description provided for @qwenCapabilitiesFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not check the Qwen3 QAIRT/NPU model state. Try again.'**
+  String get qwenCapabilitiesFailed;
+
+  /// No description provided for @qwenDownloadFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'The Qwen3 download was interrupted. Partial data is kept; tap download to resume.'**
+  String get qwenDownloadFailed;
+
+  /// No description provided for @qwenDownloadPaused.
+  ///
+  /// In en, this message translates to:
+  /// **'Download paused. Partial data is kept; tap download to continue.'**
+  String get qwenDownloadPaused;
+
+  /// No description provided for @qwenLoadFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'The Qwen3 QAIRT/NPU model failed to load. Try again.'**
+  String get qwenLoadFailed;
+
+  /// No description provided for @qwenGenerateFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'On-device Qwen3 generation failed. Try again.'**
+  String get qwenGenerateFailed;
+
+  /// No description provided for @unknownError.
+  ///
+  /// In en, this message translates to:
+  /// **'The operation failed. Try again.'**
+  String get unknownError;
+
+  /// No description provided for @mossErrorRuntime.
+  ///
+  /// In en, this message translates to:
+  /// **'The Qualcomm QNN HTP runtime required by MOSS is unavailable.'**
+  String get mossErrorRuntime;
+
+  /// No description provided for @mossErrorInit.
+  ///
+  /// In en, this message translates to:
+  /// **'MOSS QNN initialization failed. Try again or re-import the deployment package.'**
+  String get mossErrorInit;
+
+  /// No description provided for @mossErrorModelMissing.
+  ///
+  /// In en, this message translates to:
+  /// **'The MOSS QNN HTP v81 deployment package is not installed.'**
+  String get mossErrorModelMissing;
+
+  /// No description provided for @mossErrorSynthesis.
+  ///
+  /// In en, this message translates to:
+  /// **'MOSS speech synthesis failed. Try again.'**
+  String get mossErrorSynthesis;
+
+  /// No description provided for @mossErrorImport.
+  ///
+  /// In en, this message translates to:
+  /// **'The MOSS deployment package could not be imported. Check the files and hashes.'**
+  String get mossErrorImport;
+
+  /// No description provided for @mossErrorImportBusy.
+  ///
+  /// In en, this message translates to:
+  /// **'Another MOSS import is already running. Wait for it to finish.'**
+  String get mossErrorImportBusy;
+
+  /// No description provided for @mossCancelled.
+  ///
+  /// In en, this message translates to:
+  /// **'The MOSS operation was cancelled.'**
+  String get mossCancelled;
+
+  /// No description provided for @mossErrorDelete.
+  ///
+  /// In en, this message translates to:
+  /// **'The MOSS deployment package could not be deleted. Try again.'**
+  String get mossErrorDelete;
+
+  /// No description provided for @senseVoiceErrorCheck.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not check the SenseVoice model. Try again.'**
+  String get senseVoiceErrorCheck;
+
+  /// No description provided for @senseVoiceErrorRecognition.
+  ///
+  /// In en, this message translates to:
+  /// **'SenseVoice recognition failed. Try again or reinstall the model.'**
+  String get senseVoiceErrorRecognition;
+
+  /// No description provided for @senseVoiceErrorDownload.
+  ///
+  /// In en, this message translates to:
+  /// **'The SenseVoice download was interrupted. Try again; partial data is kept.'**
+  String get senseVoiceErrorDownload;
+
+  /// No description provided for @senseVoiceErrorRecording.
+  ///
+  /// In en, this message translates to:
+  /// **'Microphone recording failed. Check the permission and whether another app is using it.'**
+  String get senseVoiceErrorRecording;
+
+  /// No description provided for @senseVoiceErrorImport.
+  ///
+  /// In en, this message translates to:
+  /// **'The SenseVoice model could not be imported. Check the ZIP file.'**
+  String get senseVoiceErrorImport;
+
+  /// No description provided for @senseVoiceCancelled.
+  ///
+  /// In en, this message translates to:
+  /// **'The SenseVoice operation was cancelled.'**
+  String get senseVoiceCancelled;
+
   /// No description provided for @live2dDesktopHostMissing.
   ///
   /// In en, this message translates to:
@@ -263,7 +389,7 @@ abstract class AppLocalizations {
   /// No description provided for @languageChinese.
   ///
   /// In en, this message translates to:
-  /// **'Simplified Chinese'**
+  /// **'Chinese'**
   String get languageChinese;
 
   /// No description provided for @languageEnglish.
@@ -295,6 +421,42 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'MOSS on-device speech'**
   String get mossSpeech;
+
+  /// No description provided for @mossPackageMissing.
+  ///
+  /// In en, this message translates to:
+  /// **'Not installed · the package is about {size} from your model source'**
+  String mossPackageMissing(String size);
+
+  /// No description provided for @mossRuntimeReady.
+  ///
+  /// In en, this message translates to:
+  /// **'MOSS QNN HTP initialized'**
+  String get mossRuntimeReady;
+
+  /// No description provided for @mossChooseDirectory.
+  ///
+  /// In en, this message translates to:
+  /// **'Choose the directory containing moss-qnn-deployment.json'**
+  String get mossChooseDirectory;
+
+  /// No description provided for @mossChooseZip.
+  ///
+  /// In en, this message translates to:
+  /// **'Choose the moss-qnn-v81-streaming.zip file'**
+  String get mossChooseZip;
+
+  /// No description provided for @mossImporting.
+  ///
+  /// In en, this message translates to:
+  /// **'Importing the model'**
+  String get mossImporting;
+
+  /// No description provided for @mossImportedInitialized.
+  ///
+  /// In en, this message translates to:
+  /// **'MOSS QNN HTP model imported and initialized'**
+  String get mossImportedInitialized;
 
   /// No description provided for @startupPreparing.
   ///
@@ -1595,13 +1757,13 @@ abstract class AppLocalizations {
   /// No description provided for @callFullDuplex.
   ///
   /// In en, this message translates to:
-  /// **'Hands-free ? hardware AEC (interrupt anytime)'**
+  /// **'Hands-free · hardware AEC (interrupt anytime)'**
   String get callFullDuplex;
 
   /// No description provided for @callHalfDuplex.
   ///
   /// In en, this message translates to:
-  /// **'Hands-free ? half duplex (mic paused during playback)'**
+  /// **'Hands-free · half duplex (mic paused during playback)'**
   String get callHalfDuplex;
 
   /// No description provided for @diagnosticsInvalidJson.
@@ -1609,6 +1771,558 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Diagnostics result is not a JSON object'**
   String get diagnosticsInvalidJson;
+
+  /// No description provided for @micPermissionDenied.
+  ///
+  /// In en, this message translates to:
+  /// **'Microphone permission was not granted'**
+  String get micPermissionDenied;
+
+  /// No description provided for @currentOnlinePlatform.
+  ///
+  /// In en, this message translates to:
+  /// **'the current online platform'**
+  String get currentOnlinePlatform;
+
+  /// No description provided for @offlineProviderName.
+  ///
+  /// In en, this message translates to:
+  /// **'On-device AI'**
+  String get offlineProviderName;
+
+  /// No description provided for @mossPackageIncomplete.
+  ///
+  /// In en, this message translates to:
+  /// **'The deployment package is incomplete. Missing: {files}'**
+  String mossPackageIncomplete(String files);
+
+  /// No description provided for @captureReleased.
+  ///
+  /// In en, this message translates to:
+  /// **'Audio capture has been released'**
+  String get captureReleased;
+
+  /// No description provided for @live2dImportUnsupported.
+  ///
+  /// In en, this message translates to:
+  /// **'Importing Live2D ZIP files is not supported on this platform'**
+  String get live2dImportUnsupported;
+
+  /// No description provided for @live2dNativeListMissing.
+  ///
+  /// In en, this message translates to:
+  /// **'The native layer returned no Live2D model list'**
+  String get live2dNativeListMissing;
+
+  /// No description provided for @live2dBuiltinPathMissing.
+  ///
+  /// In en, this message translates to:
+  /// **'The native layer returned no bundled Live2D model path'**
+  String get live2dBuiltinPathMissing;
+
+  /// No description provided for @live2dZipNotFound.
+  ///
+  /// In en, this message translates to:
+  /// **'ZIP file not found'**
+  String get live2dZipNotFound;
+
+  /// No description provided for @live2dZipTooLarge.
+  ///
+  /// In en, this message translates to:
+  /// **'Live2D ZIP exceeds the {limitMb} MB import limit'**
+  String live2dZipTooLarge(int limitMb);
+
+  /// No description provided for @live2dZipEmpty.
+  ///
+  /// In en, this message translates to:
+  /// **'ZIP file is empty or malformed'**
+  String get live2dZipEmpty;
+
+  /// No description provided for @live2dZipTooManyEntries.
+  ///
+  /// In en, this message translates to:
+  /// **'ZIP file contains too many entries'**
+  String get live2dZipTooManyEntries;
+
+  /// No description provided for @live2dUnpackedTooLarge.
+  ///
+  /// In en, this message translates to:
+  /// **'Unpacked model exceeds the {limitMb} MB limit'**
+  String live2dUnpackedTooLarge(int limitMb);
+
+  /// No description provided for @live2dZipUnsafeEntry.
+  ///
+  /// In en, this message translates to:
+  /// **'ZIP contains an out-of-bounds path: {entry}'**
+  String live2dZipUnsafeEntry(String entry);
+
+  /// No description provided for @live2dZipUnsupportedLink.
+  ///
+  /// In en, this message translates to:
+  /// **'ZIP contains an unsupported link entry: {entry}'**
+  String live2dZipUnsupportedLink(String entry);
+
+  /// No description provided for @live2dZipNoModelJson.
+  ///
+  /// In en, this message translates to:
+  /// **'ZIP contains no .model3.json'**
+  String get live2dZipNoModelJson;
+
+  /// No description provided for @live2dZipAbsolutePath.
+  ///
+  /// In en, this message translates to:
+  /// **'ZIP contains an absolute path: {name}'**
+  String live2dZipAbsolutePath(String name);
+
+  /// No description provided for @live2dZipUnsafePath.
+  ///
+  /// In en, this message translates to:
+  /// **'ZIP contains an unsafe path: {name}'**
+  String live2dZipUnsafePath(String name);
+
+  /// No description provided for @live2dModelJsonNotObject.
+  ///
+  /// In en, this message translates to:
+  /// **'model3.json is not a JSON object'**
+  String get live2dModelJsonNotObject;
+
+  /// No description provided for @live2dModelJsonVersion.
+  ///
+  /// In en, this message translates to:
+  /// **'Only Cubism .model3.json Version 3 is supported'**
+  String get live2dModelJsonVersion;
+
+  /// No description provided for @live2dModelJsonFileReferences.
+  ///
+  /// In en, this message translates to:
+  /// **'model3.json is missing FileReferences'**
+  String get live2dModelJsonFileReferences;
+
+  /// No description provided for @live2dModelJsonMoc.
+  ///
+  /// In en, this message translates to:
+  /// **'model3.json has no Moc file reference'**
+  String get live2dModelJsonMoc;
+
+  /// No description provided for @live2dModelJsonNoTextures.
+  ///
+  /// In en, this message translates to:
+  /// **'model3.json has no texture references'**
+  String get live2dModelJsonNoTextures;
+
+  /// No description provided for @live2dTextureReferenceInvalid.
+  ///
+  /// In en, this message translates to:
+  /// **'Texture reference is malformed'**
+  String get live2dTextureReferenceInvalid;
+
+  /// No description provided for @live2dMocInvalid.
+  ///
+  /// In en, this message translates to:
+  /// **'{file} is not a valid moc3 file'**
+  String live2dMocInvalid(String file);
+
+  /// No description provided for @live2dMocVersionUnsupported.
+  ///
+  /// In en, this message translates to:
+  /// **'Cubism Core does not support moc3 version {version}'**
+  String live2dMocVersionUnsupported(String version);
+
+  /// No description provided for @live2dCdi3Version.
+  ///
+  /// In en, this message translates to:
+  /// **'cdi3.json Version must be 3'**
+  String get live2dCdi3Version;
+
+  /// No description provided for @live2dReferenceRemote.
+  ///
+  /// In en, this message translates to:
+  /// **'Model references a non-local resource: {ref}'**
+  String live2dReferenceRemote(String ref);
+
+  /// No description provided for @live2dReferenceTraversal.
+  ///
+  /// In en, this message translates to:
+  /// **'Model reference escapes the model directory: {ref}'**
+  String live2dReferenceTraversal(String ref);
+
+  /// No description provided for @live2dReferenceConflict.
+  ///
+  /// In en, this message translates to:
+  /// **'Model resource is missing or has a case conflict: {ref}'**
+  String live2dReferenceConflict(String ref);
+
+  /// No description provided for @live2dReferenceInvalid.
+  ///
+  /// In en, this message translates to:
+  /// **'Model reference path is invalid: {ref}'**
+  String live2dReferenceInvalid(String ref);
+
+  /// No description provided for @live2dReferenceMissing.
+  ///
+  /// In en, this message translates to:
+  /// **'Model resource is missing: {ref}'**
+  String live2dReferenceMissing(String ref);
+
+  /// No description provided for @senseVoiceCheckFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Unable to inspect the on-device recognition models: {error}'**
+  String senseVoiceCheckFailed(String error);
+
+  /// No description provided for @senseVoiceUnsupported.
+  ///
+  /// In en, this message translates to:
+  /// **'On-device speech recognition is not supported on this platform'**
+  String get senseVoiceUnsupported;
+
+  /// No description provided for @senseVoiceModelIncomplete.
+  ///
+  /// In en, this message translates to:
+  /// **'SenseVoice model files are incomplete'**
+  String get senseVoiceModelIncomplete;
+
+  /// No description provided for @senseVoiceImportIncomplete.
+  ///
+  /// In en, this message translates to:
+  /// **'SenseVoice import did not finish'**
+  String get senseVoiceImportIncomplete;
+
+  /// No description provided for @voiceDownloadRangeInvalid.
+  ///
+  /// In en, this message translates to:
+  /// **'Voice model resume range is invalid'**
+  String get voiceDownloadRangeInvalid;
+
+  /// No description provided for @voiceDownloadHttp.
+  ///
+  /// In en, this message translates to:
+  /// **'Voice model download returned HTTP {status}'**
+  String voiceDownloadHttp(int status);
+
+  /// No description provided for @voiceDownloadTruncated.
+  ///
+  /// In en, this message translates to:
+  /// **'Voice model connection closed early; waiting to resume'**
+  String get voiceDownloadTruncated;
+
+  /// No description provided for @voiceDownloadChecksumFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Voice model SHA-256 verification failed'**
+  String get voiceDownloadChecksumFailed;
+
+  /// No description provided for @voiceDownloadSourcesUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'No voice model download source is reachable'**
+  String get voiceDownloadSourcesUnavailable;
+
+  /// No description provided for @voiceArchiveDirInvalid.
+  ///
+  /// In en, this message translates to:
+  /// **'Speech model archive directory is invalid'**
+  String get voiceArchiveDirInvalid;
+
+  /// No description provided for @senseVoiceContextIncomplete.
+  ///
+  /// In en, this message translates to:
+  /// **'SenseVoice QNN context files are incomplete'**
+  String get senseVoiceContextIncomplete;
+
+  /// No description provided for @voiceDownloadCancelled.
+  ///
+  /// In en, this message translates to:
+  /// **'Voice model download cancelled'**
+  String get voiceDownloadCancelled;
+
+  /// No description provided for @speechStopFirst.
+  ///
+  /// In en, this message translates to:
+  /// **'Stop speech recognition first'**
+  String get speechStopFirst;
+
+  /// No description provided for @senseVoiceNotInstalled.
+  ///
+  /// In en, this message translates to:
+  /// **'Download the SenseVoice offline model first'**
+  String get senseVoiceNotInstalled;
+
+  /// No description provided for @senseVoiceInstallFirst.
+  ///
+  /// In en, this message translates to:
+  /// **'Install the SenseVoice on-device recognition model first'**
+  String get senseVoiceInstallFirst;
+
+  /// No description provided for @micStopFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Unable to stop microphone recording: {error}'**
+  String micStopFailed(String error);
+
+  /// No description provided for @senseVoiceNoResult.
+  ///
+  /// In en, this message translates to:
+  /// **'SenseVoice QNN returned no recognition result'**
+  String get senseVoiceNoResult;
+
+  /// No description provided for @offlineGenerationStopped.
+  ///
+  /// In en, this message translates to:
+  /// **'On-device generation stopped'**
+  String get offlineGenerationStopped;
+
+  /// No description provided for @qnnAccelVerified.
+  ///
+  /// In en, this message translates to:
+  /// **'Qualcomm QNN HTP/NPU (verified)'**
+  String get qnnAccelVerified;
+
+  /// No description provided for @qnnAccelLoadedPending.
+  ///
+  /// In en, this message translates to:
+  /// **'Qualcomm QNN HTP/NPU loaded, awaiting first-run verification'**
+  String get qnnAccelLoadedPending;
+
+  /// No description provided for @geniexNotLoaded.
+  ///
+  /// In en, this message translates to:
+  /// **'GenieX QAIRT/NPU not loaded yet'**
+  String get geniexNotLoaded;
+
+  /// No description provided for @geniexNotInstalled.
+  ///
+  /// In en, this message translates to:
+  /// **'GenieX QAIRT/NPU model is not installed'**
+  String get geniexNotInstalled;
+
+  /// No description provided for @qwenCapabilitiesCheckFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Unable to inspect the {model} QAIRT/NPU model: {error}'**
+  String qwenCapabilitiesCheckFailed(String model, String error);
+
+  /// No description provided for @qwenAndroidOnly.
+  ///
+  /// In en, this message translates to:
+  /// **'{model} QAIRT/NPU models are only supported on Android'**
+  String qwenAndroidOnly(String model);
+
+  /// No description provided for @qwenDownloadedNotDetected.
+  ///
+  /// In en, this message translates to:
+  /// **'The Qwen3 QAIRT/NPU model was not detected after the download finished'**
+  String get qwenDownloadedNotDetected;
+
+  /// No description provided for @qwenDownloadPausedDetail.
+  ///
+  /// In en, this message translates to:
+  /// **'Download paused and the resume point was kept. Tap download to continue.'**
+  String get qwenDownloadPausedDetail;
+
+  /// No description provided for @qwenDownloadFailedDetail.
+  ///
+  /// In en, this message translates to:
+  /// **'{raw}\nDownloaded bytes were kept. Tap download to resume from the breakpoint.'**
+  String qwenDownloadFailedDetail(String raw);
+
+  /// No description provided for @waitForCurrentReply.
+  ///
+  /// In en, this message translates to:
+  /// **'Wait for the current on-device reply to finish'**
+  String get waitForCurrentReply;
+
+  /// No description provided for @qwenDownloadFirst.
+  ///
+  /// In en, this message translates to:
+  /// **'Download the {model} QAIRT/NPU model first'**
+  String qwenDownloadFirst(String model);
+
+  /// No description provided for @geniexLoadResultMissing.
+  ///
+  /// In en, this message translates to:
+  /// **'GenieX returned no model load result'**
+  String get geniexLoadResultMissing;
+
+  /// No description provided for @qwenBackendRejected.
+  ///
+  /// In en, this message translates to:
+  /// **'Refusing a Qwen3 execution backend that is not QAIRT/NPU'**
+  String get qwenBackendRejected;
+
+  /// No description provided for @qwenLoadFailedDetail.
+  ///
+  /// In en, this message translates to:
+  /// **'Qwen3 QAIRT/NPU model load failed: {error}'**
+  String qwenLoadFailedDetail(String error);
+
+  /// No description provided for @offlineModelBusy.
+  ///
+  /// In en, this message translates to:
+  /// **'The on-device model is still generating the previous reply'**
+  String get offlineModelBusy;
+
+  /// No description provided for @qwenEmptyResponse.
+  ///
+  /// In en, this message translates to:
+  /// **'Qwen3 QAIRT/NPU returned no text'**
+  String get qwenEmptyResponse;
+
+  /// No description provided for @qwenGenerateFailedDetail.
+  ///
+  /// In en, this message translates to:
+  /// **'Qwen3 QAIRT/NPU on-device generation failed: {error}'**
+  String qwenGenerateFailedDetail(String error);
+
+  /// No description provided for @mossAccelInitialized.
+  ///
+  /// In en, this message translates to:
+  /// **'Qualcomm QNN HTP + ORT CPU · initialized'**
+  String get mossAccelInitialized;
+
+  /// No description provided for @mossAccelInitializing.
+  ///
+  /// In en, this message translates to:
+  /// **'QNN HTP initializing'**
+  String get mossAccelInitializing;
+
+  /// No description provided for @mossAccelCandidate.
+  ///
+  /// In en, this message translates to:
+  /// **'QNN HTP candidate · not yet verified'**
+  String get mossAccelCandidate;
+
+  /// No description provided for @mossRuntimeInitFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Unable to initialize the MOSS QNN runtime automatically: {error}'**
+  String mossRuntimeInitFailed(String error);
+
+  /// No description provided for @mossRuntimeNotReady.
+  ///
+  /// In en, this message translates to:
+  /// **'The native MOSS runtime is not ready'**
+  String get mossRuntimeNotReady;
+
+  /// No description provided for @mossImportAndroidOnly.
+  ///
+  /// In en, this message translates to:
+  /// **'Importing a MOSS QNN model is only supported on Android'**
+  String get mossImportAndroidOnly;
+
+  /// No description provided for @mossZipImportAndroidOnly.
+  ///
+  /// In en, this message translates to:
+  /// **'Importing a MOSS QNN ZIP is only supported on Android'**
+  String get mossZipImportAndroidOnly;
+
+  /// No description provided for @mossImportFirst.
+  ///
+  /// In en, this message translates to:
+  /// **'Import a MOSS QNN HTP v81 deployment package first'**
+  String get mossImportFirst;
+
+  /// No description provided for @mossProviderMissing.
+  ///
+  /// In en, this message translates to:
+  /// **'MOSS-TTS-Nano returned no valid execution provider'**
+  String get mossProviderMissing;
+
+  /// No description provided for @mossNoAudio.
+  ///
+  /// In en, this message translates to:
+  /// **'MOSS-TTS-Nano produced no playable audio'**
+  String get mossNoAudio;
+
+  /// No description provided for @mossAudioInvalid.
+  ///
+  /// In en, this message translates to:
+  /// **'The audio produced by MOSS-TTS-Nano is invalid'**
+  String get mossAudioInvalid;
+
+  /// No description provided for @mossImportBusyWait.
+  ///
+  /// In en, this message translates to:
+  /// **'Wait for the current model import to finish'**
+  String get mossImportBusyWait;
+
+  /// No description provided for @mossWavInvalid.
+  ///
+  /// In en, this message translates to:
+  /// **'MOSS-TTS-Nano produced an invalid WAV file'**
+  String get mossWavInvalid;
+
+  /// No description provided for @mossWavNotPcm.
+  ///
+  /// In en, this message translates to:
+  /// **'The MOSS WAV file is not PCM'**
+  String get mossWavNotPcm;
+
+  /// No description provided for @mossWavPcmInvalid.
+  ///
+  /// In en, this message translates to:
+  /// **'The MOSS WAV PCM parameters are invalid'**
+  String get mossWavPcmInvalid;
+
+  /// No description provided for @mossWavPcmTruncated.
+  ///
+  /// In en, this message translates to:
+  /// **'The MOSS WAV PCM data is incomplete'**
+  String get mossWavPcmTruncated;
+
+  /// No description provided for @editResendFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Unable to resend the edited message: {error}'**
+  String editResendFailed(String error);
+
+  /// No description provided for @responseInterrupted.
+  ///
+  /// In en, this message translates to:
+  /// **'The AI response was interrupted. Tap retry.'**
+  String get responseInterrupted;
+
+  /// No description provided for @prepareChatFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Unable to prepare the conversation: {error}'**
+  String prepareChatFailed(String error);
+
+  /// No description provided for @saveUserMessageFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Unable to save the user message'**
+  String get saveUserMessageFailed;
+
+  /// No description provided for @qwenModelMissingHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Install the Qwen3-4B-Instruct-2507 QAIRT/NPU model in Models & API first'**
+  String get qwenModelMissingHint;
+
+  /// No description provided for @apiKeyMissingHint.
+  ///
+  /// In en, this message translates to:
+  /// **'{provider} has no API key configured, and no ready Qwen3-4B-Instruct-2507 QAIRT/NPU model was detected'**
+  String apiKeyMissingHint(String provider);
+
+  /// No description provided for @saveOfflineReplyFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Unable to save the on-device reply'**
+  String get saveOfflineReplyFailed;
+
+  /// No description provided for @offlineGenerateFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'On-device generation failed: {error}'**
+  String offlineGenerateFailed(String error);
+
+  /// No description provided for @stopGenerationFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Unable to stop generation: {error}'**
+  String stopGenerationFailed(String error);
 }
 
 class _AppLocalizationsDelegate
