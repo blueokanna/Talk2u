@@ -188,17 +188,17 @@ abstract class AppLocalizations {
   /// **'Could not check the Qwen3 QAIRT/NPU model state. Try again.'**
   String get qwenCapabilitiesFailed;
 
-  /// No description provided for @qwenDownloadFailed.
+  /// No description provided for @qwenImportFailed.
   ///
   /// In en, this message translates to:
-  /// **'The Qwen3 download was interrupted. Partial data is kept; tap download to resume.'**
-  String get qwenDownloadFailed;
+  /// **'The on-device model import failed. The previously installed model is unchanged.'**
+  String get qwenImportFailed;
 
-  /// No description provided for @qwenDownloadPaused.
+  /// No description provided for @qwenImportCancelled.
   ///
   /// In en, this message translates to:
-  /// **'Download paused. Partial data is kept; tap download to continue.'**
-  String get qwenDownloadPaused;
+  /// **'The on-device model import was cancelled. The previously installed model is unchanged.'**
+  String get qwenImportCancelled;
 
   /// No description provided for @qwenLoadFailed.
   ///
@@ -494,6 +494,12 @@ abstract class AppLocalizations {
   /// **'Live2D performance'**
   String get live2dDiagnostics;
 
+  /// No description provided for @live2dDiagnosticsAutoRefresh.
+  ///
+  /// In en, this message translates to:
+  /// **'Refreshes every second; no need to reopen'**
+  String get live2dDiagnosticsAutoRefresh;
+
   /// No description provided for @renderBackend.
   ///
   /// In en, this message translates to:
@@ -719,14 +725,104 @@ abstract class AppLocalizations {
   /// No description provided for @installQwen.
   ///
   /// In en, this message translates to:
-  /// **'Download Qwen3-4B-Instruct-2507 model'**
+  /// **'Install on-device model'**
   String get installQwen;
+
+  /// No description provided for @qwenPresetHub.
+  ///
+  /// In en, this message translates to:
+  /// **'Qualcomm AI Hub bundle available'**
+  String get qwenPresetHub;
+
+  /// No description provided for @qwenPresetImportOnly.
+  ///
+  /// In en, this message translates to:
+  /// **'No published bundle; import QAIRT or Q4_0/Q8_0 GGUF'**
+  String get qwenPresetImportOnly;
+
+  /// No description provided for @qwenPresetInstalled.
+  ///
+  /// In en, this message translates to:
+  /// **'Installed'**
+  String get qwenPresetInstalled;
 
   /// No description provided for @cancelDownload.
   ///
   /// In en, this message translates to:
-  /// **'Cancel download'**
+  /// **'Cancel import'**
   String get cancelDownload;
+
+  /// No description provided for @importQwenBundle.
+  ///
+  /// In en, this message translates to:
+  /// **'Import QAIRT bundle (NPU)'**
+  String get importQwenBundle;
+
+  /// No description provided for @importQwenGguf.
+  ///
+  /// In en, this message translates to:
+  /// **'Import GGUF (NPU)'**
+  String get importQwenGguf;
+
+  /// No description provided for @qwenAccelNpu.
+  ///
+  /// In en, this message translates to:
+  /// **'Qualcomm QNN HTP/NPU (verified)'**
+  String get qwenAccelNpu;
+
+  /// No description provided for @qwenAccelGpu.
+  ///
+  /// In en, this message translates to:
+  /// **'Adreno GPU via llama.cpp OpenCL (verified)'**
+  String get qwenAccelGpu;
+
+  /// No description provided for @qwenAccelCpu.
+  ///
+  /// In en, this message translates to:
+  /// **'CPU — no accelerator for this artifact'**
+  String get qwenAccelCpu;
+
+  /// No description provided for @qwenAccelPending.
+  ///
+  /// In en, this message translates to:
+  /// **'Accelerator loaded; verified after the first completed reply'**
+  String get qwenAccelPending;
+
+  /// No description provided for @qwenAccelNotLoaded.
+  ///
+  /// In en, this message translates to:
+  /// **'Model installed; the accelerator is not loaded yet'**
+  String get qwenAccelNotLoaded;
+
+  /// No description provided for @qwenImportedNotDetected.
+  ///
+  /// In en, this message translates to:
+  /// **'The model was copied but the runtime does not detect it'**
+  String get qwenImportedNotDetected;
+
+  /// No description provided for @qwenImportCancelledDetail.
+  ///
+  /// In en, this message translates to:
+  /// **'Import cancelled. The previously installed model is unchanged.'**
+  String get qwenImportCancelledDetail;
+
+  /// No description provided for @qwenImportFailedDetail.
+  ///
+  /// In en, this message translates to:
+  /// **'{raw}\nNothing was replaced.'**
+  String qwenImportFailedDetail(String raw);
+
+  /// No description provided for @qwenGgufQuantizationUnsupported.
+  ///
+  /// In en, this message translates to:
+  /// **'{quantization} leaves tensors on the CPU. Import a Q4_0 or Q8_0 GGUF instead; the current file was not replaced.'**
+  String qwenGgufQuantizationUnsupported(String quantization);
+
+  /// No description provided for @qwenInstallFirst.
+  ///
+  /// In en, this message translates to:
+  /// **'Import the {model} model first'**
+  String qwenInstallFirst(String model);
 
   /// No description provided for @deleteSenseVoice.
   ///
@@ -809,7 +905,7 @@ abstract class AppLocalizations {
   /// No description provided for @qwenInstallHint.
   ///
   /// In en, this message translates to:
-  /// **'No API required; GenieX downloads the chipset-matched QAIRT model bundle'**
+  /// **'Import a QAIRT bundle, or a GGUF. GGUF runs on the Hexagon NPU first; if the NPU session cannot start, the app falls back to CPU and says so'**
   String get qwenInstallHint;
 
   /// No description provided for @qwenModelReady.
@@ -821,7 +917,7 @@ abstract class AppLocalizations {
   /// No description provided for @qwenModelPackage.
   ///
   /// In en, this message translates to:
-  /// **'{license} · QAIRT · Qualcomm QNN HTP/NPU'**
+  /// **'{license} · abliterated Qwen3-4B · QAIRT (NPU) or GGUF (NPU/GPU)'**
   String qwenModelPackage(String license);
 
   /// No description provided for @loadingModel.
@@ -1652,6 +1748,18 @@ abstract class AppLocalizations {
   /// **'Read the last reply on device'**
   String get readLastReply;
 
+  /// No description provided for @autoReadReplies.
+  ///
+  /// In en, this message translates to:
+  /// **'Auto-read replies'**
+  String get autoReadReplies;
+
+  /// No description provided for @autoReadRepliesSubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Synthesise each sentence while the reply is still streaming'**
+  String get autoReadRepliesSubtitle;
+
   /// No description provided for @noOfflineTtsPack.
   ///
   /// In en, this message translates to:
@@ -2126,35 +2234,11 @@ abstract class AppLocalizations {
   /// **'{model} QAIRT/NPU models are only supported on Android'**
   String qwenAndroidOnly(String model);
 
-  /// No description provided for @qwenDownloadedNotDetected.
-  ///
-  /// In en, this message translates to:
-  /// **'The Qwen3 QAIRT/NPU model was not detected after the download finished'**
-  String get qwenDownloadedNotDetected;
-
-  /// No description provided for @qwenDownloadPausedDetail.
-  ///
-  /// In en, this message translates to:
-  /// **'Download paused and the resume point was kept. Tap download to continue.'**
-  String get qwenDownloadPausedDetail;
-
-  /// No description provided for @qwenDownloadFailedDetail.
-  ///
-  /// In en, this message translates to:
-  /// **'{raw}\nDownloaded bytes were kept. Tap download to resume from the breakpoint.'**
-  String qwenDownloadFailedDetail(String raw);
-
   /// No description provided for @waitForCurrentReply.
   ///
   /// In en, this message translates to:
   /// **'Wait for the current on-device reply to finish'**
   String get waitForCurrentReply;
-
-  /// No description provided for @qwenDownloadFirst.
-  ///
-  /// In en, this message translates to:
-  /// **'Download the {model} QAIRT/NPU model first'**
-  String qwenDownloadFirst(String model);
 
   /// No description provided for @geniexLoadResultMissing.
   ///
@@ -2165,13 +2249,13 @@ abstract class AppLocalizations {
   /// No description provided for @qwenBackendRejected.
   ///
   /// In en, this message translates to:
-  /// **'Refusing a Qwen3 execution backend that is not QAIRT/NPU'**
+  /// **'Refusing an on-device execution backend that reported no accelerator'**
   String get qwenBackendRejected;
 
   /// No description provided for @qwenLoadFailedDetail.
   ///
   /// In en, this message translates to:
-  /// **'Qwen3 QAIRT/NPU model load failed: {error}'**
+  /// **'Qwen3 on-device model load failed: {error}'**
   String qwenLoadFailedDetail(String error);
 
   /// No description provided for @offlineModelBusy.
@@ -2315,7 +2399,7 @@ abstract class AppLocalizations {
   /// No description provided for @qwenModelMissingHint.
   ///
   /// In en, this message translates to:
-  /// **'Install the Qwen3-4B-Instruct-2507 QAIRT/NPU model in Models & API first'**
+  /// **'Install the abliterated Qwen3-4B model (QAIRT bundle or GGUF) in Models & API first'**
   String get qwenModelMissingHint;
 
   /// No description provided for @apiKeyMissingHint.

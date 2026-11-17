@@ -10,6 +10,7 @@ import 'package:talk2u/src/rust/frb_generated.dart';
 import 'package:talk2u/src/state/chat_state.dart';
 import 'package:talk2u/src/theme/app_theme.dart';
 import 'package:talk2u/src/l10n/app_strings.dart';
+import 'package:talk2u/src/rendering/aurora_engine.dart';
 import 'package:talk2u/src/rendering/motion_policy.dart';
 import 'package:talk2u/src/pages/chat_page.dart';
 import 'package:talk2u/src/services/offline_llm_service.dart';
@@ -74,11 +75,18 @@ class Talk2UApp extends StatelessWidget {
             theme: AppTheme.build(Brightness.light, preferences.colorTheme),
             darkTheme: AppTheme.build(Brightness.dark, preferences.colorTheme),
             themeMode: preferences.themeMode,
-            builder: (context, child) => AppMotionScope(child: child!),
+            builder: (context, child) => AppMotionScope(
+              // One ambient clock and one motion policy for the entire app. The
+              // engine is installed above the navigator so every route shares
+              // the same phase; backdrops are mounted per route (only the pages
+              // that need one) so a translucent incoming route can never reveal
+              // the previous route's platform views.
+              child: AuroraEngine(child: child!),
+            ),
             themeAnimationDuration: MediaQuery.disableAnimationsOf(context)
                 ? Duration.zero
-                : const Duration(milliseconds: 300),
-            themeAnimationCurve: Curves.easeInOutCubicEmphasized,
+                : AppMotion.page,
+            themeAnimationCurve: AppMotion.emphasizedDecelerate,
             home: const _StartupGate(),
           ),
         ),
@@ -165,40 +173,48 @@ class _StartupGateState extends State<_StartupGate> {
               alignment: Alignment.bottomCenter,
               child: SafeArea(
                 minimum: const EdgeInsets.all(16),
-                child: Container(
+                child: SizedBox(
                   width: double.infinity,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 12,
+                  child: Material(
+                    color: theme.colorScheme.surfaceContainerLow,
+                    shape: AppShapes.sheet,
+                    clipBehavior: Clip.antiAlias,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 12,
+                      ),
+                      child: snapshot.hasError
+                          ? Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    strings.startupFailed(errorDescription),
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                                IconButton(
+                                  tooltip: strings.retry,
+                                  onPressed: _retry,
+                                  icon: const Icon(Icons.refresh),
+                                ),
+                              ],
+                            )
+                          : Row(
+                              children: [
+                                const SizedBox.square(
+                                  dimension: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                ),
+                                const SizedBox(width: 12),
+                                Text(strings.startupPreparing),
+                              ],
+                            ),
+                    ),
                   ),
-                  color: theme.colorScheme.surface.withValues(alpha: 0.92),
-                  child: snapshot.hasError
-                      ? Row(
-                          children: [
-                            Expanded(
-                              child: Text(
-                                strings.startupFailed(errorDescription),
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                            IconButton(
-                              tooltip: strings.retry,
-                              onPressed: _retry,
-                              icon: const Icon(Icons.refresh),
-                            ),
-                          ],
-                        )
-                      : Row(
-                          children: [
-                            const SizedBox.square(
-                              dimension: 20,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            ),
-                            const SizedBox(width: 12),
-                            Text(strings.startupPreparing),
-                          ],
-                        ),
                 ),
               ),
             ),

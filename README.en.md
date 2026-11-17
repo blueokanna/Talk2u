@@ -15,12 +15,12 @@ This document describes the implemented behavior and its verification boundary. 
 | DeepSeek, OpenAI, Kimi, Qwen | Implemented | OpenAI-compatible streaming adapters |
 | Anthropic | Implemented | Messages API headers, request conversion, and Anthropic SSE |
 | Local memory and knowledge | Implemented | Rust local storage, recent context, summaries, and fact retrieval; durable system blocks are kept within a token budget |
-| Android local LLM | Implemented | `ai-hub-models/Qwen3-4B-Instruct-2507` QAIRT `w4a16` through GenieX SDK 0.3.17; QNN HTP/NPU execution, 4096-token window budgeted by tokens, 1024-token output cap |
+| Android local LLM | Implemented | abliterated `huihui-ai/Huihui-Qwen3-4B-Instruct-2507-abliterated` (imported QAIRT `w4a16` or a Q4_0/Q8_0 GGUF only) and upstream `Qwen/Qwen3-4B-Instruct-2507` (AI Hub pull, or imported) through GenieX SDK 0.3.17; **both artifact formats reach the Hexagon NPU** — QAIRT through its plugin, GGUF through `ggml-hexagon`; `auto` is NPU first with a CPU fallback and never uses the GPU implicitly; 4096-token window budgeted by tokens; the output budget is derived from the actual prompt (512–3072 tokens) instead of a fixed 1024 reservation |
 | Offline STT | Implemented | sherpa-onnx SenseVoice 2024-07-17 INT8 QNN context on SM8850, preserving ASR/LID/SER/AED results |
 | Continuous voice call | Conditional on Android | `CallSession` state machine; full duplex when the platform confirms hardware AEC, half duplex otherwise; reference-anchored double-talk detection plus lexical self-echo rejection; voice or tap interruption |
 | Regenerate | Implemented | The rejected reply is excluded from the new prompt, an explicit anti-repetition directive is added, sampling uses temperature/top_p 0.95, and the old message is replaced in place |
 | Idle resource use | Implemented | Startup only probes MOSS/QNN capability and loads HTP contexts on the first utterance; no 1 Hz telemetry polling, no always-on 30 ms stream timer, no automatic synthesis outside call mode, and Live2D stops continuous rendering in the background, off-screen, or under reduced motion |
-| Android offline TTS | Conditional | MOSS prefill/decode/codec on QNN HTP and sampler on ORT CPU; no system TTS fallback; emoji, Markdown, code, URLs and blank lines are filtered before synthesis |
+| Android offline TTS | Conditional | MOSS prefill/decode on QNN HTP and sampler/codec on ORT CPU; no system TTS fallback; emoji, Markdown, code, URLs and blank lines are filtered before synthesis |
 | Windows/Linux offline TTS | Not implemented | The current desktop speech path only provides SenseVoice STT |
 | Live2D | Conditional | Cubism SDK for Native 5 R.5 with C++/OpenGL ES on Android; WebView2 on Windows and CEF on Linux |
 | Live2D semantic cues | Implemented, model-dependent | Context, emoji and silent stage directions select configured motion or expression mappings; equivalent performances rotate within a long reply |
@@ -50,7 +50,7 @@ The Rust core keeps one crate per job. Every dependency owns exactly one concern
 | --- | --- | --- |
 | `courierust` | The only outbound HTTP/TLS implementation: incremental SSE parsing, retry without replay, Android trust-anchor loading | `rust/src/api/transport.rs` |
 | `rustglm` | The Zhipu contract only: model capability registry, `thinking` and streamed-chunk wire types. Its HTTP client is deliberately unused — see the Zhipu section | `rust/src/api/model_policy.rs` |
-| `rustbinary` | Conversation envelope on disk (`T2UB` magic + version + bounded decode), read-only migration of the old format | `rust/src/api/storage_codec.rs` |
+| `rustbinary` | Conversation envelope on disk (`T2UB` magic + version + bounded decode), read-only migration of the old format; v2 adds zlib compression | `rust/src/api/storage_codec.rs` |
 | `tzcraft` | The single time source: 128-bit nanosecond `Ticks`, floor semantics, identical on every platform | `rust/src/api/clock.rs` |
 | `recurse-x` | Independent recursive DNS, cross-checked against the device resolver to separate hijack from path failure | `rust/src/api/network_diagnosis.rs` |
 | `nextjson` | Serialisation derives for persisted structs | `rust/src/api/data_models.rs` |
@@ -66,9 +66,9 @@ Flutter UI
   |-- chat, characters, memory, and provider selection
   |-- Android GLSurfaceView / Native C++ Cubism OpenGL ES
   |-- Windows WebView2 / Linux CEF Live2D host
-  |-- Android GenieX SDK -> QAIRT QNN HTP/NPU -> Qwen3-4B-Instruct-2507 w4a16
+  |-- Android GenieX SDK -> QAIRT QNN HTP/NPU, or llama.cpp -> ggml-hexagon NPU -> Qwen3-4B (abliterated or upstream)
   |-- sherpa-onnx Kotlin/JNI SenseVoice QNN STT (SM8850 HTP)
-  |-- Native MOSS JNI: QNN HTP prefill/decode/codec + ORT CPU sampler
+  |-- Native MOSS JNI: QNN HTP prefill/decode + ORT CPU sampler/codec
   `-- Flutter platform channel for MOSS package import and synthesis
                  |
           flutter_rust_bridge
@@ -81,6 +81,54 @@ Rust core
 ```
 
 Provider selection only determines where the next request is sent. Conversation history, character prompts, summaries, and retrieved facts remain associated with the conversation, so a conversation can continue after changing providers.
+
+### Local storage and long context
+
+- `T2UB` v2 serialises with `rustbinary`, then wraps the payload in zlib only when that is actually smaller. The header stores the uncompressed length; decoding enforces both that length and a 64 MiB ceiling, so a compressed payload cannot expand into an unbounded allocation. v1 files remain readable and are rewritten in v2 on the first write.
+- A `.t2ui` sidecar caches the title, last-message preview, model and timestamp. Listing conversations reads that tiny file instead of decompressing every message; a missing or corrupt cache falls back to a full decode and is rebuilt.
+- `MemoryEngine` summaries, fact tiers and retrieval stay independent of the conversation file. Trimming the prompt window never deletes history, and the next turn still continues the same conversation.
+- The on-device transformer KV cache belongs to GenieX. The app does not read, reuse or rewind it; what is optimised here is prompt budgeting, context selection and persistence cost. The native session still owns the KV lifecycle each turn.
+
+### Long replies are continued, not silently cut
+
+- The on-device model no longer reserves a fixed 1024 tokens. Each turn computes `4096 - actual prompt - 128`, so a short prompt can use up to 3072 output tokens and a long history still keeps 512. An oversized system prompt is trimmed from the tail, never at the expense of the newest user question.
+- For cloud streams, `finish_reason: "length"` (OpenAI-compatible) or `stop_reason: "max_tokens"` (Anthropic) triggers at most two continuation turns in Rust. The last 3000 characters of the reply become an assistant prefix, a system directive asks to continue without repetition, and a synthetic user "continue" exists only in that request. New deltas append to the same reply and only one final `Done` is emitted.
+- A failed continuation keeps the long reply that was already received. The loop stops at 64K characters or two non-growing rounds, so it cannot spin forever. The provider's `max_tokens` remains a real ceiling; this is bounded continuation, not an infinite-length claim.
+
+## Design system: Material 3 Expressive
+
+The UI only uses Material 3 / Material 3 Expressive components. The contract lives in [docs/design_system.md](docs/design_system.md); the implementation is concentrated in three places:
+
+- `lib/src/theme/app_shapes.dart`: the M3 shape scale (4 / 8 / 12 / 16 / 28 / stadium) and semantic roles (`surface`, `overlay`, `field`, `sheet`, `drawer`, `fab`, `pill`, `badge`, chat bubble), all built from `RoundedSuperellipseBorder`. No page writes a corner radius inline.
+- `lib/src/theme/app_motion.dart`: references the `Durations` and `Easing` tokens Flutter exports; the shared-axis page transition runs 400 ms forward and 300 ms back; `FluidSwitcher` owns in-page swaps; reduced motion renders the final state directly.
+- `lib/src/rendering/aurora_engine.dart` + `lib/src/widgets/aurora_backdrop.dart`: one `Ticker` for the whole app, broadcasting at 30 Hz. The aurora is rasterised once into a `ui.Image` (55 % of logical size) after the theme and size settle; each frame is then a single translated blit. A 180 ms debounce prevents per-frame rasterisation during theme animation, and background or reduced-motion states park on a deterministic phase.
+
+Component choices: `Expansible` for the reasoning panel, `ActionChip` for message actions, `MenuAnchor` for model installation, and `BottomSheetThemeData` for the drag handle. No hand-painted chrome.
+
+The on-device model card lists **both** `Qwen/Qwen3-4B-Instruct-2507` and the abliterated derivative, upstream first: the upstream checkpoint keeps the AI Hub download, and both accept a QAIRT bundle or a GGUF. The install target is explicit instead of being hidden behind a single "the model" row.
+
+Verification: `dart analyze lib test` and `flutter test`. `test/rendering/design_system_test.dart` locks the shape scale, the 30 Hz notification ceiling, reduced-motion parking, and the layer count of `FluidSwitcher` before and after a swap.
+
+## Dependency policy
+
+Dart direct dependencies track the latest stable releases (`dart pub outdated`
+reports no outdated direct dependency), with three deliberate pins:
+
+- `flutter_rust_bridge` is exactly `2.13.0`: `lib/src/rust/**` and
+  `rust/src/frb_generated.rs` are produced by that generator and the runtime
+  validates the pair. Upgrading means regenerating the whole bridge, not editing
+  one line in `pubspec.yaml`.
+- `intl` stays `any`; `flutter_localizations` owns the version, and a hand-written
+  constraint only fights the Flutter SDK.
+- Upstream `flutter_markdown` is discontinued; the maintained
+  `flutter_markdown_plus 1.0.12` fork is used with the same
+  `MarkdownBody`/`MarkdownStyleSheet` API.
+
+Rust direct dependencies also track the latest stable releases; `cargo update`
+handles transitive crates. `jni = 0.22.4` is an exact ABI pin, and `libc` exists
+only for the passive Android GGML probe. There are no `dependency_overrides`:
+transitive versions are what pub/cargo resolve under the Flutter SDK and plugin
+constraints, not versions forced by hand.
 
 ## Build Requirements
 
@@ -145,9 +193,23 @@ A stream that ends with a JSON `error` object, or with `finish_reason: "sensitiv
 
 ## Android Hardware TTS
 
-MOSS-TTS-Nano uses four ONNX stages: prefill, recurrent decode, local sampler, and streaming audio codec. Prefill, decode, and codec require full QNN HTP assignment. The v81 sampler intentionally uses ORT CPU. Sessions are loaded and released stage by stage to bound peak memory.
+MOSS-TTS-Nano uses four ONNX stages: prefill, recurrent decode, local sampler, and streaming audio codec. Prefill and decode run on QNN HTP. The codec stays on ORT CPU: its QNN graph runs but accumulates hoarseness/noise across frames on the PLK110, so the CPU path is the quality-safe production path. The v81 sampler also intentionally uses ORT CPU. Sessions are loaded and released stage by stage to bound peak memory.
 
 The HTP stages disable CPU EP fallback. The runtime reports the explicit mixed plan `QNN_HTP(prefill,decode)+ORT_CPU(sampler,codec)` only after a real synthesis returns a structurally valid WAV. Generic NNAPI is not used as Qualcomm execution evidence.
+
+### Streaming speech: sentence-level pipeline
+
+Call mode and normal chat no longer wait for the whole reply to be saved. `ChatState.responseEvents` broadcasts the exact model deltas; call mode hands them to `CallSession`, normal chat to `NormalReplySpeech`. `SpeechStreamSegmenter` splits them and `MossTtsService.speakStream` synthesises and plays concurrently:
+
+- The first complete sentence (`。 ！ ？ ! ? …`; an English `.` only when followed by whitespace/end and not part of a decimal, URL or e-mail) starts synthesis immediately. Later sentences are prefetched while the first one plays.
+- If playback catches up before the next sentence is complete, the splitter releases the clause up to the last ASCII comma, ideographic comma or semicolon. That fallback keeps the voice moving without inventing words; the remainder is emitted when the sentence finishes.
+- Punctuation inside brackets is not a boundary. Fenced Markdown code is discarded as a block, including when the triple-backtick marker is split across two deltas.
+- Emoji, zero-width characters, bidi controls, full-width spaces and soft hyphens are stripped or folded before MOSS sees them; an emoji-only fragment never triggers empty synthesis.
+- Every cut is a rune index, so non-BMP characters (emoji, CJK Extension B) cannot be split by a UTF-16 surrogate offset.
+- Normal chat enables **Auto-read replies** by default; the chat options sheet can turn it off. With auto-read off, the speaker button still starts from the partial text while generation is running and continues with later sentences. Reading a completed reply keeps the one-shot path.
+- Call mode ignores the auto-read switch because it has its own microphone turn lifecycle, but both modes share the same segmenter, synthesis queue and cancellation semantics.
+
+The implementation is `lib/src/services/speech_stream.dart`, `normal_speech.dart`, `MossTtsService.speakStream`, and the streaming state in `call_session.dart`. `speech_stream_test.dart`, `normal_speech_test.dart` and `call_session_test.dart` lock sentence release, comma fallback, fence removal, non-BMP boundaries, auto/manual start, and "first sentence starts TTS before completion".
 
 ### Memory pressure trimming
 
@@ -220,9 +282,9 @@ No OnePlus 15 or Huawei Mate 10 Pro real-device pass has been performed in this 
 
 ### Separate Local LLM Path
 
-MOSS acceleration does not accelerate the local Qwen LLM. Android downloads `ai-hub-models/Qwen3-4B-Instruct-2507` (precision `w4a16`, about 2.9 GiB across four shards) through GenieX `ModelManagerWrapper.pullFlow` with a `chipset=SM8850` pull input, then validates `metadata.json`, the 4096-token `genie_config.json`, and the tokenizer files before creating an `LlmWrapper` session with `ComputeUnitValue.NPU`. Download, load, and generation failures map to `qwen3_download_*`, `qwen3_load_failed`, and `qwen3_generate_failed`.
+MOSS acceleration does not accelerate the local Qwen LLM. Two presets are kept: the abliterated derivative `huihui-ai/Huihui-Qwen3-4B-Instruct-2507-abliterated` (safetensors only, so a compiled artifact is imported from a file) and the upstream `Qwen/Qwen3-4B-Instruct-2507` (Qualcomm's QAIRT bundle is still pulled from the AI Hub catalog). The settings card lists both identities separately and marks the installed one, so the hub action installs the upstream checkpoint and the import actions install the preset you pick; a single row can no longer make the hub download look like it installed the derivative. **Both artifact formats reach the Hexagon NPU**: a QAIRT bundle (`QnnHtp`, `w4a16`, 4096-token context) through the QAIRT plugin, and a llama.cpp GGUF through `ggml-hexagon` — GenieX ships `libggml-hexagon.so` plus `libggml-htp-v81.so` and the `npu` alias resolves to `HTP0`, so no QAIRT compilation is needed for the GGUF path. **The GGUF importer accepts only Q4_0 and Q8_0**, the two quants with complete HTP kernels; a K-quant or IQ-quant is rejected at import with the reason, instead of being installed and then quietly leaving tensors on the CPU. `mradermacher/Huihui-Qwen3-4B-Instruct-2507-abliterated-GGUF` publishes Q8_0 (4,280,405,792 B) and K-quants but no official Q4_0, so Q8_0 is directly usable; a pure Q4_0 (2,269,269,792 B) can be derived locally with `llama-quantize --allow-requantize --pure` as documented in `docs/on_device_llm.md`. `auto` is NPU first and then CPU; the GPU path is explicit diagnostics only. At session open a passive Rust probe (`RTLD_NOLOAD` on the already-mapped `libggml.so`) checks that the HTP backend is registered; if it is missing, the NPU session is destroyed, the reason is recorded, and the CPU fallback is opened and labelled CPU. Every install still copies into `staging/`, validates the copy, and only then swaps it into place, so a cancelled import never damages the working artifact. Failures map to `qwen3_import_failed`, `qwen3_import_cancelled`, `qwen3_gguf_quantization`, `qwen3_load_failed`, and `qwen3_generate_failed`. See `docs/on_device_llm.md`.
 
-The prompt does not depend on the SDK's Jinja renderer: GenieX 0.3.17 returns an empty `applyChatTemplate` result for the AI Hub Qwen3 bundle, which used to fail every turn with "empty Qwen3 chat template". `Qwen3Prompt.kt` therefore builds the ChatML markup from the bundle's own `sample_prompt.txt` (`<|im_start|>role\ncontent<|im_end|>\n`, finished with `<|im_start|>assistant\n`), strips control tokens from user text so a turn cannot be injected, and is covered by `Qwen3PromptTest`. Tokens stream back to Flutter through `generateStreamFlow` and a method channel.
+The prompt does not depend on the SDK's Jinja renderer: GenieX 0.3.17 returns an empty `applyChatTemplate` result for Qwen3 bundles. ChatML is now rendered in Rust (`rust/src/api/chatml.rs`) and reached through JNI: `<|im_start|>role\ncontent<|im_end|>\n`, finished with `<|im_start|>assistant\n`, every `<|...|>` span stripped from message content, and a 1 MiB prompt budget. A reply that leaks control tokens is rejected instead of rendered. Streaming text is coalesced to one platform-channel frame every 50 ms, so a multi-thousand-token reply costs tens of frames instead of one whole-string copy per token.
 
 ## Continuous Speech
 
@@ -314,9 +376,9 @@ pwsh tools/run_quality_checks.ps1        # -SkipRust / -SkipFlutter / -SkipAndro
 
 That script runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --all-targets`, `flutter pub get`, `dart format --output=none --set-exit-if-changed lib test`, `flutter analyze lib test`, `flutter test --no-pub`, the desktop avatar frame gate, the Python host tooling tests, and `:app:testDebugUnitTest`. The same jobs are defined in `.github/workflows/quality.yml` and run on every push, pull request and manual dispatch.
 
-Current results in this workspace: 177 Rust tests passed (2 ignored), 159 Flutter tests passed, 20 Android JVM tests passed, 26 host-side Python tests passed, analyzer and formatter clean.
+Current results in this workspace: 199 Rust tests passed (2 ignored), 201 Flutter tests passed, 32 Android JVM tests passed, 26 host-side Python tests passed, analyzer and formatter clean.
 
-Localization is enforced end to end: the Dart guard test scans all of `lib/` except the language-data modules, and the native diagnostics in `MainActivity`, `GenieXRuntime`, `ModelStore` and `Chipset` are English, with `live2d_import_failed`, `invalid_*` and `activity_destroyed` mapped to ARB strings. The only Chinese left in Kotlin is the `moc3` parameter name `嘴巴开合`, which is model metadata carrying an explanatory comment.
+Localization is enforced end to end: the Dart guard test scans all of `lib/` except the language-data modules, and the native diagnostics in `MainActivity`, `OnDeviceLlmRuntime`, `OnDeviceModel`, `ModelStore` and `Chipset` are English, with `live2d_import_failed`, `invalid_*`, `activity_destroyed` and `qwen3_import_*` mapped to ARB strings. The only Chinese left in Kotlin is the `moc3` parameter name `嘴巴开合`, which is model metadata carrying an explanatory comment.
 
 Two CI details matter. The Gradle wrapper (`gradlew`, `gradlew.bat`, `gradle-wrapper.jar`) is committed on purpose: Flutter only regenerates it during a full build, which needs the licensed SDKs, so `android/.gitignore` un-ignores it. The Android job also writes `android/local.properties` (`sdk.dir` plus `flutter.sdk`) because Flutter only writes that file during `flutter build`.
 
@@ -328,7 +390,7 @@ Real-device acceptance must include:
 
 - Verify the NNAPI device list does not classify a CPU device as acceleration.
 - Run one real Qwen generation and require `activeBackend=geniex-qairt-npu` with `activeBackendVerified=true`; a loaded backend alone is insufficient.
-- Run a real MOSS synthesis, require `QNN_HTP` with CPU EP fallback disabled, validate the WAV, and confirm playback.
+- Run a real MOSS synthesis, require the HTP stages to report `QNN_HTP` with CPU EP fallback disabled, validate the WAV, and confirm playback. The reported plan must keep sampler/codec on `ORT_CPU`.
 - Verify `女生：（哈哈大笑）你说的太好了！` speaks only the dialogue and triggers a happy cue.
 - Run at least 20 call turns, then end the call and confirm microphone capture and playback stop.
 - Confirm the actual Live2D backend is `Cubism Native OpenGL ES`, the renderer is not software, and `frameCount` increases.

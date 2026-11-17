@@ -42,20 +42,23 @@ class MainActivity : FlutterActivity() {
     private val mossImportRequest = 4203
     private val mossZipImportRequest = 4204
     private val sherpaZipImportRequest = 4205
+    private val llmGgufImportRequest = 4206
+    private val llmBundleImportRequest = 4207
     private val modelStore by lazy { ModelStore(applicationContext) }
     private val mossExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "talk2u-moss-tts").apply { priority = Thread.NORM_PRIORITY - 1 }
     }
     private val llmExecutor = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "talk2u-qwen3-qairt").apply { priority = Thread.NORM_PRIORITY - 1 }
+        Thread(runnable, "talk2u-qwen3").apply { priority = Thread.NORM_PRIORITY - 1 }
     }
     private val asrExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "talk2u-sensevoice-qnn").apply { priority = Thread.NORM_PRIORITY - 1 }
     }
-    private val genieXRuntime by lazy { GenieXRuntime(applicationContext) }
+    private val llmRuntime by lazy { OnDeviceLlmRuntime(applicationContext) }
     private val senseVoiceRuntime by lazy { SenseVoiceQnnRuntime(applicationContext) }
     @Volatile private var mossCancellation = AtomicBoolean(false)
     @Volatile private var mossImportChannel: MethodChannel? = null
+    @Volatile private var llmImportChannel: MethodChannel? = null
     @Volatile private var memoryChannel: MethodChannel? = null
     @Volatile private var activityDestroyed = false
     @Volatile private var mossInitializing = false
@@ -66,6 +69,9 @@ class MainActivity : FlutterActivity() {
     private var pendingMossImportResult: MethodChannel.Result? = null
     private var pendingMossZipImportResult: MethodChannel.Result? = null
     private var pendingSherpaZipImportResult: MethodChannel.Result? = null
+    private var pendingLlmImportResult: MethodChannel.Result? = null
+    private var pendingLlmImportKind: ArtifactKind? = null
+    private var pendingLlmImportPreset: ModelPreset? = null
     private val acceleratorTelemetrySampler = AcceleratorTelemetry.Sampler()
     private val fullDuplexAudio by lazy { FullDuplexAudioCapture(applicationContext) }
     private var cameraObservation: CameraObservation? = null
@@ -148,55 +154,66 @@ class MainActivity : FlutterActivity() {
         val llmRuntimeChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             llmRuntimeChannelName,
-        )
+        ).also { llmImportChannel = it }
         llmRuntimeChannel
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "capabilities" -> llmExecutor.execute {
-                        runCatching { llmRuntimeCapabilities() }.fold(
+                        runCatching { llmRuntime.capabilities() }.fold(
                             onSuccess = { value -> deliverLlmResult(result) { result.success(value) } },
                             onFailure = { error -> deliverLlmError(result, "capabilities", error) },
                         )
                     }
                     "modelStatus" -> llmExecutor.execute {
-                        runCatching { genieXRuntime.modelStatus() }.fold(
+                        runCatching { llmRuntime.modelStatus() }.fold(
                             onSuccess = { value -> deliverLlmResult(result) { result.success(value) } },
                             onFailure = { error -> deliverLlmError(result, "model_status", error) },
                         )
                     }
-                    "download" -> llmExecutor.execute {
-                        runCatching {
-                            genieXRuntime.downloadModel { progress ->
-                                deliverLlmResult(result) {
-                                    llmRuntimeChannel.invokeMethod(
-                                        "downloadProgress",
-                                        mapOf(
-                                            "downloadedBytes" to progress.downloadedBytes,
-                                            "totalBytes" to progress.totalBytes,
-                                        ),
-                                    )
+                    "importGguf" -> beginLlmImport(
+                        call.argument<String>("modelId"),
+                        ArtifactKind.GGUF,
+                        result,
+                    )
+                    "importQairtBundle" -> beginLlmImport(
+                        call.argument<String>("modelId"),
+                        ArtifactKind.QAIRT_BUNDLE,
+                        result,
+                    )
+                    "downloadHub" -> {
+                        val preset = ModelPreset.fromId(call.argument<String>("modelId"))
+                            ?: ModelPreset.default
+                        llmExecutor.execute {
+                            runCatching {
+                                llmRuntime.installFromHub(preset) { progress ->
+                                    notifyLlmImportProgress(result, progress)
                                 }
-                            }
-                        }.fold(
-                            onSuccess = { value -> deliverLlmResult(result) { result.success(value) } },
-                            onFailure = { error -> deliverLlmError(result, "download", error) },
-                        )
+                            }.fold(
+                                onSuccess = { value ->
+                                    deliverLlmResult(result) { result.success(value) }
+                                },
+                                onFailure = { error ->
+                                    reportLlmImportFailure(result, preset, error)
+                                },
+                            )
+                        }
                     }
-                    "cancelDownload" -> {
-                        genieXRuntime.cancelDownload()
+                    "cancelImport" -> {
+                        llmRuntime.cancelInstall()
                         result.success(null)
                     }
                     "deleteModel" -> llmExecutor.execute {
-                        runCatching { genieXRuntime.deleteModel() }.fold(
+                        runCatching { llmRuntime.deleteModel() }.fold(
                             onSuccess = { deliverLlmResult(result) { result.success(null) } },
                             onFailure = { error -> deliverLlmError(result, "delete", error) },
                         )
                     }
                     "load" -> llmExecutor.execute {
-                        runCatching { genieXRuntime.load() }.fold(
+                        val accelerator = call.argument<String>("accelerator")
+                        runCatching { llmRuntime.load(accelerator) }.fold(
                             onSuccess = { value -> deliverLlmResult(result) { result.success(value) } },
                             onFailure = { error ->
-                                Log.e("Talk2U/LLM", "Unable to load Qwen3 QAIRT/NPU model", error)
+                                Log.e("Talk2U/LLM", "Unable to load the on-device model", error)
                                 deliverLlmError(result, "load", error)
                             },
                         )
@@ -211,8 +228,9 @@ class MainActivity : FlutterActivity() {
                                     message["role"]?.toString().orEmpty() to content
                             }
                         val maxTokens = call.argument<Int>("maxTokens")
-                            ?.coerceIn(1, GenieXRuntime.MAX_OUTPUT_TOKENS)
-                            ?: GenieXRuntime.MAX_OUTPUT_TOKENS
+                            ?.coerceIn(1, OnDeviceModel.MAX_OUTPUT_TOKENS)
+                            ?: OnDeviceModel.MAX_OUTPUT_TOKENS
+                        val accelerator = call.argument<String>("accelerator")
                         val generationId = call.argument<Int>("generationId")
                         if (messages.isEmpty()) {
                             result.error("invalid_qwen3_messages", "Qwen3 chat messages are empty", null)
@@ -221,10 +239,11 @@ class MainActivity : FlutterActivity() {
                         } else {
                             llmExecutor.execute {
                                 runCatching {
-                                    genieXRuntime.ensureLoaded()
-                                    genieXRuntime.generate(
+                                    llmRuntime.ensureLoaded(accelerator)
+                                    llmRuntime.generate(
                                         messages,
                                         maxTokens,
+                                        accelerator,
                                     ) { text ->
                                         deliverLlmResult(result) {
                                             llmRuntimeChannel.invokeMethod(
@@ -240,7 +259,7 @@ class MainActivity : FlutterActivity() {
                                     onSuccess = { text ->
                                         Log.i(
                                             "Talk2U/LLM",
-                                            "query details=${genieXRuntime.diagnostics()}",
+                                            "query details=${llmRuntime.diagnostics()}",
                                         )
                                         deliverLlmResult(result) { result.success(text) }
                                     },
@@ -252,12 +271,12 @@ class MainActivity : FlutterActivity() {
                         }
                     }
                     "stop" -> {
-                        genieXRuntime.stop()
+                        llmRuntime.stop()
                         result.success(null)
                     }
                     "release" -> {
                         llmExecutor.execute {
-                            genieXRuntime.close()
+                            llmRuntime.close()
                             deliverLlmResult(result) { result.success(null) }
                         }
                     }
@@ -428,43 +447,158 @@ class MainActivity : FlutterActivity() {
         )
     }
 
+    /**
+     * Device facts plus the accelerator report the settings page renders.
+     *
+     * The report comes from [OnDeviceLlmRuntime.capabilities], which answers from
+     * the artifact on disk and the two native probes; nothing here is a marketing
+     * guess about what the device "should" support.
+     */
     private fun llmRuntimeCapabilities(): Map<String, Any?> {
         val activityManager = getSystemService(ACTIVITY_SERVICE) as ActivityManager
         val memory = ActivityManager.MemoryInfo().also(activityManager::getMemoryInfo)
-        val socModel = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            Build.SOC_MODEL.orEmpty()
-        } else {
-            Build.HARDWARE.orEmpty()
-        }
-        return mapOf(
-            "schemaVersion" to 3,
+        return llmRuntime.capabilities() + mapOf(
+            "schemaVersion" to 4,
             "device" to mapOf(
                 "manufacturer" to Build.MANUFACTURER,
                 "brand" to Build.BRAND,
                 "model" to Build.MODEL,
                 "device" to Build.DEVICE,
-                "socModel" to socModel,
                 "abis" to Build.SUPPORTED_ABIS.toList(),
                 "totalMemoryBytes" to memory.totalMem,
             ),
-            "targetProfile" to "$socModel-qairt-npu",
             "availableStorageBytes" to StatFs(filesDir.path).availableBytes,
-            "modelId" to GenieXRuntime.MODEL_NAME,
-            "modelFormat" to "QAIRT context binary",
-            "runtime" to "GenieX",
-            "runtimeDetails" to genieXRuntime.diagnostics(),
-            "activeBackend" to genieXRuntime.diagnostics()["activeBackend"],
-            "activeBackendVerified" to genieXRuntime.diagnostics()["activeBackendVerified"],
-            "contextSize" to GenieXRuntime.CONTEXT_SIZE,
-            "backends" to listOf(
+            "modelFormat" to "QAIRT context binary or llama.cpp GGUF",
+        )
+    }
+
+    /** Starts a Storage Access Framework picker for one on-device artifact. */
+    private fun beginLlmImport(
+        modelId: String?,
+        kind: ArtifactKind,
+        result: MethodChannel.Result,
+    ) {
+        if (pendingLlmImportResult != null) {
+            result.error(
+                "qwen3_import_busy",
+                "Another on-device model import is already running",
+                null,
+            )
+            return
+        }
+        val requestCode = when (kind) {
+            ArtifactKind.GGUF -> llmGgufImportRequest
+            ArtifactKind.QAIRT_BUNDLE -> llmBundleImportRequest
+        }
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            when (kind) {
+                ArtifactKind.GGUF -> {
+                    // GGUF has no registered MIME type; file providers report
+                    // application/octet-stream, application/x-gguf or nothing at
+                    // all, so the picker must not filter by type. The header is
+                    // validated after the copy.
+                    type = "*/*"
+                }
+                ArtifactKind.QAIRT_BUNDLE -> {
+                    type = "application/zip"
+                    putExtra(
+                        Intent.EXTRA_MIME_TYPES,
+                        arrayOf("application/zip", "application/octet-stream"),
+                    )
+                }
+            }
+        }
+        pendingLlmImportResult = result
+        pendingLlmImportKind = kind
+        pendingLlmImportPreset = ModelPreset.fromId(modelId) ?: ModelPreset.default
+        runCatching { startActivityForResult(intent, requestCode) }
+            .onFailure { error ->
+                pendingLlmImportResult = null
+                pendingLlmImportKind = null
+                pendingLlmImportPreset = null
+                result.error(
+                    "qwen3_import_picker_failed",
+                    error.message ?: "Cannot open the model file picker",
+                    null,
+                )
+            }
+    }
+
+    private fun handleLlmImportResult(resultCode: Int, data: Intent?) {
+        val pending = pendingLlmImportResult ?: return
+        val kind = pendingLlmImportKind
+        val preset = pendingLlmImportPreset
+        pendingLlmImportResult = null
+        pendingLlmImportKind = null
+        pendingLlmImportPreset = null
+        val uri = data?.data
+        if (resultCode != RESULT_OK || uri == null || kind == null || preset == null) {
+            pending.error("qwen3_import_cancelled", "No model file was selected", null)
+            return
+        }
+        llmExecutor.execute {
+            val report: (InstallProgress) -> Unit = { progress ->
+                notifyLlmImportProgress(pending, progress)
+            }
+            runCatching {
+                when (kind) {
+                    ArtifactKind.GGUF -> llmRuntime.installGguf(preset, uri, report)
+                    ArtifactKind.QAIRT_BUNDLE -> llmRuntime.installQairtBundle(preset, uri, report)
+                }
+            }.fold(
+                onSuccess = { value -> deliverLlmResult(pending) { pending.success(value) } },
+                onFailure = { error -> reportLlmImportFailure(pending, preset, error) },
+            )
+        }
+    }
+
+    /** Streams one install-progress sample to Dart. */
+    private fun notifyLlmImportProgress(pending: MethodChannel.Result, progress: InstallProgress) {
+        deliverLlmResult(pending) {
+            llmImportChannel?.invokeMethod(
+                "importProgress",
                 mapOf(
-                    "id" to GenieXRuntime.BACKEND,
-                    "priority" to 0,
-                    "device" to "Qualcomm HTP/NPU",
-                    "fallbackAllowed" to false,
+                    "copiedBytes" to progress.copiedBytes,
+                    "totalBytes" to progress.totalBytes,
                 ),
-            ),
-        ) + genieXRuntime.modelStatus()
+            )
+        }
+    }
+
+    /**
+     * Reports an install failure.
+     *
+     * A cancelled transfer is not an error the user needs a stack trace about, so
+     * it gets its own code; everything else keeps `qwen3_import_failed` and
+     * carries the accelerator context that explains why a load may follow.
+     */
+    private fun reportLlmImportFailure(
+        pending: MethodChannel.Result,
+        preset: ModelPreset,
+        error: Throwable,
+    ) {
+        val cancelled = error is ImportCancelled
+        val quantization = (error as? UnsupportedGgufQuantization)?.quantization
+        if (!cancelled) {
+            Log.e("Talk2U/LLM", "On-device model import failed", error)
+        }
+        val code = when {
+            cancelled -> "qwen3_import_cancelled"
+            quantization != null -> "qwen3_gguf_quantization"
+            else -> "qwen3_import_failed"
+        }
+        deliverLlmResult(pending) {
+            pending.error(
+                code,
+                error.message ?: error.javaClass.simpleName,
+                mapOf(
+                    "modelId" to preset.id,
+                    "cancelled" to cancelled,
+                    "quantization" to quantization,
+                ),
+            )
+        }
     }
 
     private fun secureAppModelRoot(value: String?): File? {
@@ -481,14 +615,18 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun llmErrorDetails(operation: String, error: Throwable): Map<String, Any?> = mapOf(
-        "operation" to operation,
-        "cause" to error.javaClass.simpleName,
-        "activeBackend" to genieXRuntime.diagnostics()["activeBackend"],
-        "activeBackendVerified" to genieXRuntime.diagnostics()["activeBackendVerified"],
-        "runtime" to "GenieX/QAIRT",
-        "retryable" to true,
-    )
+    private fun llmErrorDetails(operation: String, error: Throwable): Map<String, Any?> {
+        val diagnostics = llmRuntime.diagnostics()
+        return mapOf(
+            "operation" to operation,
+            "cause" to error.javaClass.simpleName,
+            "activeBackend" to diagnostics["activeBackend"],
+            "activeBackendVerified" to diagnostics["activeBackendVerified"],
+            "fallbackReason" to diagnostics["fallbackReason"],
+            "runtime" to "GenieX",
+            "retryable" to (error !is IllegalArgumentException),
+        )
+    }
 
     private fun deliverLlmError(
         result: MethodChannel.Result,
@@ -1093,6 +1231,7 @@ class MainActivity : FlutterActivity() {
             mossImportRequest -> handleMossTreeResult(resultCode, data)
             mossZipImportRequest -> handleMossZipResult(resultCode, data)
             sherpaZipImportRequest -> handleSherpaZipResult(resultCode, data)
+            llmGgufImportRequest, llmBundleImportRequest -> handleLlmImportResult(resultCode, data)
         }
     }
 
@@ -1459,6 +1598,11 @@ class MainActivity : FlutterActivity() {
         // costs nothing, while the installed package stays untouched.
         mossCancellation.set(true)
         runOnUiThread { memoryChannel?.invokeMethod("trim", level) }
+        // The on-device LLM session holds 2-3 GB of resident context and KV cache
+        // that the Activity would otherwise keep until it is destroyed. Releasing
+        // it is safe at any point: the artifact stays on disk and the next turn
+        // reloads it.
+        llmExecutor.execute { llmRuntime.trim(level) }
         if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL) {
             // Under critical pressure the QNN/ORT sessions are released as well;
             // the next utterance re-creates them from the on-disk context cache.
@@ -1474,12 +1618,20 @@ class MainActivity : FlutterActivity() {
         mossCancellation.set(true)
         mossExecutor.execute(::closeMossEngine)
         mossExecutor.shutdown()
-        llmExecutor.execute { genieXRuntime.close() }
+        llmExecutor.execute { llmRuntime.close() }
         llmExecutor.shutdown()
         asrExecutor.execute { senseVoiceRuntime.close() }
         asrExecutor.shutdown()
         pendingMossImportResult?.error("activity_destroyed", "The MOSS model import ended because the page was closed", null)
         pendingMossImportResult = null
+        pendingLlmImportResult?.error(
+            "activity_destroyed",
+            "The on-device model import ended because the page was closed",
+            null,
+        )
+        pendingLlmImportResult = null
+        pendingLlmImportKind = null
+        pendingLlmImportPreset = null
         super.onDestroy()
     }
 }

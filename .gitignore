@@ -69,8 +69,3 @@ app.*.map.json
 /model/TTS/**/*.data
 /model/TTS/**/*.onnx
 /model/TTS/**/*.bin
-
-# Preview font files (about 30 MB) kept locally while their typography and
-# licensing are decided. `pubspec.yaml` does not reference them, so they must not
-# reach the repository until they are actually used.
-/assets/fonts/

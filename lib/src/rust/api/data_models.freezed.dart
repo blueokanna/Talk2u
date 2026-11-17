@@ -1,6 +1,6 @@
 // GENERATED CODE - DO NOT MODIFY BY HAND
 // coverage:ignore-file
-// ignore_for_file: type=lint
+// ignore_for_file: type=lint, type=warning, deprecated_member_use, deprecated_member_use_from_same_package
 // ignore_for_file: unused_element, deprecated_member_use, deprecated_member_use_from_same_package, use_function_type_syntax_for_parameters, unnecessary_const, avoid_init_to_null, invalid_override_different_default_values_named, prefer_expression_function_bodies, annotate_overrides, invalid_annotation_target, unnecessary_question_mark
 
 part of 'data_models.dart';
@@ -9,6 +9,7 @@ part of 'data_models.dart';
 // FreezedGenerator
 // **************************************************************************
 
+// GENERATED CODE - DO NOT MODIFY BY HAND
 // dart format off
 T _$identity<T>(T value) => value;
 /// @nodoc
@@ -20,7 +21,7 @@ mixin _$ChatStreamEvent {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ChatStreamEvent);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is ChatStreamEvent);
 }
 
 
@@ -29,7 +30,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'ChatStreamEvent()';
+    return 'ChatStreamEvent()';
 }
 
 
@@ -200,7 +201,7 @@ return error(_that.field0);case _:
 
 class ChatStreamEvent_ContentDelta extends ChatStreamEvent {
   const ChatStreamEvent_ContentDelta(this.field0): super._();
-
+  
 
  final  String field0;
 
@@ -214,16 +215,18 @@ $ChatStreamEvent_ContentDeltaCopyWith<ChatStreamEvent_ContentDelta> get copyWith
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ChatStreamEvent_ContentDelta&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is ChatStreamEvent_ContentDelta&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'ChatStreamEvent.contentDelta(field0: $field0)';
+    return 'ChatStreamEvent.contentDelta(field0: $field0)';
 }
 
 
@@ -266,7 +269,7 @@ as String,
 
 class ChatStreamEvent_ThinkingDelta extends ChatStreamEvent {
   const ChatStreamEvent_ThinkingDelta(this.field0): super._();
-
+  
 
  final  String field0;
 
@@ -280,16 +283,18 @@ $ChatStreamEvent_ThinkingDeltaCopyWith<ChatStreamEvent_ThinkingDelta> get copyWi
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ChatStreamEvent_ThinkingDelta&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is ChatStreamEvent_ThinkingDelta&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'ChatStreamEvent.thinkingDelta(field0: $field0)';
+    return 'ChatStreamEvent.thinkingDelta(field0: $field0)';
 }
 
 
@@ -332,7 +337,7 @@ as String,
 
 class ChatStreamEvent_RetryReset extends ChatStreamEvent {
   const ChatStreamEvent_RetryReset(): super._();
-
+  
 
 
 
@@ -341,7 +346,7 @@ class ChatStreamEvent_RetryReset extends ChatStreamEvent {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ChatStreamEvent_RetryReset);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is ChatStreamEvent_RetryReset);
 }
 
 
@@ -350,7 +355,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'ChatStreamEvent.retryReset()';
+    return 'ChatStreamEvent.retryReset()';
 }
 
 
@@ -364,7 +369,7 @@ String toString() {
 
 class ChatStreamEvent_GenerationCancelled extends ChatStreamEvent {
   const ChatStreamEvent_GenerationCancelled(): super._();
-
+  
 
 
 
@@ -373,7 +378,7 @@ class ChatStreamEvent_GenerationCancelled extends ChatStreamEvent {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ChatStreamEvent_GenerationCancelled);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is ChatStreamEvent_GenerationCancelled);
 }
 
 
@@ -382,7 +387,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'ChatStreamEvent.generationCancelled()';
+    return 'ChatStreamEvent.generationCancelled()';
 }
 
 
@@ -396,7 +401,7 @@ String toString() {
 
 class ChatStreamEvent_Done extends ChatStreamEvent {
   const ChatStreamEvent_Done(): super._();
-
+  
 
 
 
@@ -405,7 +410,7 @@ class ChatStreamEvent_Done extends ChatStreamEvent {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ChatStreamEvent_Done);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is ChatStreamEvent_Done);
 }
 
 
@@ -414,7 +419,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'ChatStreamEvent.done()';
+    return 'ChatStreamEvent.done()';
 }
 
 
@@ -428,7 +433,7 @@ String toString() {
 
 class ChatStreamEvent_Error extends ChatStreamEvent {
   const ChatStreamEvent_Error(this.field0): super._();
-
+  
 
  final  String field0;
 
@@ -442,16 +447,18 @@ $ChatStreamEvent_ErrorCopyWith<ChatStreamEvent_Error> get copyWith => _$ChatStre
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ChatStreamEvent_Error&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is ChatStreamEvent_Error&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'ChatStreamEvent.error(field0: $field0)';
+    return 'ChatStreamEvent.error(field0: $field0)';
 }
 
 

@@ -36,13 +36,27 @@ struct ReplyBuffer {
     content: String,
     thinking: String,
     saw_done: bool,
+    truncated: bool,
     last_error: Option<String>,
+}
+
+/// Result of one provider stream.
+///
+/// Kept internal so the public `stream_chat` signature used by the reflection
+/// and reasoning pipelines stays a plain `(content, thinking)` pair.
+pub(crate) struct StreamOutcome {
+    pub content: String,
+    pub thinking: String,
+    pub truncated: bool,
 }
 
 impl ReplyBuffer {
     /// Records one parsed event and hands it back for emission.
     fn absorb(&mut self, line: &str) -> Option<ChatStreamEvent> {
         let event = StreamingHandler::parse_sse_line(line)?;
+        if !self.truncated && line_reports_length_limit(line) {
+            self.truncated = true;
+        }
         match &event {
             ChatStreamEvent::ContentDelta(delta) => self.content.push_str(delta),
             ChatStreamEvent::ThinkingDelta(delta) => self.thinking.push_str(delta),
@@ -67,6 +81,37 @@ impl ReplyBuffer {
     }
 }
 
+/// True when this SSE line says the provider stopped at a token ceiling.
+///
+/// OpenAI-compatible servers use `finish_reason: "length"`; Anthropic uses
+/// `stop_reason: "max_tokens"`. Both are parsed from JSON rather than compared
+/// as raw strings, because whitespace and field order are not stable.
+fn line_reports_length_limit(line: &str) -> bool {
+    let trimmed = line.trim();
+    let data = if let Some(rest) = trimmed.strip_prefix("data:") {
+        rest.trim()
+    } else if trimmed.starts_with('{') {
+        trimmed
+    } else {
+        return false;
+    };
+    if data.is_empty() || data == "[DONE]" {
+        return false;
+    }
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(data) else {
+        return false;
+    };
+    let reason = json
+        .pointer("/choices/0/finish_reason")
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            json.pointer("/delta/stop_reason")
+                .and_then(|value| value.as_str())
+        })
+        .or_else(|| json.get("stop_reason").and_then(|value| value.as_str()));
+    matches!(reason, Some("length" | "max_tokens"))
+}
+
 #[frb(opaque)]
 pub struct StreamingHandler {}
 
@@ -76,6 +121,22 @@ impl StreamingHandler {
         request_body: serde_json::Value,
         on_event: impl Fn(ChatStreamEvent),
     ) -> Result<(String, String), ChatError> {
+        let outcome = Self::stream_chat_outcome(provider, request_body, on_event, true).await?;
+        Ok((outcome.content, outcome.thinking))
+    }
+
+    /// Streams one attempt.
+    ///
+    /// `emit_done` is false when the caller may continue a reply that stopped
+    /// at a token ceiling. In that case the caller owns the single terminal
+    /// `Done`; emitting it here would make the UI discard every continuation
+    /// delta as late data.
+    pub(crate) async fn stream_chat_outcome(
+        provider: &ProviderRuntime,
+        request_body: serde_json::Value,
+        on_event: impl Fn(ChatStreamEvent),
+        emit_done: bool,
+    ) -> Result<StreamOutcome, ChatError> {
         let body = provider.adapt_request_body(request_body.clone());
         let body_bytes = serde_json::to_vec(&body).map_err(|error| ChatError::ValidationError {
             message: format!("请求体无法序列化: {error}"),
@@ -139,7 +200,8 @@ impl StreamingHandler {
                     } else {
                         format!(
                             "[{}] 流式响应中断：{}秒未收到新数据（已收到{}字），截断内容未保存，请重试",
-                            model_name, chunk_timeout.as_secs(),
+                            model_name,
+                            chunk_timeout.as_secs(),
                             reply.chars()
                         )
                     };
@@ -186,7 +248,9 @@ impl StreamingHandler {
                 // the peer will never send would report a second, wrong failure
                 // and hide the one the server actually gave.
                 let terminal = matches!(event, ChatStreamEvent::Error(_));
-                on_event(event);
+                if emit_done || !matches!(event, ChatStreamEvent::Done) {
+                    on_event(event);
+                }
                 if terminal {
                     let message = reply.last_error().unwrap_or_else(|| {
                         format!("[{model_name}] 流式响应中断，服务端没有给出错误原因")
@@ -200,16 +264,17 @@ impl StreamingHandler {
             let message = format!("[{model_name}] {error}");
             on_event(ChatStreamEvent::Error(message.clone()));
             ChatError::StreamError { message }
-        })? {
-            if let Some(event) = reply.absorb(&line) {
-                let terminal = matches!(event, ChatStreamEvent::Error(_));
+        })? && let Some(event) = reply.absorb(&line)
+        {
+            let terminal = matches!(event, ChatStreamEvent::Error(_));
+            if emit_done || !matches!(event, ChatStreamEvent::Done) {
                 on_event(event);
-                if terminal {
-                    let message = reply.last_error().unwrap_or_else(|| {
-                        format!("[{model_name}] 流式响应中断，服务端没有给出错误原因")
-                    });
-                    return Err(ChatError::StreamError { message });
-                }
+            }
+            if terminal {
+                let message = reply.last_error().unwrap_or_else(|| {
+                    format!("[{model_name}] 流式响应中断，服务端没有给出错误原因")
+                });
+                return Err(ChatError::StreamError { message });
             }
         }
 
@@ -243,7 +308,11 @@ impl StreamingHandler {
             return Err(ChatError::StreamError { message });
         }
 
-        Ok((reply.content, reply.thinking))
+        Ok(StreamOutcome {
+            content: reply.content,
+            thinking: reply.thinking,
+            truncated: reply.truncated,
+        })
     }
 
     /// Decodes one `data:` payload as an OpenAI chat-completions chunk.
@@ -266,17 +335,16 @@ impl StreamingHandler {
 
         let mut event = None;
         for choice in &chunk.choices {
-            if event.is_none() {
-                if let Some(reasoning) = choice.delta.reasoning_content.as_deref() {
-                    if !reasoning.is_empty() {
-                        event = Some(ChatStreamEvent::ThinkingDelta(reasoning.to_string()));
-                    }
-                }
+            if event.is_none()
+                && let Some(reasoning) = choice.delta.reasoning_content.as_deref()
+                && !reasoning.is_empty()
+            {
+                event = Some(ChatStreamEvent::ThinkingDelta(reasoning.to_string()));
             }
-            if event.is_none() {
-                if let Some(text) = choice.delta.content.as_ref().and_then(|c| c.joined_text()) {
-                    event = Some(ChatStreamEvent::ContentDelta(text));
-                }
+            if event.is_none()
+                && let Some(text) = choice.delta.content.as_ref().and_then(|c| c.joined_text())
+            {
+                event = Some(ChatStreamEvent::ContentDelta(text));
             }
             if event.is_none() {
                 match choice.finish_reason.as_deref() {
@@ -334,17 +402,17 @@ impl StreamingHandler {
             return Self::extract_delta(&json);
         }
 
-        if trimmed.starts_with('{') {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                if let Some(error) = json.get("error") {
-                    let msg = error
-                        .get("message")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Unknown API error");
-                    return Some(ChatStreamEvent::Error(msg.to_string()));
-                }
-                return Self::extract_delta(&json);
+        if trimmed.starts_with('{')
+            && let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed)
+        {
+            if let Some(error) = json.get("error") {
+                let msg = error
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Unknown API error");
+                return Some(ChatStreamEvent::Error(msg.to_string()));
             }
+            return Self::extract_delta(&json);
         }
 
         None
@@ -369,42 +437,41 @@ impl StreamingHandler {
         if let Some(delta) = json.get("delta") {
             match delta.get("type").and_then(|v| v.as_str()) {
                 Some("text_delta") => {
-                    if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
-                        if !text.is_empty() {
-                            return Some(ChatStreamEvent::ContentDelta(text.to_string()));
-                        }
+                    if let Some(text) = delta.get("text").and_then(|v| v.as_str())
+                        && !text.is_empty()
+                    {
+                        return Some(ChatStreamEvent::ContentDelta(text.to_string()));
                     }
                 }
                 Some("thinking_delta") => {
-                    if let Some(thinking) = delta.get("thinking").and_then(|v| v.as_str()) {
-                        if !thinking.is_empty() {
-                            return Some(ChatStreamEvent::ThinkingDelta(thinking.to_string()));
-                        }
+                    if let Some(thinking) = delta.get("thinking").and_then(|v| v.as_str())
+                        && !thinking.is_empty()
+                    {
+                        return Some(ChatStreamEvent::ThinkingDelta(thinking.to_string()));
                     }
                 }
                 _ => {}
             }
         }
-        if json.get("type").and_then(|v| v.as_str()) == Some("content_block_start") {
-            if let Some(text) = json.pointer("/content_block/text").and_then(|v| v.as_str()) {
-                if !text.is_empty() {
-                    return Some(ChatStreamEvent::ContentDelta(text.to_string()));
-                }
-            }
+        if json.get("type").and_then(|v| v.as_str()) == Some("content_block_start")
+            && let Some(text) = json.pointer("/content_block/text").and_then(|v| v.as_str())
+            && !text.is_empty()
+        {
+            return Some(ChatStreamEvent::ContentDelta(text.to_string()));
         }
         if json.get("type").and_then(|v| v.as_str()) == Some("message_stop") {
             return Some(ChatStreamEvent::Done);
         }
 
-        if let Some(content) = json.get("content").and_then(|v| v.as_array()) {
-            if let Some(text) = content.iter().find_map(|block| {
+        if let Some(content) = json.get("content").and_then(|v| v.as_array())
+            && let Some(text) = content.iter().find_map(|block| {
                 block
                     .get("text")
                     .and_then(|v| v.as_str())
                     .filter(|v| !v.is_empty())
-            }) {
-                return Some(ChatStreamEvent::ContentDelta(text.to_string()));
-            }
+            })
+        {
+            return Some(ChatStreamEvent::ContentDelta(text.to_string()));
         }
 
         let choice = json.get("choices").and_then(|c| c.get(0))?;
@@ -412,48 +479,45 @@ impl StreamingHandler {
         let delta = choice.get("delta");
 
         if let Some(delta) = delta {
-            if let Some(reasoning) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
-                if !reasoning.is_empty() {
-                    return Some(ChatStreamEvent::ThinkingDelta(reasoning.to_string()));
-                }
+            if let Some(reasoning) = delta.get("reasoning_content").and_then(|v| v.as_str())
+                && !reasoning.is_empty()
+            {
+                return Some(ChatStreamEvent::ThinkingDelta(reasoning.to_string()));
             }
 
-            if let Some(content_val) = delta.get("content") {
-                if let Some(content) = content_val.as_str() {
-                    if !content.is_empty() {
-                        return Some(ChatStreamEvent::ContentDelta(content.to_string()));
-                    }
-                }
+            if let Some(content_val) = delta.get("content")
+                && let Some(content) = content_val.as_str()
+                && !content.is_empty()
+            {
+                return Some(ChatStreamEvent::ContentDelta(content.to_string()));
             }
 
-            if let Some(text_val) = delta.get("text") {
-                if let Some(text) = text_val.as_str() {
-                    if !text.is_empty() {
-                        return Some(ChatStreamEvent::ContentDelta(text.to_string()));
-                    }
-                }
+            if let Some(text_val) = delta.get("text")
+                && let Some(text) = text_val.as_str()
+                && !text.is_empty()
+            {
+                return Some(ChatStreamEvent::ContentDelta(text.to_string()));
             }
         }
 
-        if let Some(message) = choice.get("message") {
-            if let Some(content) = message.get("content").and_then(|v| v.as_str()) {
-                if !content.is_empty() {
-                    return Some(ChatStreamEvent::ContentDelta(content.to_string()));
-                }
-            }
+        if let Some(message) = choice.get("message")
+            && let Some(content) = message.get("content").and_then(|v| v.as_str())
+            && !content.is_empty()
+        {
+            return Some(ChatStreamEvent::ContentDelta(content.to_string()));
         }
 
-        if let Some(reason) = choice.get("finish_reason") {
-            if let Some(reason_str) = reason.as_str() {
-                match reason_str {
-                    "stop" | "length" => return Some(ChatStreamEvent::Done),
-                    "sensitive" => {
-                        return Some(ChatStreamEvent::Error(
-                            "内容触发了安全审核，请修改后重试。".to_string(),
-                        ));
-                    }
-                    _ => {}
+        if let Some(reason) = choice.get("finish_reason")
+            && let Some(reason_str) = reason.as_str()
+        {
+            match reason_str {
+                "stop" | "length" => return Some(ChatStreamEvent::Done),
+                "sensitive" => {
+                    return Some(ChatStreamEvent::Error(
+                        "内容触发了安全审核，请修改后重试。".to_string(),
+                    ));
                 }
+                _ => {}
             }
         }
 
@@ -758,5 +822,29 @@ mod tests {
             Some(ChatStreamEvent::ContentDelta(text)) => assert_eq!(text, "完整回复"),
             other => panic!("Expected raw Anthropic ContentDelta, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn detects_openai_length_finish_reason() {
+        let line = r#"data: {"choices":[{"index":0,"delta":{},"finish_reason":"length"}]}"#;
+        assert!(line_reports_length_limit(line));
+    }
+
+    #[test]
+    fn detects_anthropic_max_tokens_stop_reason() {
+        let line = r#"data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#;
+        assert!(line_reports_length_limit(line));
+    }
+
+    #[test]
+    fn ordinary_stop_is_not_a_length_limit() {
+        assert!(!line_reports_length_limit(
+            r#"data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#
+        ));
+        assert!(!line_reports_length_limit(
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#
+        ));
+        assert!(!line_reports_length_limit("data: [DONE]"));
+        assert!(!line_reports_length_limit(": keep-alive"));
     }
 }

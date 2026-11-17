@@ -263,13 +263,11 @@ class CharacterStore {
 
   Future<int> importFromPicker() async {
     try {
-      final result = await FilePicker.platform.pickFiles(
+      final file = await FilePicker.pickFile(
         type: FileType.custom,
-        allowedExtensions: ['json'],
-        allowMultiple: false,
+        allowedExtensions: const ['json'],
       );
-      if (result == null || result.files.isEmpty) return 0;
-      final path = result.files.single.path;
+      final path = file?.path;
       if (path == null) return 0;
       return await importFromFile(path);
     } catch (e) {

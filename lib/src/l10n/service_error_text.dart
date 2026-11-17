@@ -12,8 +12,10 @@ String serviceErrorText(
 }) {
   final mapped = switch (code) {
     'qwen3_capabilities_failed' => strings.qwenCapabilitiesFailed,
-    'qwen3_download_failed' => strings.qwenDownloadFailed,
-    'qwen3_download_cancelled' => strings.qwenDownloadPaused,
+    'qwen3_import_failed' ||
+    'qwen3_import_picker_failed' => strings.qwenImportFailed,
+    'qwen3_import_cancelled' => strings.qwenImportCancelled,
+    'qwen3_import_busy' => strings.offlineModelBusy,
     'qwen3_load_failed' => strings.qwenLoadFailed,
     'qwen3_generate_failed' => strings.qwenGenerateFailed,
     'moss_runtime_unavailable' ||

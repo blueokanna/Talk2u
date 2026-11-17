@@ -119,11 +119,26 @@ impl ChatEngine {
             actual_thinking,
             sampling,
         );
-        match StreamingHandler::stream_chat(&self.provider, request_body, &filtered_event).await {
-            Ok((content, thinking)) if !content.trim().is_empty() => {
-                return Ok((content, thinking));
+        match StreamingHandler::stream_chat_outcome(
+            &self.provider,
+            request_body,
+            &filtered_event,
+            false,
+        )
+        .await
+        {
+            Ok(outcome) if !outcome.content.trim().is_empty() => {
+                return self
+                    .finish_complete_reply(
+                        model,
+                        enhanced_messages,
+                        sampling,
+                        outcome,
+                        &filtered_event,
+                    )
+                    .await;
             }
-            Ok((_, ref thinking)) if actual_thinking && !thinking.trim().is_empty() => {
+            Ok(outcome) if actual_thinking && !outcome.thinking.trim().is_empty() => {
                 need_content_reset.store(true, std::sync::atomic::Ordering::Relaxed);
                 let retry_body = Self::build_request_body_with_sampling(
                     enhanced_messages,
@@ -131,15 +146,23 @@ impl ChatEngine {
                     false,
                     sampling,
                 );
-                return match StreamingHandler::stream_chat(
+                return match StreamingHandler::stream_chat_outcome(
                     &self.provider,
                     retry_body,
                     &filtered_event,
+                    false,
                 )
                 .await
                 {
-                    Ok((content, thinking)) if !content.trim().is_empty() => {
-                        Ok((content, thinking))
+                    Ok(outcome) if !outcome.content.trim().is_empty() => {
+                        self.finish_complete_reply(
+                            model,
+                            enhanced_messages,
+                            sampling,
+                            outcome,
+                            &filtered_event,
+                        )
+                        .await
                     }
                     Ok(_) => Err(ChatError::ApiError {
                         status: 0,
@@ -155,14 +178,137 @@ impl ChatEngine {
         need_content_reset.store(true, std::sync::atomic::Ordering::Relaxed);
         let compact = Self::build_compact_retry_messages(enhanced_messages, 6);
         let compact_body = Self::build_request_body_with_sampling(&compact, model, false, sampling);
-        match StreamingHandler::stream_chat(&self.provider, compact_body, &filtered_event).await {
-            Ok((content, thinking)) if !content.trim().is_empty() => Ok((content, thinking)),
+        match StreamingHandler::stream_chat_outcome(
+            &self.provider,
+            compact_body,
+            &filtered_event,
+            false,
+        )
+        .await
+        {
+            Ok(outcome) if !outcome.content.trim().is_empty() => {
+                self.finish_complete_reply(
+                    model,
+                    enhanced_messages,
+                    sampling,
+                    outcome,
+                    &filtered_event,
+                )
+                .await
+            }
             Ok(_) => Err(ChatError::ApiError {
                 status: 0,
                 message: "API 连续两次返回空内容".to_string(),
             }),
             Err(error) => Err(error),
         }
+    }
+
+    /// Continues a truncated reply, then emits the one terminal `Done`.
+    ///
+    /// The per-attempt stream suppresses `Done` because a `length` finish may
+    /// be followed by continuation deltas. Emitting it early would make the
+    /// Dart stream close its subscription and discard the rest of the answer.
+    async fn finish_complete_reply(
+        &self,
+        model: &str,
+        enhanced_messages: &[Message],
+        sampling: SamplingProfile,
+        outcome: super::streaming_handler::StreamOutcome,
+        on_event: &impl Fn(ChatStreamEvent),
+    ) -> Result<(String, String), ChatError> {
+        let reply = self
+            .complete_truncated_reply(model, enhanced_messages, sampling, outcome, on_event)
+            .await?;
+        on_event(ChatStreamEvent::Done);
+        Ok(reply)
+    }
+
+    /// Continues a reply that stopped at the provider's token ceiling.
+    ///
+    /// The final answer is assembled from the original deltas plus up to two
+    /// continuation turns. The synthetic user message exists only in this
+    /// request; it is never persisted as a chat turn.
+    async fn complete_truncated_reply(
+        &self,
+        model: &str,
+        enhanced_messages: &[Message],
+        sampling: SamplingProfile,
+        mut outcome: super::streaming_handler::StreamOutcome,
+        on_event: &impl Fn(ChatStreamEvent),
+    ) -> Result<(String, String), ChatError> {
+        const MAX_CONTINUATIONS: usize = 2;
+        const MAX_CONTINUED_CHARS: usize = 64_000;
+        let mut content = std::mem::take(&mut outcome.content);
+        let mut thinking = std::mem::take(&mut outcome.thinking);
+        let mut rounds = 0usize;
+        while outcome.truncated
+            && rounds < MAX_CONTINUATIONS
+            && content.chars().count() < MAX_CONTINUED_CHARS
+        {
+            rounds += 1;
+            let tail: String = content
+                .chars()
+                .rev()
+                .take(3000)
+                .collect::<Vec<char>>()
+                .into_iter()
+                .rev()
+                .collect();
+            let mut messages = enhanced_messages.to_vec();
+            messages.push(Message {
+                id: String::new(),
+                role: MessageRole::System,
+                content: "上一条回复因为服务端的最大输出长度被截断。请直接从截断处继续写，\
+                          不要重复已经写过的内容，不要重新开头，也不要解释你在续写。"
+                    .to_string(),
+                thinking_content: None,
+                model: "system".to_string(),
+                timestamp: 0,
+                message_type: MessageType::Say,
+            });
+            messages.push(Message {
+                id: String::new(),
+                role: MessageRole::Assistant,
+                content: tail,
+                thinking_content: None,
+                model: model.to_string(),
+                timestamp: 0,
+                message_type: MessageType::Say,
+            });
+            messages.push(Message {
+                id: String::new(),
+                role: MessageRole::User,
+                content: "继续。".to_string(),
+                thinking_content: None,
+                model: model.to_string(),
+                timestamp: 0,
+                message_type: MessageType::Say,
+            });
+            let body = Self::build_request_body_with_sampling(&messages, model, false, sampling);
+            match StreamingHandler::stream_chat_outcome(&self.provider, body, on_event, false).await
+            {
+                Ok(next) if !next.content.trim().is_empty() => {
+                    let before = content.len();
+                    content.push_str(&next.content);
+                    if !next.thinking.trim().is_empty() {
+                        thinking.push_str(&next.thinking);
+                    }
+                    if content.len() == before {
+                        break;
+                    }
+                    outcome.truncated = next.truncated;
+                }
+                Ok(_) => break,
+                Err(error) => {
+                    // The first reply is still valid. Keep it instead of
+                    // discarding a long answer because a continuation failed.
+                    eprintln!("[Talk2U] truncated reply continuation failed: {error}");
+                    break;
+                }
+            }
+        }
+        Ok((content, thinking))
     }
 
     async fn request_reasoning(
@@ -829,13 +975,14 @@ impl ChatEngine {
 
         let mut merged_api_messages: Vec<serde_json::Value> = Vec::new();
         for msg in api_messages {
-            if let Some(last) = merged_api_messages.last_mut() {
-                if last["role"] == msg["role"] && msg["role"] != "system" {
-                    let existing = last["content"].as_str().unwrap_or("").to_string();
-                    let new_part = msg["content"].as_str().unwrap_or("");
-                    last["content"] = serde_json::json!(format!("{}\n{}", existing, new_part));
-                    continue;
-                }
+            if let Some(last) = merged_api_messages.last_mut()
+                && last["role"] == msg["role"]
+                && msg["role"] != "system"
+            {
+                let existing = last["content"].as_str().unwrap_or("").to_string();
+                let new_part = msg["content"].as_str().unwrap_or("");
+                last["content"] = serde_json::json!(format!("{}\n{}", existing, new_part));
+                continue;
             }
             merged_api_messages.push(msg);
         }
@@ -1004,16 +1151,15 @@ impl ChatEngine {
             if let Ok(Some(distilled_state)) = self
                 .memory_engine
                 .load_distilled_state(request.conversation_id)
+                && !distilled_state.core_prompt.trim().is_empty()
             {
-                if !distilled_state.core_prompt.trim().is_empty() {
-                    Self::insert_before_last_user(
-                        &mut enhanced_messages,
-                        Self::system_message(format!(
-                            "【历史蒸馏核心状态（持久化）】\n{}\n",
-                            distilled_state.core_prompt
-                        )),
-                    );
-                }
+                Self::insert_before_last_user(
+                    &mut enhanced_messages,
+                    Self::system_message(format!(
+                        "【历史蒸馏核心状态（持久化）】\n{}\n",
+                        distilled_state.core_prompt
+                    )),
+                );
             }
 
             let memory_summaries_for_assess = self
@@ -1352,8 +1498,10 @@ impl ChatEngine {
         let mut selected_messages: Vec<Message> = Vec::new();
         let mut accumulated_tokens: usize = 0;
         // The token budget decides how much history fits; the message cap only
-        // bounds pathological tiny-message turns.
-        let max_messages = 40usize;
+        // bounds pathological tiny-message turns. 200 messages is 100 turns,
+        // which is far beyond what 80K tokens can hold for normal prose but
+        // prevents a "k" / "嗯" exchange from starving real context.
+        let max_messages = 200usize;
 
         for msg in non_system.iter().rev() {
             let msg_tokens = Self::estimate_content_tokens(&msg.content);
@@ -1945,32 +2093,27 @@ impl ChatEngine {
 
             if let Ok((verify_text, _)) =
                 StreamingHandler::stream_chat(&self.provider, verify_body, |_| {}).await
+                && let Some(start) = verify_text.find('{')
+                && let Some(end) = verify_text.rfind('}')
+                && let Ok(verify_json) =
+                    serde_json::from_str::<serde_json::Value>(&verify_text[start..=end])
             {
-                if let Some(start) = verify_text.find('{') {
-                    if let Some(end) = verify_text.rfind('}') {
-                        if let Ok(verify_json) =
-                            serde_json::from_str::<serde_json::Value>(&verify_text[start..=end])
-                        {
-                            let is_valid = verify_json
-                                .get("is_valid")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(true);
+                let is_valid = verify_json
+                    .get("is_valid")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
 
-                            if !is_valid {
-                                if let Some(corrected) = verify_json
-                                    .get("corrected_core_facts")
-                                    .and_then(|v| v.as_array())
-                                {
-                                    let corrected_facts: Vec<String> = corrected
-                                        .iter()
-                                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                        .collect();
-                                    if !corrected_facts.is_empty() {
-                                        final_core_facts = corrected_facts;
-                                    }
-                                }
-                            }
-                        }
+                if !is_valid
+                    && let Some(corrected) = verify_json
+                        .get("corrected_core_facts")
+                        .and_then(|v| v.as_array())
+                {
+                    let corrected_facts: Vec<String> = corrected
+                        .iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect();
+                    if !corrected_facts.is_empty() {
+                        final_core_facts = corrected_facts;
                     }
                 }
             }
@@ -2158,14 +2301,18 @@ mod tests {
         let enhanced = ChatEngine::build_context_enhanced_messages(&prompt, "second question", &[]);
         let body = ChatEngine::build_request_body(&enhanced, "other-provider-model", false);
         let messages = body["messages"].as_array().unwrap();
-        assert!(messages[0]["content"]
-            .as_str()
-            .unwrap()
-            .contains("character"));
-        assert!(messages[0]["content"]
-            .as_str()
-            .unwrap()
-            .contains("later instruction"));
+        assert!(
+            messages[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("character")
+        );
+        assert!(
+            messages[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("later instruction")
+        );
         let dialogue: Vec<_> = messages
             .iter()
             .filter(|m| m["role"] != "system")

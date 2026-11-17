@@ -3,7 +3,7 @@ use std::path::Path;
 
 use flutter_rust_bridge::frb;
 
-use super::data_models::{default_provider_configs, AppSettings, ProviderConfig};
+use super::data_models::{AppSettings, ProviderConfig, default_provider_configs};
 use super::error_handler::ChatError;
 
 #[frb(opaque)]

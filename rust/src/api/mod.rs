@@ -2,11 +2,18 @@ pub mod chat_api;
 pub mod data_models;
 
 pub(crate) mod chat_engine;
+// The ChatML renderer and the GGUF reader are driven from the Android JNI
+// bridge (rust/src/android_bridge.rs) and from their own unit tests. On a host
+// build without `--all-targets` they are unreachable, which is expected.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) mod chatml;
 pub(crate) mod clock;
 pub(crate) mod cognitive_engine;
 pub(crate) mod config_manager;
 pub(crate) mod conversation_store;
 pub(crate) mod error_handler;
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) mod gguf;
 pub(crate) mod knowledge_store;
 pub(crate) mod memory_engine;
 pub(crate) mod model_policy;

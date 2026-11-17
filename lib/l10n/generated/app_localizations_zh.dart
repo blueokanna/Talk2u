@@ -57,10 +57,10 @@ class AppLocalizationsZh extends AppLocalizations {
   String get qwenCapabilitiesFailed => '无法检查 Qwen3 QAIRT/NPU 模型状态，请重试。';
 
   @override
-  String get qwenDownloadFailed => 'Qwen3 模型下载中断，已保留断点；点按下载会从断点继续。';
+  String get qwenImportFailed => '端侧模型导入失败，原有模型保持不变。';
 
   @override
-  String get qwenDownloadPaused => '下载已暂停，已保留断点，点按下载可继续。';
+  String get qwenImportCancelled => '端侧模型导入已取消，原有模型保持不变。';
 
   @override
   String get qwenLoadFailed => 'Qwen3 QAIRT/NPU 模型加载失败，请重试。';
@@ -215,6 +215,9 @@ class AppLocalizationsZh extends AppLocalizations {
   String get live2dDiagnostics => 'Live2D 性能';
 
   @override
+  String get live2dDiagnosticsAutoRefresh => '每 1 秒自动刷新，无需关闭窗口';
+
+  @override
   String get renderBackend => '实际后端';
 
   @override
@@ -332,10 +335,61 @@ class AppLocalizationsZh extends AppLocalizations {
   String get deleteModel => '删除模型';
 
   @override
-  String get installQwen => '下载 Qwen3-4B-Instruct-2507 模型';
+  String get installQwen => '安装端侧模型';
 
   @override
-  String get cancelDownload => '取消下载';
+  String get qwenPresetHub => '可从 Qualcomm AI Hub 下载';
+
+  @override
+  String get qwenPresetImportOnly => '官方未发布部署包；请导入 QAIRT 或 Q4_0/Q8_0 的 GGUF';
+
+  @override
+  String get qwenPresetInstalled => '已安装';
+
+  @override
+  String get cancelDownload => '取消导入';
+
+  @override
+  String get importQwenBundle => '导入 QAIRT 部署包（NPU）';
+
+  @override
+  String get importQwenGguf => '导入 GGUF（NPU）';
+
+  @override
+  String get qwenAccelNpu => 'Qualcomm QNN HTP/NPU（已校验）';
+
+  @override
+  String get qwenAccelGpu => 'Adreno GPU · llama.cpp OpenCL（已校验）';
+
+  @override
+  String get qwenAccelCpu => 'CPU — 该模型包没有可用加速器';
+
+  @override
+  String get qwenAccelPending => '加速器已载入；首次完整回复后校验';
+
+  @override
+  String get qwenAccelNotLoaded => '模型已安装；加速器尚未载入';
+
+  @override
+  String get qwenImportedNotDetected => '模型已复制，但运行时未识别到它';
+
+  @override
+  String get qwenImportCancelledDetail => '导入已取消，原有模型保持不变。';
+
+  @override
+  String qwenImportFailedDetail(String raw) {
+    return '$raw\n原有模型未被替换。';
+  }
+
+  @override
+  String qwenGgufQuantizationUnsupported(String quantization) {
+    return '$quantization 的部分张量只能在 CPU 上执行。请改用 Q4_0 或 Q8_0 的 GGUF；当前文件未被替换。';
+  }
+
+  @override
+  String qwenInstallFirst(String model) {
+    return '请先导入 $model 模型';
+  }
 
   @override
   String get deleteSenseVoice => '删除 SenseVoice';
@@ -379,7 +433,8 @@ class AppLocalizationsZh extends AppLocalizations {
   }
 
   @override
-  String get qwenInstallHint => '无需 API；GenieX 自动下载芯片匹配的 QAIRT 模型包';
+  String get qwenInstallHint =>
+      '导入 QAIRT 部署包或 GGUF。GGUF 优先走骁龙 NPU；NPU 会话无法建立时回退 CPU 并明确标注';
 
   @override
   String qwenModelReady(String license, String size) {
@@ -388,7 +443,7 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String qwenModelPackage(String license) {
-    return '$license · QAIRT · Qualcomm QNN HTP/NPU';
+    return '$license · 去审查 Qwen3-4B · QAIRT（NPU）或 GGUF（NPU/GPU）';
   }
 
   @override
@@ -862,6 +917,12 @@ class AppLocalizationsZh extends AppLocalizations {
   String get readLastReply => '端侧朗读上一条回复';
 
   @override
+  String get autoReadReplies => '自动朗读回复';
+
+  @override
+  String get autoReadRepliesSubtitle => '回复仍在生成时逐句合成，不必等整段完成';
+
+  @override
   String get noOfflineTtsPack => '设备无端侧 TTS 语音包';
 
   @override
@@ -1145,33 +1206,17 @@ class AppLocalizationsZh extends AppLocalizations {
   }
 
   @override
-  String get qwenDownloadedNotDetected => 'GenieX 下载完成后未检测到 Qwen3 QAIRT/NPU 模型';
-
-  @override
-  String get qwenDownloadPausedDetail => '下载已暂停，已保留断点，点按下载可继续。';
-
-  @override
-  String qwenDownloadFailedDetail(String raw) {
-    return '$raw\n已保留已下载部分，点按下载会从断点继续。';
-  }
-
-  @override
   String get waitForCurrentReply => '请先等待当前端侧回复完成';
-
-  @override
-  String qwenDownloadFirst(String model) {
-    return '请先下载 $model QAIRT/NPU 模型';
-  }
 
   @override
   String get geniexLoadResultMissing => 'GenieX 没有返回模型加载结果';
 
   @override
-  String get qwenBackendRejected => '拒绝非 QAIRT/NPU 的 Qwen3 执行后端';
+  String get qwenBackendRejected => '拒绝未报告加速器的端侧执行后端';
 
   @override
   String qwenLoadFailedDetail(String error) {
-    return 'Qwen3 QAIRT/NPU 模型加载失败：$error';
+    return 'Qwen3 端侧模型加载失败：$error';
   }
 
   @override
@@ -1253,7 +1298,7 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get qwenModelMissingHint =>
-      '请先在“模型与接口”中安装 Qwen3-4B-Instruct-2507 QAIRT/NPU 模型';
+      '请先在“模型与接口”中安装去审查的 Qwen3-4B 模型（QAIRT 部署包或 GGUF）';
 
   @override
   String apiKeyMissingHint(String provider) {

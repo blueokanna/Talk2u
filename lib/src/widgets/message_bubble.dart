@@ -1,8 +1,26 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:talk2u/l10n/generated/app_localizations.dart';
+import 'package:talk2u/src/theme/app_motion.dart';
+import 'package:talk2u/src/theme/app_shapes.dart';
+import 'package:talk2u/src/widgets/thinking_section.dart';
 
+/// One transcript message.
+///
+/// The bubble is a [Material] with a superellipse tail rather than a decorated
+/// [Container]: the Material gives it the correct ink, elevation and clipping
+/// for free, and the shape comes from [AppShapes] so both senders use the same
+/// geometry with the tail on their own side.
+///
+/// Rendering rules that matter for performance:
+///
+/// * streaming text is plain [SelectableText] — re-parsing the Markdown AST on
+///   every token delta is quadratic for long replies;
+/// * a completed message builds [MarkdownBody] once and caches it keyed by
+///   content, theme identity and text scaler, so a parent rebuild is free;
+/// * the reasoning panel is [ThinkingSection], which owns its own expansion
+///   controller instead of rebuilding this state on every frame.
 class MessageBubble extends StatefulWidget {
   final String content;
   final String? thinkingContent;
@@ -46,14 +64,9 @@ class MessageBubble extends StatefulWidget {
 
 class _MessageBubbleState extends State<MessageBubble> {
   bool _isEditing = false;
-  bool _showThinking = false;
-  late TextEditingController _editController;
-
-  @override
-  void initState() {
-    super.initState();
-    _editController = TextEditingController(text: widget.content);
-  }
+  late final TextEditingController _editController = TextEditingController(
+    text: widget.content,
+  );
 
   @override
   void didUpdateWidget(covariant MessageBubble oldWidget) {
@@ -102,144 +115,83 @@ class _MessageBubbleState extends State<MessageBubble> {
       Offset.zero & overlay.size,
     );
 
-    final items = <PopupMenuEntry<String>>[
-      PopupMenuItem(
-        value: 'copy',
-        child: Row(
-          children: [
-            Icon(
-              Icons.copy_rounded,
-              size: 20,
-              color: theme.colorScheme.onSurface,
-            ),
-            const SizedBox(width: 12),
-            Text(strings.copy),
-          ],
+    final items = <PopupMenuEntry<String>>[];
+    void add(String value, IconData icon, String label, {Color? color}) {
+      items.add(
+        PopupMenuItem(
+          value: value,
+          child: Row(
+            children: [
+              Icon(icon, size: 20, color: color ?? theme.colorScheme.onSurface),
+              const SizedBox(width: 12),
+              Text(label, style: TextStyle(color: color)),
+            ],
+          ),
         ),
-      ),
-    ];
+      );
+    }
 
+    add('copy', Icons.copy_rounded, strings.copy);
     if (widget.isUser && widget.onEdit != null) {
-      items.add(
-        PopupMenuItem(
-          value: 'edit',
-          child: Row(
-            children: [
-              Icon(
-                Icons.edit_rounded,
-                size: 20,
-                color: theme.colorScheme.onSurface,
-              ),
-              const SizedBox(width: 12),
-              Text(strings.editAndResend),
-            ],
-          ),
-        ),
-      );
+      add('edit', Icons.edit_rounded, strings.editAndResend);
     }
-
     if (widget.isUser && widget.onRollback != null) {
-      items.add(
-        PopupMenuItem(
-          value: 'rollback',
-          child: Row(
-            children: [
-              Icon(
-                Icons.undo_rounded,
-                size: 20,
-                color: theme.colorScheme.tertiary,
-              ),
-              const SizedBox(width: 12),
-              Text(
-                strings.rollback,
-                style: TextStyle(color: theme.colorScheme.tertiary),
-              ),
-            ],
-          ),
-        ),
+      add(
+        'rollback',
+        Icons.undo_rounded,
+        strings.rollback,
+        color: theme.colorScheme.tertiary,
       );
     }
-
     if (!widget.isUser && widget.onRegenerate != null) {
-      items.add(
-        PopupMenuItem(
-          value: 'regenerate',
-          child: Row(
-            children: [
-              Icon(
-                Icons.refresh_rounded,
-                size: 20,
-                color: theme.colorScheme.primary,
-              ),
-              const SizedBox(width: 12),
-              Text(
-                strings.regenerate,
-                style: TextStyle(color: theme.colorScheme.primary),
-              ),
-            ],
-          ),
-        ),
+      add(
+        'regenerate',
+        Icons.refresh_rounded,
+        strings.regenerate,
+        color: theme.colorScheme.primary,
       );
     }
-
     if (widget.onDelete != null) {
-      items.add(
-        PopupMenuItem(
-          value: 'delete',
-          child: Row(
-            children: [
-              Icon(
-                Icons.delete_outline_rounded,
-                size: 20,
-                color: theme.colorScheme.error,
-              ),
-              const SizedBox(width: 12),
-              Text(
-                strings.delete,
-                style: TextStyle(color: theme.colorScheme.error),
-              ),
-            ],
-          ),
-        ),
+      add(
+        'delete',
+        Icons.delete_outline_rounded,
+        strings.delete,
+        color: theme.colorScheme.error,
       );
     }
+    if (items.isEmpty) return;
 
     showMenu<String>(
       context: context,
       position: position,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      shape: AppShapes.overlay,
       elevation: 3,
       items: items,
     ).then((value) {
       if (!context.mounted) return;
       switch (value) {
         case 'copy':
-          Clipboard.setData(ClipboardData(text: widget.content));
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(strings.copied),
-              behavior: SnackBarBehavior.floating,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(8),
-              ),
-              duration: const Duration(seconds: 1),
-            ),
-          );
-          break;
+          _copy(context);
         case 'edit':
           _startEditing();
-          break;
         case 'rollback':
           _confirmRollback(context);
-          break;
         case 'regenerate':
           widget.onRegenerate?.call();
-          break;
         case 'delete':
           _confirmDelete(context);
-          break;
       }
     });
+  }
+
+  void _copy(BuildContext context) {
+    Clipboard.setData(ClipboardData(text: widget.content));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(AppLocalizations.of(context).copied),
+        duration: AppMotion.transient,
+      ),
+    );
   }
 
   void _confirmDelete(BuildContext context) {
@@ -265,6 +217,7 @@ class _MessageBubbleState extends State<MessageBubble> {
             },
             style: FilledButton.styleFrom(
               backgroundColor: Theme.of(ctx).colorScheme.error,
+              foregroundColor: Theme.of(ctx).colorScheme.onError,
             ),
             child: Text(strings.delete),
           ),
@@ -296,6 +249,7 @@ class _MessageBubbleState extends State<MessageBubble> {
             },
             style: FilledButton.styleFrom(
               backgroundColor: Theme.of(ctx).colorScheme.tertiary,
+              foregroundColor: Theme.of(ctx).colorScheme.onTertiary,
             ),
             child: Text(strings.rollback),
           ),
@@ -312,30 +266,14 @@ class _MessageBubbleState extends State<MessageBubble> {
     }
 
     final strings = AppLocalizations.of(context);
-    final actions = <Widget>[];
-
-    actions.add(
+    final actions = <Widget>[
       _ActionChip(
         icon: Icons.copy_rounded,
         label: strings.copy,
-        onPressed: () {
-          Clipboard.setData(ClipboardData(text: widget.content));
-          if (context.mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text(strings.copied),
-                behavior: SnackBarBehavior.floating,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                duration: const Duration(seconds: 1),
-              ),
-            );
-          }
-        },
-        color: theme.colorScheme.outline,
+        onPressed: () => _copy(context),
+        color: theme.colorScheme.onSurfaceVariant,
       ),
-    );
+    ];
 
     if (!widget.isUser && widget.onRegenerate != null) {
       actions.add(
@@ -347,7 +285,6 @@ class _MessageBubbleState extends State<MessageBubble> {
         ),
       );
     }
-
     if (widget.isUser && widget.onEdit != null) {
       actions.add(
         _ActionChip(
@@ -358,7 +295,6 @@ class _MessageBubbleState extends State<MessageBubble> {
         ),
       );
     }
-
     if (widget.isUser && widget.onRollback != null) {
       actions.add(
         _ActionChip(
@@ -369,7 +305,6 @@ class _MessageBubbleState extends State<MessageBubble> {
         ),
       );
     }
-
     if (widget.onDelete != null) {
       actions.add(
         _ActionChip(
@@ -381,162 +316,60 @@ class _MessageBubbleState extends State<MessageBubble> {
       );
     }
 
-    if (actions.isEmpty) return const SizedBox.shrink();
-
     return Padding(
       padding: const EdgeInsets.only(top: 4),
       child: Wrap(spacing: 6, runSpacing: 4, children: actions),
     );
   }
 
-  Widget _buildThinkingSection(ThemeData theme) {
-    if (widget.thinkingContent == null || widget.thinkingContent!.isEmpty) {
-      return const SizedBox.shrink();
-    }
-
-    final strings = AppLocalizations.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 6),
-      child: GestureDetector(
-        onTap: () => setState(() => _showThinking = !_showThinking),
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 250),
-          curve: Curves.easeOutCubic,
-          decoration: BoxDecoration(
-            color: theme.colorScheme.tertiaryContainer.withValues(alpha: 0.4),
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(
-              color: theme.colorScheme.tertiaryContainer,
-              width: 1,
-            ),
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.psychology_rounded,
-                    size: 16,
-                    color: theme.colorScheme.onTertiaryContainer,
-                  ),
-                  const SizedBox(width: 6),
-                  Text(
-                    strings.thinkingProcess,
-                    style: theme.textTheme.labelMedium?.copyWith(
-                      color: theme.colorScheme.onTertiaryContainer,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-                  AnimatedRotation(
-                    turns: _showThinking ? 0.5 : 0,
-                    duration: const Duration(milliseconds: 200),
-                    child: Icon(
-                      Icons.expand_more_rounded,
-                      size: 18,
-                      color: theme.colorScheme.onTertiaryContainer,
-                    ),
-                  ),
-                ],
-              ),
-              AnimatedCrossFade(
-                firstChild: const SizedBox.shrink(),
-                secondChild: Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Text(
-                    widget.thinkingContent!,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.onTertiaryContainer.withValues(
-                        alpha: 0.8,
-                      ),
-                      height: 1.5,
-                    ),
-                  ),
-                ),
-                crossFadeState: _showThinking
-                    ? CrossFadeState.showSecond
-                    : CrossFadeState.showFirst,
-                duration: const Duration(milliseconds: 250),
-                sizeCurve: Curves.easeOutCubic,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
   Widget _buildEditingView(ThemeData theme) {
     final strings = AppLocalizations.of(context);
-    return Container(
-      decoration: BoxDecoration(
-        color: theme.colorScheme.primaryContainer.withValues(alpha: 0.3),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(
+    return Material(
+      color: theme.colorScheme.primaryContainer.withValues(alpha: 0.3),
+      shape: AppShapes.field.copyWith(
+        side: BorderSide(
           color: theme.colorScheme.primary.withValues(alpha: 0.5),
-          width: 1.5,
         ),
       ),
-      padding: const EdgeInsets.all(12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          TextField(
-            controller: _editController,
-            autofocus: true,
-            maxLines: null,
-            minLines: 1,
-            style: theme.textTheme.bodyMedium?.copyWith(
-              color: theme.colorScheme.onSurface,
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            TextField(
+              controller: _editController,
+              autofocus: true,
+              maxLines: null,
+              minLines: 1,
+              style: theme.textTheme.bodyMedium,
+              decoration: InputDecoration(
+                hintText: strings.editMessageHint,
+                filled: true,
+                fillColor: theme.colorScheme.surface,
+              ),
             ),
-            decoration: InputDecoration(
-              hintText: strings.editMessageHint,
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(16),
-                borderSide: BorderSide.none,
-              ),
-              filled: true,
-              fillColor: theme.colorScheme.surface,
-              contentPadding: const EdgeInsets.symmetric(
-                horizontal: 14,
-                vertical: 10,
-              ),
-              isDense: true,
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton(
+                  onPressed: _cancelEditing,
+                  style: TextButton.styleFrom(
+                    foregroundColor: theme.colorScheme.onSurfaceVariant,
+                  ),
+                  child: Text(strings.cancel),
+                ),
+                const SizedBox(width: 8),
+                FilledButton.icon(
+                  onPressed: _submitEdit,
+                  icon: const Icon(Icons.send_rounded, size: 16),
+                  label: Text(strings.send),
+                ),
+              ],
             ),
-          ),
-          const SizedBox(height: 8),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              TextButton(
-                onPressed: _cancelEditing,
-                style: TextButton.styleFrom(
-                  foregroundColor: theme.colorScheme.outline,
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                ),
-                child: Text(strings.cancel),
-              ),
-              const SizedBox(width: 8),
-              FilledButton.icon(
-                onPressed: _submitEdit,
-                icon: const Icon(Icons.send_rounded, size: 16),
-                label: Text(strings.send),
-                style: FilledButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -586,7 +419,7 @@ class _MessageBubbleState extends State<MessageBubble> {
         ),
         codeblockDecoration: BoxDecoration(
           color: textColor.withValues(alpha: 0.06),
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: AppShapes.cornersMedium,
         ),
         blockquoteDecoration: BoxDecoration(
           border: Border(
@@ -622,13 +455,6 @@ class _MessageBubbleState extends State<MessageBubble> {
         ? theme.colorScheme.onPrimary
         : theme.colorScheme.onSurface;
 
-    final bubbleRadius = BorderRadius.only(
-      topLeft: const Radius.circular(22),
-      topRight: const Radius.circular(22),
-      bottomLeft: Radius.circular(isUser ? 22 : 6),
-      bottomRight: Radius.circular(isUser ? 6 : 22),
-    );
-
     return GestureDetector(
       onSecondaryTapDown: (details) => _showContextMenu(context, details),
       onLongPressStart: (details) => _showContextMenu(
@@ -647,53 +473,56 @@ class _MessageBubbleState extends State<MessageBubble> {
               ? CrossAxisAlignment.end
               : CrossAxisAlignment.start,
           children: [
-            if (!isUser) _buildThinkingSection(theme),
-
+            if (!isUser)
+              ThinkingSection(
+                content: widget.thinkingContent ?? '',
+                isStreaming: widget.isStreaming,
+              ),
             if (_isEditing)
               _buildEditingView(theme)
             else
-              Container(
-                decoration: BoxDecoration(
-                  color: bubbleColor,
-                  borderRadius: bubbleRadius,
+              Material(
+                color: bubbleColor,
+                shape: AppShapes.bubble(mine: isUser),
+                clipBehavior: Clip.antiAlias,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 10,
+                  ),
+                  child: isUser
+                      ? SelectableText(
+                          widget.content,
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            color: textColor,
+                            height: 1.5,
+                          ),
+                        )
+                      : widget.content.isEmpty
+                      ? Text(
+                          widget.isStreaming
+                              ? strings.typing
+                              : strings.emptyReply,
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            color: textColor.withValues(alpha: 0.5),
+                            fontStyle: FontStyle.italic,
+                            height: 1.5,
+                          ),
+                        )
+                      // Re-parsing the full Markdown AST on every token delta is
+                      // quadratic for long replies. Streaming shows plain text;
+                      // the completed message is rendered as Markdown once.
+                      : widget.isStreaming
+                      ? SelectableText(
+                          widget.content,
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            color: textColor,
+                            height: 1.5,
+                          ),
+                        )
+                      : _buildMarkdown(context, theme, textColor, isUser),
                 ),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 14,
-                  vertical: 10,
-                ),
-                child: isUser
-                    ? SelectableText(
-                        widget.content,
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          color: textColor,
-                          height: 1.5,
-                        ),
-                      )
-                    : widget.content.isEmpty
-                    ? Text(
-                        widget.isStreaming
-                            ? strings.typing
-                            : strings.emptyReply,
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          color: textColor.withValues(alpha: 0.5),
-                          fontStyle: FontStyle.italic,
-                          height: 1.5,
-                        ),
-                      )
-                    // Re-parsing the full Markdown AST on every token delta is
-                    // quadratic for long replies. Streaming shows plain text;
-                    // the completed message is rendered as Markdown once.
-                    : widget.isStreaming
-                    ? SelectableText(
-                        widget.content,
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          color: textColor,
-                          height: 1.5,
-                        ),
-                      )
-                    : _buildMarkdown(context, theme, textColor, isUser),
               ),
-
             Padding(
               padding: const EdgeInsets.only(top: 4, left: 4, right: 4),
               child: Row(
@@ -702,15 +531,13 @@ class _MessageBubbleState extends State<MessageBubble> {
                   Text(
                     _formatTime(widget.timestamp),
                     style: theme.textTheme.labelSmall?.copyWith(
-                      color: theme.colorScheme.outline.withValues(alpha: 0.6),
-                      fontSize: 10,
+                      color: theme.colorScheme.onSurfaceVariant,
                     ),
                   ),
                   if (widget.isStreaming) ...[
                     const SizedBox(width: 6),
-                    SizedBox(
-                      width: 10,
-                      height: 10,
+                    SizedBox.square(
+                      dimension: 10,
                       child: CircularProgressIndicator(
                         strokeWidth: 1.5,
                         color: theme.colorScheme.primary,
@@ -720,7 +547,6 @@ class _MessageBubbleState extends State<MessageBubble> {
                 ],
               ),
             ),
-
             _buildActionBar(theme),
           ],
         ),
@@ -729,12 +555,13 @@ class _MessageBubbleState extends State<MessageBubble> {
   }
 }
 
+/// A compact chip for a message action.
+///
+/// It is a real [ActionChip] rather than a hand-built `InkWell` + `Container`:
+/// the Material 3 chip owns its outline, hover/pressed states, tap target and
+/// shape from the theme, so the action row stays consistent with every other
+/// chip in the app.
 class _ActionChip extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final VoidCallback onPressed;
-  final Color color;
-
   const _ActionChip({
     required this.icon,
     required this.label,
@@ -742,36 +569,20 @@ class _ActionChip extends StatelessWidget {
     required this.color,
   });
 
+  final IconData icon;
+  final String label;
+  final VoidCallback onPressed;
+  final Color color;
+
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onPressed,
-        borderRadius: BorderRadius.circular(16),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: color.withValues(alpha: 0.3), width: 1),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(icon, size: 14, color: color),
-              const SizedBox(width: 4),
-              Text(
-                label,
-                style: TextStyle(
-                  fontSize: 11,
-                  color: color,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
+    return ActionChip(
+      avatar: Icon(icon, size: 16, color: color),
+      label: Text(label, style: TextStyle(color: color)),
+      onPressed: onPressed,
+      visualDensity: VisualDensity.compact,
+      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
     );
   }
 }

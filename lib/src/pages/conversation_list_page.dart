@@ -1,7 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:talk2u/l10n/generated/app_localizations.dart';
 import 'package:talk2u/src/rust/api/data_models.dart';
+import 'package:talk2u/src/theme/app_shapes.dart';
 
+/// Conversation drawer: header, new-conversation action and the saved threads.
+///
+/// Every surface uses a named shape from [AppShapes]: the selected row, the
+/// dismiss background and the swipe action all share one silhouette, so a
+/// swipe reveals a shape that already matches the row instead of a generic
+/// rounded rectangle.
 class ConversationListPage extends StatelessWidget {
   final VoidCallback? onNewConversation;
   final ValueChanged<String>? onSelectConversation;
@@ -49,21 +56,19 @@ class ConversationListPage extends StatelessWidget {
                 size: 24,
               ),
               const SizedBox(width: 10),
-              Text(
-                strings.conversations,
-                style: theme.textTheme.titleLarge?.copyWith(
-                  fontWeight: FontWeight.w600,
+              Expanded(
+                child: Text(
+                  strings.conversations,
+                  style: theme.textTheme.titleLarge,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
-              const Spacer(),
+              const SizedBox(width: 8),
               FilledButton.tonalIcon(
                 onPressed: onNewConversation,
                 icon: const Icon(Icons.add_rounded, size: 18),
                 label: Text(strings.newConversation),
-                style: FilledButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  minimumSize: const Size(0, 36),
-                ),
               ),
             ],
           ),
@@ -80,29 +85,36 @@ class ConversationListPage extends StatelessWidget {
 
   Widget _buildEmptyState(ThemeData theme, AppLocalizations strings) {
     return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            Icons.chat_bubble_outline_rounded,
-            size: 56,
-            color: theme.colorScheme.outline.withValues(alpha: 0.4),
-          ),
-          const SizedBox(height: 12),
-          Text(
-            strings.noConversations,
-            style: theme.textTheme.bodyLarge?.copyWith(
-              color: theme.colorScheme.outline,
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 72,
+              height: 72,
+              decoration: ShapeDecoration(
+                color: theme.colorScheme.secondaryContainer,
+                shape: AppShapes.field,
+              ),
+              child: Icon(
+                Icons.chat_bubble_outline_rounded,
+                size: 32,
+                color: theme.colorScheme.onSecondaryContainer,
+              ),
             ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            strings.startConversationHint,
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: theme.colorScheme.outline.withValues(alpha: 0.7),
+            const SizedBox(height: 16),
+            Text(strings.noConversations, style: theme.textTheme.titleSmall),
+            const SizedBox(height: 4),
+            Text(
+              strings.startConversationHint,
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -112,23 +124,23 @@ class ConversationListPage extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 4),
       itemCount: conversations.length,
       itemBuilder: (context, index) {
-        final conv = conversations[index];
-        final title = conv.title.isEmpty
+        final conversation = conversations[index];
+        final title = conversation.title.isEmpty
             ? strings.untitledConversation
-            : conv.title;
-        final isSelected = conv.id == currentConversationId;
+            : conversation.title;
+        final isSelected = conversation.id == currentConversationId;
 
         return Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
           child: Dismissible(
-            key: Key(conv.id),
+            key: Key(conversation.id),
             direction: DismissDirection.endToStart,
             background: Container(
               alignment: Alignment.centerRight,
               padding: const EdgeInsets.only(right: 20),
-              decoration: BoxDecoration(
+              decoration: ShapeDecoration(
                 color: theme.colorScheme.error,
-                borderRadius: BorderRadius.circular(12),
+                shape: AppShapes.field,
               ),
               child: Icon(
                 Icons.delete_rounded,
@@ -150,6 +162,7 @@ class ConversationListPage extends StatelessWidget {
                       onPressed: () => Navigator.pop(ctx, true),
                       style: FilledButton.styleFrom(
                         backgroundColor: theme.colorScheme.error,
+                        foregroundColor: theme.colorScheme.onError,
                       ),
                       child: Text(strings.delete),
                     ),
@@ -157,18 +170,18 @@ class ConversationListPage extends StatelessWidget {
                 ),
               );
               if (result == true) {
-                onDeleteConversation?.call(conv.id);
+                onDeleteConversation?.call(conversation.id);
               }
               return result ?? false;
             },
             child: Material(
               color: isSelected
-                  ? theme.colorScheme.primaryContainer.withValues(alpha: 0.5)
+                  ? theme.colorScheme.secondaryContainer
                   : Colors.transparent,
-              borderRadius: BorderRadius.circular(12),
+              shape: AppShapes.field,
+              clipBehavior: Clip.antiAlias,
               child: InkWell(
-                borderRadius: BorderRadius.circular(12),
-                onTap: () => onSelectConversation?.call(conv.id),
+                onTap: () => onSelectConversation?.call(conversation.id),
                 child: Padding(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 12,
@@ -190,14 +203,14 @@ class ConversationListPage extends StatelessWidget {
                                     : FontWeight.w500,
                               ),
                             ),
-                            if (conv.lastMessagePreview.isNotEmpty) ...[
+                            if (conversation.lastMessagePreview.isNotEmpty) ...[
                               const SizedBox(height: 2),
                               Text(
-                                conv.lastMessagePreview,
+                                conversation.lastMessagePreview,
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: theme.textTheme.bodySmall?.copyWith(
-                                  color: theme.colorScheme.outline,
+                                  color: theme.colorScheme.onSurfaceVariant,
                                 ),
                               ),
                             ],
@@ -206,11 +219,9 @@ class ConversationListPage extends StatelessWidget {
                       ),
                       const SizedBox(width: 8),
                       Text(
-                        _formatTime(conv.updatedAt.toInt(), strings),
+                        _formatTime(conversation.updatedAt.toInt(), strings),
                         style: theme.textTheme.labelSmall?.copyWith(
-                          color: theme.colorScheme.outline.withValues(
-                            alpha: 0.7,
-                          ),
+                          color: theme.colorScheme.onSurfaceVariant,
                         ),
                       ),
                     ],

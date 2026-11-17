@@ -22,6 +22,7 @@ where the bytes are.
 | `courierust` | Outbound HTTP/TLS + SSE body streaming | A retry never re-sends a request that already produced bytes |
 | `rustglm` | The Zhipu **contract**: model capability registry, `thinking`/chunk wire types | A parameter the vendor rejects cannot be constructed, because the app does not hand-write the object |
 | `rustbinary` | Conversation envelope on disk | A payload cannot be decoded beyond its declared bound |
+| `miniz_oxide` | Optional zlib envelope for long conversations | Expansion is capped by both the declared size and a 64 MiB hard limit |
 | `tzcraft` | Instants | Time is one integer type everywhere, and comparisons cannot mix instant with duration |
 | `recurse-x` | Name resolution as a diagnostic | A failed probe is reported as unknown, never as "endpoint is down" |
 | `nextjson` | Serialisation derives | One derive family for both the file envelope and the settings blobs |
@@ -84,23 +85,40 @@ Two details matter in production:
 Files are `T2UB`:
 
 ```
+version 1 (legacy, still read):
 offset  size  field
 0       4     magic "T2UB"
-4       2     format version (u16, little endian)
-6       4     payload length (u32, little endian)
-10      n     rustbinary-encoded Conversation
+4       1     format version = 1
+5       n     rustbinary-encoded Conversation
+
+version 2 (current, written when it is actually smaller):
+offset  size  field
+0       4     magic "T2UB"
+4       1     format version = 2
+5       8     uncompressed payload length (u64, little endian)
+13      n     zlib stream of the rustbinary-encoded Conversation
 ```
 
-* The length prefix is checked against the actual file size before decoding, so
-  a truncated or hostile file fails as a typed error instead of allocating.
+* `encode` picks v1 or v2 per document: compression is kept only when the zlib
+  frame is smaller than the raw payload. Small one-message conversations stay
+  uncompressed.
+* The declared length is checked before decompression and again after it. A
+  value above 64 MiB is rejected before allocating, and
+  `decompress_to_vec_zlib_with_limit` enforces the same ceiling, so a compressed
+  bomb cannot expand into an unbounded buffer.
 * Writes are write-to-temp + `rename`, so a process kill mid-write leaves the
   previous conversation intact rather than a half-file.
-* `.msgpack` and `.json` files from earlier builds are still read. Migration is
-  read-only in the sense that matters: the legacy file is decoded, re-encoded as
-  `T2UB`, and the new file is renamed into place; nothing is deleted until the
-  rename succeeds.
-* `rmp-serde` remains solely for that decoder. It is listed in `Cargo.toml` with
-  that comment so nobody has to rediscover it.
+* `.msgpack` and `.json` files from earlier builds are still read. The legacy
+  file is decoded, re-encoded as `T2UB`, and the new file is renamed into place;
+  nothing is deleted until the rename succeeds.
+* A `.t2ui` sidecar holds the summary shown by the conversation list (title,
+  last-message preview, model, timestamp). It is derived data: a missing or
+  corrupt sidecar falls back to a full decode and is rebuilt on the next write.
+  Deleting a conversation removes the sidecar too.
+* `rmp-serde` remains solely for the legacy decoder. It is listed in
+  `Cargo.toml` with that comment so nobody has to rediscover it.
+* `miniz_oxide` is the only compression dependency; it is pure Rust, so the
+  Android NDK build needs no extra C toolchain.
 
 `storage_path.rs` validates conversation ids against path traversal before they
 are joined into a path. Ids arrive from Dart, so they are untrusted input.
@@ -318,12 +336,12 @@ long main-thread stall cannot turn the queue into a memory problem. The existing
 
 ```text
 cd rust
-rustup run 1.99.0 cargo test --lib          # 158 pass, 2 opt-in network tests
+rustup run 1.99.0 cargo test --lib          # 199 pass, 2 opt-in network tests
 rustup run 1.99.0 cargo check --lib         # no warnings
 
 cd ..
 flutter analyze                              # No issues found
-flutter test                                 # 83 tests
+flutter test                                 # 201 tests
 flutter build apk --release --target-platform android-arm64
 adb install -r build/app/outputs/flutter-apk/app-release.apk
 ```
@@ -347,6 +365,53 @@ The second needs outbound UDP/53 to the root servers and legitimately fails on
 networks that drop it — which is exactly the degradation the diagnosis reports as
 `unverified` rather than as a hijack.
 
+## On-device LLM bridge (`chatml.rs`, `gguf.rs`, `android_bridge.rs`)
+
+Not everything belongs behind flutter_rust_bridge. Two hot operations run in the
+opposite direction — Kotlin calls Rust synchronously inside a transaction it
+already owns — so they are exported as JNI symbols instead of async bridge
+functions:
+
+| Symbol | Called from | Why Rust |
+| --- | --- | --- |
+| `buildChatMlPrompt` | `OnDeviceLlmRuntime.generate`, once per turn | One ChatML renderer serves the NPU bundle and the GGUF; the byte budget is enforced where the bytes are appended |
+| `inspectGguf` | `OnDeviceArtifactStore.installGguf`, before the 3 GB file is swapped in | The header walk is bounded and constant-memory, so a corrupt file cannot allocate its way to an OOM kill |
+| `containsControlToken` | after every reply | The rejection rule lives next to the token definitions |
+
+`android_bridge.rs` is `#[cfg(target_os = "android")]` and reaches the JVM through
+the `jni` crate pinned in `Cargo.toml`. Every entry point returns a JSON envelope
+(`{"ok":true,...}` / `{"ok":false,"error":"..."}`), so a rejected file is data,
+not a Java exception unwinding through an import; `EnvUnowned::with_env` wraps
+the closure in `catch_unwind`, so a panic cannot cross into the JVM either.
+
+`chatml.rs` strips every `<|...|>` span rather than the three tokens it names:
+Qwen3 also defines `<|tool_call|>`, `<|repo_name|>` and friends, and a whitelist
+would need updating whenever upstream adds one. The prompt is capped at 1 MiB and
+the message list at 512 turns.
+
+`gguf.rs` reads version 2 and 3 containers with explicit bounds: 64 MiB of header,
+65 536 KV pairs, 8 MiB per string, 4 M array items, 1 M tensors. Strings are
+length-checked before allocating and unknown values are skipped through a fixed
+8 KiB scratch buffer, so memory use is independent of what the file claims. The
+importer requires `general.architecture == "qwen3"`, because a GGUF that loads and
+then answers garbage is worse than a rejected import.
+
+Both modules are covered by host tests (`cargo test --lib chatml:: gguf::`); the
+JNI layer is type-checked with
+`cargo check --target aarch64-linux-android --lib`.
+
+### Dependencies: one feature that does not exist
+
+`rustglm 1.2.0` moved to `nextjson ^0.1.5`, which is what the rest of the graph
+already wanted (`rustbinary 0.1.10`, `recurse-x 0.2.6`). That retired the earlier
+conflict where `rustglm 1.1.0` derived `Eq` on a struct containing
+`nextjson::Map` and therefore could not compile against 0.1.5.
+
+One correction remains and it is unavoidable: `nextjson 0.1.5` has **no `std`
+feature** (only `derive` and `simd`), so a manifest asking for
+`["std", "derive"]` fails resolution. It is `["derive"]` here. Every other pin is
+exactly as specified.
+
 ## Device verification (PLK110 / SM8850 / Android 16)
 
 Measured on the release APK, not asserted from the design:
@@ -356,6 +421,28 @@ Measured on the release APK, not asserted from the design:
 | QNN runtime | `runtime={bundled=true, ready=true, gpuReady=false, architecture=v81, pluginRegistered=true, epDeviceCount=1, ortVersion=1.26.0, qnnPluginVersion=2.4.0, qairtSdkVersion=2.48.0, fastRpcDevices=[/dev/fastrpc-cdsp]}` |
 | Local LLM | `activeBackend=geniex-qairt-npu, activeBackendVerified=true, computeUnit=npu`, measured `prefillTokensPerSecond=171.2`, `decodeTokensPerSecond=8.0` |
 | MOSS TTS | `synthesis provider=QNN_HTP(prefill,decode)+ORT_CPU(sampler,codec)`, `frames=31 elapsedMs=3441 prefill=77 decode=2356 codec=522 htp_busy=462` |
+
+### MOSS sampler / codec acceleration boundary
+
+The QNN Plugin EP is the translation layer between ONNX and HTP, but it can only
+claim a graph whose operators and shapes it supports. The shipped MOSS sampler
+has 32 `CumulativeSum` nodes and a dynamic rotary-embedding `Reshape`; QAIRT 2.48
+V81 rejects both. Replacing every `CumulativeSum` with a triangular `MatMul` and
+forcing full HTP assignment still leaves nodes assigned to the default CPU EP, and
+allowing CPU fallback fails at `/rotary_emb/Reshape` (`{1,1,32,2}` requested as
+`{1,1,32}`). That is why the sampler is not silently labelled NPU.
+
+There is no GPU shortcut in this build. The APK packages `libggml-opencl.so` for
+llama.cpp, not an ONNX Runtime OpenCL EP, and no `libQnnGpu.so`; `ggml-opencl`
+cannot execute an ONNX graph. A native C++/Rust sampler would still be CPU work,
+not GPU/NPU. A real GPU or NPU sampler requires re-exporting the local
+transformer with static shapes and a QNN-supported top-k path (or porting it to a
+GGML/OpenCL graph), which is a model-conversion task, not a runtime flag.
+
+The codec has a QNN graph and it does execute, but the PLK110 output accumulates
+hoarseness/noise across frames relative to the CPU codec. The production default
+therefore keeps the codec on ORT CPU; the QNN codec path is not used just to make
+the provider badge look better.
 | SenseVoice | loads a QNN context binary with the plugin, then transcribes 10 s windows; the window count and audio length are returned from the native side |
 | Echo cancellation | `Talk2U/FullDuplex: audio session=5769 aec=true ns=true agc=false` ? full duplex enabled |
 | Live2D | Impeller/Vulkan (`libvulkan.adreno.so`, `Application Name = Talk2U Live2D`) plus the native GLES renderer |

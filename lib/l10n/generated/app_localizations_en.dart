@@ -62,12 +62,12 @@ class AppLocalizationsEn extends AppLocalizations {
       'Could not check the Qwen3 QAIRT/NPU model state. Try again.';
 
   @override
-  String get qwenDownloadFailed =>
-      'The Qwen3 download was interrupted. Partial data is kept; tap download to resume.';
+  String get qwenImportFailed =>
+      'The on-device model import failed. The previously installed model is unchanged.';
 
   @override
-  String get qwenDownloadPaused =>
-      'Download paused. Partial data is kept; tap download to continue.';
+  String get qwenImportCancelled =>
+      'The on-device model import was cancelled. The previously installed model is unchanged.';
 
   @override
   String get qwenLoadFailed =>
@@ -237,6 +237,10 @@ class AppLocalizationsEn extends AppLocalizations {
   String get live2dDiagnostics => 'Live2D performance';
 
   @override
+  String get live2dDiagnosticsAutoRefresh =>
+      'Refreshes every second; no need to reopen';
+
+  @override
   String get renderBackend => 'Actual backend';
 
   @override
@@ -358,10 +362,66 @@ class AppLocalizationsEn extends AppLocalizations {
   String get deleteModel => 'Delete model';
 
   @override
-  String get installQwen => 'Download Qwen3-4B-Instruct-2507 model';
+  String get installQwen => 'Install on-device model';
 
   @override
-  String get cancelDownload => 'Cancel download';
+  String get qwenPresetHub => 'Qualcomm AI Hub bundle available';
+
+  @override
+  String get qwenPresetImportOnly =>
+      'No published bundle; import QAIRT or Q4_0/Q8_0 GGUF';
+
+  @override
+  String get qwenPresetInstalled => 'Installed';
+
+  @override
+  String get cancelDownload => 'Cancel import';
+
+  @override
+  String get importQwenBundle => 'Import QAIRT bundle (NPU)';
+
+  @override
+  String get importQwenGguf => 'Import GGUF (NPU)';
+
+  @override
+  String get qwenAccelNpu => 'Qualcomm QNN HTP/NPU (verified)';
+
+  @override
+  String get qwenAccelGpu => 'Adreno GPU via llama.cpp OpenCL (verified)';
+
+  @override
+  String get qwenAccelCpu => 'CPU — no accelerator for this artifact';
+
+  @override
+  String get qwenAccelPending =>
+      'Accelerator loaded; verified after the first completed reply';
+
+  @override
+  String get qwenAccelNotLoaded =>
+      'Model installed; the accelerator is not loaded yet';
+
+  @override
+  String get qwenImportedNotDetected =>
+      'The model was copied but the runtime does not detect it';
+
+  @override
+  String get qwenImportCancelledDetail =>
+      'Import cancelled. The previously installed model is unchanged.';
+
+  @override
+  String qwenImportFailedDetail(String raw) {
+    return '$raw\nNothing was replaced.';
+  }
+
+  @override
+  String qwenGgufQuantizationUnsupported(String quantization) {
+    return '$quantization leaves tensors on the CPU. Import a Q4_0 or Q8_0 GGUF instead; the current file was not replaced.';
+  }
+
+  @override
+  String qwenInstallFirst(String model) {
+    return 'Import the $model model first';
+  }
 
   @override
   String get deleteSenseVoice => 'Delete SenseVoice';
@@ -407,7 +467,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get qwenInstallHint =>
-      'No API required; GenieX downloads the chipset-matched QAIRT model bundle';
+      'Import a QAIRT bundle, or a GGUF. GGUF runs on the Hexagon NPU first; if the NPU session cannot start, the app falls back to CPU and says so';
 
   @override
   String qwenModelReady(String license, String size) {
@@ -416,7 +476,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String qwenModelPackage(String license) {
-    return '$license · QAIRT · Qualcomm QNN HTP/NPU';
+    return '$license · abliterated Qwen3-4B · QAIRT (NPU) or GGUF (NPU/GPU)';
   }
 
   @override
@@ -903,6 +963,13 @@ class AppLocalizationsEn extends AppLocalizations {
   String get readLastReply => 'Read the last reply on device';
 
   @override
+  String get autoReadReplies => 'Auto-read replies';
+
+  @override
+  String get autoReadRepliesSubtitle =>
+      'Synthesise each sentence while the reply is still streaming';
+
+  @override
   String get noOfflineTtsPack => 'No on-device TTS voice pack';
 
   @override
@@ -1207,37 +1274,19 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
-  String get qwenDownloadedNotDetected =>
-      'The Qwen3 QAIRT/NPU model was not detected after the download finished';
-
-  @override
-  String get qwenDownloadPausedDetail =>
-      'Download paused and the resume point was kept. Tap download to continue.';
-
-  @override
-  String qwenDownloadFailedDetail(String raw) {
-    return '$raw\nDownloaded bytes were kept. Tap download to resume from the breakpoint.';
-  }
-
-  @override
   String get waitForCurrentReply =>
       'Wait for the current on-device reply to finish';
-
-  @override
-  String qwenDownloadFirst(String model) {
-    return 'Download the $model QAIRT/NPU model first';
-  }
 
   @override
   String get geniexLoadResultMissing => 'GenieX returned no model load result';
 
   @override
   String get qwenBackendRejected =>
-      'Refusing a Qwen3 execution backend that is not QAIRT/NPU';
+      'Refusing an on-device execution backend that reported no accelerator';
 
   @override
   String qwenLoadFailedDetail(String error) {
-    return 'Qwen3 QAIRT/NPU model load failed: $error';
+    return 'Qwen3 on-device model load failed: $error';
   }
 
   @override
@@ -1327,7 +1376,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get qwenModelMissingHint =>
-      'Install the Qwen3-4B-Instruct-2507 QAIRT/NPU model in Models & API first';
+      'Install the abliterated Qwen3-4B model (QAIRT bundle or GGUF) in Models & API first';
 
   @override
   String apiKeyMissingHint(String provider) {

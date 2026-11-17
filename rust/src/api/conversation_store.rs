@@ -43,6 +43,58 @@ impl ConversationStore {
         Ok(self.conversations_dir()?.join(format!("{}.t2ub", id)))
     }
 
+    /// Tiny derived index next to the conversation.
+    ///
+    /// Listing a long chat must not decompress every message just to render a
+    /// title and a 50-character preview. The cache is disposable: a missing or
+    /// corrupt sidecar falls back to a full decode and is rewritten.
+    fn summary_path(&self, id: &str) -> Result<PathBuf, ChatError> {
+        super::storage_path::validate_storage_id(id)?;
+        Ok(self.conversations_dir()?.join(format!("{}.t2ui", id)))
+    }
+
+    fn summary_of(conversation: &Conversation) -> ConversationSummary {
+        ConversationSummary {
+            id: conversation.id.clone(),
+            title: conversation.title.clone(),
+            last_message_preview: conversation
+                .messages
+                .last()
+                .map(|message| message.content.chars().take(50).collect())
+                .unwrap_or_default(),
+            model: conversation.model.clone(),
+            updated_at: conversation.updated_at,
+        }
+    }
+
+    fn write_summary(&self, conversation: &Conversation) -> Result<(), ChatError> {
+        let path = self.summary_path(&conversation.id)?;
+        let data = serde_json::to_vec(&Self::summary_of(conversation)).map_err(|error| {
+            ChatError::StorageError {
+                message: format!("Failed to encode conversation summary: {error}"),
+            }
+        })?;
+        let staging = path.with_extension("t2ui.tmp");
+        fs::write(&staging, data).map_err(|error| ChatError::StorageError {
+            message: format!("Failed to write conversation summary: {error}"),
+        })?;
+        fs::rename(&staging, &path).map_err(|error| ChatError::StorageError {
+            message: format!("Failed to commit conversation summary: {error}"),
+        })
+    }
+
+    fn read_summary(&self, id: &str) -> Option<ConversationSummary> {
+        const MAX_SUMMARY_BYTES: u64 = 64 * 1024;
+        let path = self.summary_path(id).ok()?;
+        let length = fs::metadata(&path).ok()?.len();
+        if length == 0 || length > MAX_SUMMARY_BYTES {
+            return None;
+        }
+        let data = fs::read(path).ok()?;
+        let summary: ConversationSummary = serde_json::from_slice(&data).ok()?;
+        (summary.id == id).then_some(summary)
+    }
+
     /// Reads a conversation, migrating legacy encodings in place.
     ///
     /// New writes always use the rustbinary envelope. Files from earlier
@@ -53,9 +105,26 @@ impl ConversationStore {
         let dir = self.conversations_dir()?;
         let binary = dir.join(format!("{id}.t2ub"));
         if binary.exists() {
+            let length = fs::metadata(&binary)
+                .map_err(|error| ChatError::StorageError {
+                    message: format!("Failed to stat conversation file '{id}': {error}"),
+                })?
+                .len();
+            if length > super::storage_codec::MAX_DOCUMENT_BYTES {
+                return Err(ChatError::StorageError {
+                    message: format!(
+                        "Conversation '{id}' is {length} bytes, above the supported limit"
+                    ),
+                });
+            }
             let bytes = fs::read(&binary).map_err(|error| ChatError::StorageError {
                 message: format!("Failed to read conversation file '{id}': {error}"),
             })?;
+            if bytes.len() as u64 > super::storage_codec::MAX_DOCUMENT_BYTES {
+                return Err(ChatError::StorageError {
+                    message: format!("Conversation '{id}' grew above the supported limit"),
+                });
+            }
             return super::storage_codec::decode(&bytes);
         }
 
@@ -123,7 +192,11 @@ impl ConversationStore {
         })?;
         fs::rename(&staging, &path).map_err(|error| ChatError::StorageError {
             message: format!("Failed to commit conversation file: {error}"),
-        })
+        })?;
+        // The sidecar is a cache. A failure here must not report the committed
+        // conversation as lost; the next list call rebuilds it from the t2ub.
+        let _ = self.write_summary(conversation);
+        Ok(())
     }
 
     pub fn load_conversation(&self, id: &str) -> Result<Conversation, ChatError> {
@@ -162,35 +235,35 @@ impl ConversationStore {
                 let path = entry.path();
                 let ext = path.extension().and_then(|e| e.to_str())?;
 
-                let conv: Conversation = match ext {
+                match ext {
                     "t2ub" => {
+                        let id = path.file_stem()?.to_str()?;
+                        if let Some(summary) = self.read_summary(id) {
+                            return Some(summary);
+                        }
+                        if fs::metadata(&path).ok()?.len()
+                            > super::storage_codec::MAX_DOCUMENT_BYTES
+                        {
+                            return None;
+                        }
                         let data = fs::read(&path).ok()?;
-                        super::storage_codec::decode(&data).ok()?
+                        let conversation: Conversation =
+                            super::storage_codec::decode(&data).ok()?;
+                        let _ = self.write_summary(&conversation);
+                        Some(Self::summary_of(&conversation))
                     }
                     "msgpack" => {
                         let data = fs::read(&path).ok()?;
-                        rmp_serde::from_slice(&data).ok()?
+                        let conversation: Conversation = rmp_serde::from_slice(&data).ok()?;
+                        Some(Self::summary_of(&conversation))
                     }
                     "json" => {
                         let json = fs::read_to_string(&path).ok()?;
-                        serde_json::from_str(&json).ok()?
+                        let conversation: Conversation = serde_json::from_str(&json).ok()?;
+                        Some(Self::summary_of(&conversation))
                     }
-                    _ => return None,
-                };
-
-                let last_message_preview = conv
-                    .messages
-                    .last()
-                    .map(|m| m.content.chars().take(50).collect::<String>())
-                    .unwrap_or_default();
-
-                Some(ConversationSummary {
-                    id: conv.id,
-                    title: conv.title,
-                    last_message_preview,
-                    model: conv.model,
-                    updated_at: conv.updated_at,
-                })
+                    _ => None,
+                }
             })
             .collect();
 
@@ -206,6 +279,8 @@ impl ConversationStore {
             format!("{id}.json"),
             format!("{id}.msgpack"),
             format!("{id}.t2ub.tmp"),
+            format!("{id}.t2ui"),
+            format!("{id}.t2ui.tmp"),
         ] {
             let _ = fs::remove_file(dir.join(name));
         }
@@ -403,6 +478,38 @@ mod tests {
     }
 
     #[test]
+    fn summary_cache_lists_without_decoding_the_conversation() {
+        let (_dir, store, conversation) = fixture();
+        store
+            .add_user_turn(
+                &conversation.id,
+                message(MessageRole::User, "缓存里的最后一句"),
+            )
+            .unwrap();
+        // Corrupting the main document proves the list path used the sidecar,
+        // not a full decode that would have failed and dropped the row.
+        fs::write(
+            store.conversation_path(&conversation.id).unwrap(),
+            b"broken",
+        )
+        .unwrap();
+        let summaries = store.list_conversations();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].last_message_preview, "缓存里的最后一句");
+        assert!(store.load_conversation(&conversation.id).is_err());
+    }
+
+    #[test]
+    fn deleting_a_conversation_removes_its_summary_cache() {
+        let (_dir, store, conversation) = fixture();
+        let summary = store.summary_path(&conversation.id).unwrap();
+        assert!(summary.exists());
+        store.delete_conversation(&conversation.id).unwrap();
+        assert!(!summary.exists());
+        assert!(store.list_conversations().is_empty());
+    }
+
+    #[test]
     fn concurrent_store_instances_preserve_every_user_turn() {
         let (_dir, store, conversation) = fixture();
         let barrier = Arc::new(Barrier::new(8));
@@ -445,9 +552,11 @@ mod tests {
         store
             .add_user_turn(&conversation.id, message(MessageRole::User, "second"))
             .unwrap();
-        assert!(!store
-            .commit_reply(&snapshot, message(MessageRole::Assistant, "old answer"))
-            .unwrap());
+        assert!(
+            !store
+                .commit_reply(&snapshot, message(MessageRole::Assistant, "old answer"))
+                .unwrap()
+        );
         let loaded = store.load_conversation(&conversation.id).unwrap();
         assert_eq!(loaded.messages.len(), 2);
         assert_eq!(loaded.messages.last().unwrap().content, "second");
@@ -503,9 +612,11 @@ mod tests {
         let system = message(MessageRole::System, "durable setting");
         store.add_message(&conversation.id, system.clone()).unwrap();
         let snapshot = store.load_conversation(&conversation.id).unwrap();
-        assert!(store
-            .commit_reply(&snapshot, message(MessageRole::Assistant, "replacement"))
-            .unwrap());
+        assert!(
+            store
+                .commit_reply(&snapshot, message(MessageRole::Assistant, "replacement"))
+                .unwrap()
+        );
         let loaded = store.load_conversation(&conversation.id).unwrap();
         assert_eq!(loaded.messages.len(), 3);
         assert_eq!(loaded.messages[1].id, previous.id);
@@ -528,9 +639,11 @@ mod tests {
         store
             .delete_message(&conversation.id, &previous.id)
             .unwrap();
-        assert!(!store
-            .commit_reply(&snapshot, message(MessageRole::Assistant, "replacement"))
-            .unwrap());
+        assert!(
+            !store
+                .commit_reply(&snapshot, message(MessageRole::Assistant, "replacement"))
+                .unwrap()
+        );
         assert_eq!(
             store
                 .load_conversation(&conversation.id)
@@ -554,9 +667,11 @@ mod tests {
                 "changed question",
             )
             .unwrap();
-        assert!(!store
-            .commit_reply(&snapshot, message(MessageRole::Assistant, "stale answer"))
-            .unwrap());
+        assert!(
+            !store
+                .commit_reply(&snapshot, message(MessageRole::Assistant, "stale answer"))
+                .unwrap()
+        );
         let snapshot = store.load_conversation(&conversation.id).unwrap();
         store
             .update_conversation(&conversation.id, |conv| {
@@ -564,9 +679,11 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        assert!(store
-            .commit_reply(&snapshot, message(MessageRole::Assistant, "fresh answer"))
-            .unwrap());
+        assert!(
+            store
+                .commit_reply(&snapshot, message(MessageRole::Assistant, "fresh answer"))
+                .unwrap()
+        );
         assert_eq!(
             store.load_conversation(&conversation.id).unwrap().title,
             "renamed"
@@ -590,9 +707,11 @@ mod tests {
             vec![second.id]
         );
         assert_eq!(store.get_turn_count(&conversation.id).unwrap(), 1);
-        assert!(!store
-            .commit_reply(&snapshot, message(MessageRole::Assistant, "old answer"))
-            .unwrap());
+        assert!(
+            !store
+                .commit_reply(&snapshot, message(MessageRole::Assistant, "old answer"))
+                .unwrap()
+        );
     }
 
     #[test]
@@ -602,9 +721,11 @@ mod tests {
             .add_user_turn(&conversation.id, message(MessageRole::User, "question"))
             .unwrap();
         store.delete_conversation(&conversation.id).unwrap();
-        assert!(store
-            .commit_reply(&snapshot, message(MessageRole::Assistant, "answer"))
-            .is_err());
+        assert!(
+            store
+                .commit_reply(&snapshot, message(MessageRole::Assistant, "answer"))
+                .is_err()
+        );
         assert!(store.load_conversation(&conversation.id).is_err());
     }
 

@@ -347,8 +347,10 @@ class ModelStore(private val context: Context) {
 
     private fun normalizeProviderPlan(manifest: JSONObject) {
         // The reference packager historically declared the codec as QNN_HTP,
-        // although QAIRT 2.48 v81 rejects that graph. Persist the execution
-        // plan actually enforced by MossTtsQnnSession.
+        // but the shipped QNN codec graph is not numerically equivalent to the
+        // CPU codec and produces progressive hoarseness. Persist the plan the
+        // runtime actually enforces: prefill/decode on HTP, sampler/codec on the
+        // ORT CPU EP.
         manifest.getJSONObject("providerPlan").put("codec", "ORT_CPU")
     }
 

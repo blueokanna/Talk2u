@@ -25,6 +25,23 @@ abstract interface class CallSpeechPort {
   bool isSelfEcho(String transcript);
 }
 
+/// One live TTS sink for an assistant reply that is still being generated.
+///
+/// The call state machine feeds raw model deltas through [append] and closes
+/// the reply with [finish]. [finish] resolves after the final audio chunk has
+/// played, so the microphone is only reopened when the voice is actually done.
+abstract interface class StreamingReplySpeech {
+  void append(String text);
+  Future<void> finish(String fullReply);
+  Future<void> cancel();
+}
+
+/// Optional capability implemented by [CallSpeechPort] implementations that
+/// can synthesise while the model is still generating.
+abstract interface class StreamingCallSpeechPort {
+  StreamingReplySpeech beginStreamingSpeech();
+}
+
 /// Owns the listen → generate → speak cycle. Acoustic interruption is enabled
 /// only after the running capture source confirms its hardware echo canceller.
 class CallSession extends ChangeNotifier {
@@ -64,6 +81,8 @@ class CallSession extends ChangeNotifier {
   String? _lastError;
   int _bargeInCount = 0;
   DateTime? _dispatchGraceUntil;
+  StreamingReplySpeech? _streamingSpeech;
+  Future<void>? _streamingCompletion;
 
   CallPhase get phase => _phase;
   bool get active => _phase != CallPhase.idle && _phase != CallPhase.halted;
@@ -142,6 +161,7 @@ class CallSession extends ChangeNotifier {
     _transcriptSubscription = null;
     _energySubscription = null;
     _gate.reset();
+    await _cancelStreamingSpeech();
     try {
       await _onStopGeneration();
     } on Object catch (_) {
@@ -188,6 +208,7 @@ class CallSession extends ChangeNotifier {
     _gate.reset();
     _dispatchGraceUntil = null;
     _microphonePaused = false;
+    await _cancelStreamingSpeech();
     try {
       await _port.stopSpeaking();
     } on Object catch (error) {
@@ -202,20 +223,127 @@ class CallSession extends ChangeNotifier {
     if (_current(generation)) await _listen();
   }
 
-  Future<void> onResponseCompleted(String reply) async {
+  /// Feeds one generated delta into the live TTS sink.
+  ///
+  /// The first delta starts the synthesis stream immediately; the audio for the
+  /// first complete sentence therefore overlaps with the remaining generation.
+  /// Ports without [StreamingCallSpeechPort] keep the old behaviour: the whole
+  /// reply is spoken once [onResponseCompleted] arrives.
+  void onResponseDelta(String delta) {
     if (!active ||
+        _disposed ||
         !_acceptResponses ||
         _interruptOperation != null ||
-        _phase == CallPhase.speaking) {
+        delta.isEmpty) {
       return;
     }
+    if (_phase != CallPhase.thinking && _phase != CallPhase.speaking) return;
+    final Object port = _port;
+    if (port is! StreamingCallSpeechPort) return;
+    var speech = _streamingSpeech;
+    if (speech == null) {
+      final created = port.beginStreamingSpeech();
+      speech = created;
+      _streamingSpeech = created;
+      _setPhase(CallPhase.speaking);
+      if (!acousticBargeIn && _port.listening) {
+        unawaited(_port.stopListening());
+      }
+    }
+    speech.append(delta);
+  }
+
+  /// Discards speech from a provider attempt that is being retried.
+  Future<void> onResponseReset() async {
+    if (!active || _disposed) return;
+    final speech = _streamingSpeech;
+    _streamingSpeech = null;
+    final pending = _streamingCompletion;
+    _streamingCompletion = null;
+    if (speech != null) {
+      try {
+        await speech.cancel();
+      } on Object catch (error) {
+        if (!_disposed) _lastError = error.toString();
+      }
+    }
+    if (pending != null) {
+      try {
+        await pending;
+      } on Object catch (_) {
+        // The reset already replaced this attempt.
+      }
+    }
+    if (active && _phase == CallPhase.speaking) {
+      _setPhase(CallPhase.thinking);
+    }
+  }
+
+  /// Closes the TTS sink as soon as the provider reports end-of-stream.
+  ///
+  /// This is intentionally separate from [onResponseCompleted]: persistence
+  /// and conversation reload can take a few hundred milliseconds, but the last
+  /// sentence must not wait for them.
+  Future<void> onResponseStreamDone(String fullReply) async {
+    if (!active || _disposed) return;
+    final speech = _streamingSpeech;
+    if (speech == null) return;
+    _streamingSpeech = null;
+    if (fullReply.trim().isEmpty) {
+      await speech.cancel();
+      return;
+    }
+    final completion = speech.finish(fullReply);
+    _streamingCompletion = completion;
+    try {
+      await completion;
+    } on Object catch (error) {
+      if (!_disposed) _lastError = error.toString();
+    }
+  }
+
+  Future<void> onResponseCompleted(String reply) async {
+    if (!active || !_acceptResponses || _interruptOperation != null) return;
+    final generation = _generation;
+    final streaming = _streamingSpeech;
+    _streamingSpeech = null;
+    final alreadyFinishing = _streamingCompletion;
+    _streamingCompletion = null;
     _acceptResponses = false;
     _turnTimeout?.cancel();
+
+    if (streaming != null) {
+      if (reply.trim().isEmpty) {
+        try {
+          await streaming.cancel();
+        } on Object catch (_) {
+          // An empty reply has no audio to preserve.
+        }
+        if (_current(generation)) await _listen();
+        return;
+      }
+      await _awaitStreamingCompletion(streaming.finish(reply));
+      if (!_current(generation)) return;
+      if (!acousticBargeIn || !_port.listening) {
+        await Future<void>.delayed(settleDelay);
+      }
+      if (_current(generation)) await _listen();
+      return;
+    }
+    if (alreadyFinishing != null) {
+      await _awaitStreamingCompletion(alreadyFinishing);
+      if (!_current(generation)) return;
+      if (!acousticBargeIn || !_port.listening) {
+        await Future<void>.delayed(settleDelay);
+      }
+      if (_current(generation)) await _listen();
+      return;
+    }
+    if (_phase == CallPhase.speaking) return;
     if (reply.trim().isEmpty) {
       await _listen();
       return;
     }
-    final generation = _generation;
     _setPhase(CallPhase.speaking);
     try {
       if (!acousticBargeIn && _port.listening) {
@@ -233,14 +361,41 @@ class CallSession extends ChangeNotifier {
     if (_current(generation)) await _listen();
   }
 
-  void onResponseFailed() {
-    if (!active ||
-        _phase != CallPhase.thinking ||
-        _interruptOperation != null) {
-      return;
+  Future<void> _awaitStreamingCompletion(Future<void> completion) async {
+    try {
+      await completion;
+    } on Object catch (error) {
+      if (!_disposed) _lastError = error.toString();
     }
+  }
+
+  void onResponseFailed() {
+    if (!active || _interruptOperation != null) return;
+    if (_phase != CallPhase.thinking && _phase != CallPhase.speaking) return;
     _acceptResponses = false;
+    unawaited(_cancelStreamingSpeech());
     unawaited(_listen());
+  }
+
+  Future<void> _cancelStreamingSpeech() async {
+    final speech = _streamingSpeech;
+    _streamingSpeech = null;
+    final completion = _streamingCompletion;
+    _streamingCompletion = null;
+    if (speech != null) {
+      try {
+        await speech.cancel();
+      } on Object catch (_) {
+        // Cancellation is best-effort; the microphone still has to reopen.
+      }
+    }
+    if (completion != null) {
+      try {
+        await completion;
+      } on Object catch (_) {
+        // A cancelled utterance is allowed to fail while unwinding.
+      }
+    }
   }
 
   void _handleTranscript(String raw) {
@@ -355,6 +510,7 @@ class CallSession extends ChangeNotifier {
     _captureWatchdog?.cancel();
     _transcriptSubscription?.cancel();
     _energySubscription?.cancel();
+    unawaited(_cancelStreamingSpeech());
     super.dispose();
   }
 }

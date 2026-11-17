@@ -3,7 +3,15 @@ import 'package:share_plus/share_plus.dart';
 import 'package:talk2u/l10n/generated/app_localizations.dart';
 import 'package:talk2u/src/models/character.dart';
 import 'package:talk2u/src/pages/character_edit_page.dart';
+import 'package:talk2u/src/theme/app_shapes.dart';
+import 'package:talk2u/src/widgets/aurora_backdrop.dart';
 
+/// Character library: the plain assistant entry and every saved persona.
+///
+/// Cards, chips and the shared greeting surface all take their geometry from
+/// [AppShapes] and their colours from the Material 3 scheme. No raw `Colors.*`
+/// value appears here: the gender accent uses the primary/tertiary/secondary
+/// roles so it survives a light/dark switch and an expressive seed change.
 class CharacterListPage extends StatefulWidget {
   final ValueChanged<Character>? onSelectCharacter;
   final VoidCallback? onSelectAssistant;
@@ -37,9 +45,7 @@ class _CharacterListPageState extends State<CharacterListPage> {
       context,
       MaterialPageRoute(builder: (_) => const CharacterEditPage()),
     );
-    if (result != null && mounted) {
-      setState(() {});
-    }
+    if (result != null && mounted) setState(() {});
   }
 
   Future<void> _editCharacter(Character character) async {
@@ -49,9 +55,7 @@ class _CharacterListPageState extends State<CharacterListPage> {
         builder: (_) => CharacterEditPage(character: character),
       ),
     );
-    if (result != null && mounted) {
-      setState(() {});
-    }
+    if (result != null && mounted) setState(() {});
   }
 
   Future<void> _deleteCharacter(Character character) async {
@@ -70,6 +74,7 @@ class _CharacterListPageState extends State<CharacterListPage> {
             onPressed: () => Navigator.pop(ctx, true),
             style: FilledButton.styleFrom(
               backgroundColor: Theme.of(ctx).colorScheme.error,
+              foregroundColor: Theme.of(ctx).colorScheme.onError,
             ),
             child: Text(strings.delete),
           ),
@@ -86,28 +91,16 @@ class _CharacterListPageState extends State<CharacterListPage> {
     final strings = AppLocalizations.of(context);
     final count = await CharacterStore.instance.importFromPicker();
     if (!mounted) return;
-    if (count > 0) {
-      setState(() {});
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(strings.charactersImported(count)),
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
+    setState(() {});
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          count > 0
+              ? strings.charactersImported(count)
+              : strings.characterImportFailed,
         ),
-      );
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(strings.characterImportFailed),
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
-        ),
-      );
-    }
+      ),
+    );
   }
 
   Future<void> _exportCharacter(Character character) async {
@@ -115,20 +108,17 @@ class _CharacterListPageState extends State<CharacterListPage> {
     try {
       final path = await CharacterStore.instance.exportCharacter(character);
       if (!mounted) return;
-      await Share.shareXFiles([
-        XFile(path),
-      ], text: strings.shareCharacter(character.name));
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(strings.exportFailed('$e')),
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(path)],
+          text: strings.shareCharacter(character.name),
         ),
       );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(strings.exportFailed('$error'))));
     }
   }
 
@@ -138,110 +128,132 @@ class _CharacterListPageState extends State<CharacterListPage> {
     try {
       final path = await CharacterStore.instance.exportAllCharacters();
       if (!mounted) return;
-      await Share.shareXFiles([XFile(path)], text: strings.shareAllCharacters);
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(strings.exportFailed('$e')),
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
-        ),
+      await SharePlus.instance.share(
+        ShareParams(files: [XFile(path)], text: strings.shareAllCharacters),
       );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(strings.exportFailed('$error'))));
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     final strings = AppLocalizations.of(context);
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(strings.charactersTitle),
-        centerTitle: true,
-        actions: [
-          PopupMenuButton<String>(
-            icon: const Icon(Icons.more_vert_rounded),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
+    return AuroraBackdrop(
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(strings.charactersTitle),
+          actions: [
+            PopupMenuButton<String>(
+              icon: const Icon(Icons.more_vert_rounded),
+              itemBuilder: (_) => [
+                PopupMenuItem(
+                  value: 'import',
+                  child: _MenuRow(
+                    icon: Icons.file_download_rounded,
+                    label: strings.importCharacters,
+                  ),
+                ),
+                PopupMenuItem(
+                  value: 'export_all',
+                  child: _MenuRow(
+                    icon: Icons.file_upload_rounded,
+                    label: strings.exportAll,
+                  ),
+                ),
+              ],
+              onSelected: (value) {
+                if (value == 'import') _importCharacter();
+                if (value == 'export_all') _exportAllCharacters();
+              },
             ),
-            itemBuilder: (_) => [
-              PopupMenuItem(
-                value: 'import',
-                child: Row(
-                  children: [
-                    Icon(Icons.file_download_rounded, size: 20),
-                    SizedBox(width: 12),
-                    Text(strings.importCharacters),
-                  ],
-                ),
-              ),
-              PopupMenuItem(
-                value: 'export_all',
-                child: Row(
-                  children: [
-                    Icon(Icons.file_upload_rounded, size: 20),
-                    SizedBox(width: 12),
-                    Text(strings.exportAll),
-                  ],
-                ),
-              ),
-            ],
-            onSelected: (value) {
-              if (value == 'import') _importCharacter();
-              if (value == 'export_all') _exportAllCharacters();
-            },
-          ),
-          IconButton(
-            icon: const Icon(Icons.add_rounded),
-            tooltip: strings.createCharacter,
-            onPressed: _createCharacter,
-          ),
-        ],
+            IconButton(
+              icon: const Icon(Icons.add_rounded),
+              tooltip: strings.createCharacter,
+              onPressed: _createCharacter,
+            ),
+          ],
+        ),
+        body: _isLoading
+            ? const Center(child: CircularProgressIndicator())
+            : _buildCharacterList(strings),
       ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : _buildCharacterList(theme, strings),
     );
   }
 
-  Widget _buildCharacterList(ThemeData theme, AppLocalizations strings) {
+  Widget _buildCharacterList(AppLocalizations strings) {
     final characters = CharacterStore.instance.characters;
     return ListView.builder(
       padding: const EdgeInsets.all(16),
       itemCount: characters.length + 1,
       itemBuilder: (context, index) {
         if (index == 0) {
-          return Card(
-            child: ListTile(
-              leading: CircleAvatar(
-                backgroundColor: theme.colorScheme.primaryContainer,
-                foregroundColor: theme.colorScheme.onPrimaryContainer,
-                child: const Icon(Icons.smart_toy_outlined),
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Card(
+              child: ListTile(
+                leading: CircleAvatar(
+                  backgroundColor: Theme.of(
+                    context,
+                  ).colorScheme.primaryContainer,
+                  foregroundColor: Theme.of(
+                    context,
+                  ).colorScheme.onPrimaryContainer,
+                  child: const Icon(Icons.smart_toy_outlined),
+                ),
+                title: Text(strings.regularAssistant),
+                subtitle: Text(
+                  characters.isEmpty
+                      ? strings.directChat
+                      : strings.noCharacterSettings,
+                ),
+                trailing: const Icon(Icons.chevron_right_rounded),
+                onTap: widget.onSelectAssistant,
               ),
-              title: Text(strings.regularAssistant),
-              subtitle: Text(
-                characters.isEmpty
-                    ? strings.directChat
-                    : strings.noCharacterSettings,
-              ),
-              trailing: const Icon(Icons.chevron_right_rounded),
-              onTap: widget.onSelectAssistant,
             ),
           );
         }
         final character = characters[index - 1];
-        return _CharacterCard(
-          character: character,
-          onTap: () => widget.onSelectCharacter?.call(character),
-          onEdit: () => _editCharacter(character),
-          onDelete: () => _deleteCharacter(character),
-          onExport: (c) => _exportCharacter(c),
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 12),
+          child: _CharacterCard(
+            character: character,
+            onTap: () => widget.onSelectCharacter?.call(character),
+            onEdit: () => _editCharacter(character),
+            onDelete: () => _deleteCharacter(character),
+            onExport: (c) => _exportCharacter(c),
+          ),
         );
       },
+    );
+  }
+}
+
+/// One popup-menu row: leading icon plus label.
+///
+/// A Material 3 menu item is a single 48 dp row. Nesting a [ListTile] inside a
+/// [PopupMenuItem] doubles the padding and pushes the menu past the spec, so the
+/// row is composed directly instead.
+class _MenuRow extends StatelessWidget {
+  const _MenuRow({required this.icon, required this.label, this.color});
+
+  final IconData icon;
+  final String label;
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) {
+    final effective = color ?? Theme.of(context).colorScheme.onSurface;
+    return Row(
+      children: [
+        Icon(icon, size: 20, color: effective),
+        const SizedBox(width: 12),
+        Text(label, style: TextStyle(color: effective)),
+      ],
     );
   }
 }
@@ -265,24 +277,20 @@ class _CharacterCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final strings = AppLocalizations.of(context);
+    final colors = theme.colorScheme;
     final genderIcon = switch (character.gender) {
       CharacterGender.male => Icons.male_rounded,
       CharacterGender.female => Icons.female_rounded,
       CharacterGender.other => Icons.transgender_rounded,
     };
     final genderColor = switch (character.gender) {
-      CharacterGender.male => Colors.blue,
-      CharacterGender.female => Colors.pink,
-      CharacterGender.other => theme.colorScheme.outline,
+      CharacterGender.male => colors.primary,
+      CharacterGender.female => colors.tertiary,
+      CharacterGender.other => colors.secondary,
     };
 
     return Card(
-      elevation: 0,
-      color: theme.colorScheme.surfaceContainerLow,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      margin: const EdgeInsets.only(bottom: 12),
       child: InkWell(
-        borderRadius: BorderRadius.circular(16),
         onTap: onTap,
         child: Padding(
           padding: const EdgeInsets.all(16),
@@ -293,15 +301,13 @@ class _CharacterCard extends StatelessWidget {
                 children: [
                   CircleAvatar(
                     radius: 22,
-                    backgroundColor: theme.colorScheme.primaryContainer,
+                    backgroundColor: colors.primaryContainer,
                     child: Text(
                       character.name.isNotEmpty
                           ? character.name.characters.first
                           : '?',
-                      style: TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.w600,
-                        color: theme.colorScheme.onPrimaryContainer,
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        color: colors.onPrimaryContainer,
                       ),
                     ),
                   ),
@@ -315,9 +321,7 @@ class _CharacterCard extends StatelessWidget {
                             Flexible(
                               child: Text(
                                 character.name,
-                                style: theme.textTheme.titleMedium?.copyWith(
-                                  fontWeight: FontWeight.w600,
-                                ),
+                                style: theme.textTheme.titleMedium,
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                               ),
@@ -330,7 +334,7 @@ class _CharacterCard extends StatelessWidget {
                           Text(
                             character.description,
                             style: theme.textTheme.bodySmall?.copyWith(
-                              color: theme.colorScheme.outline,
+                              color: colors.onSurfaceVariant,
                             ),
                             maxLines: 2,
                             overflow: TextOverflow.ellipsis,
@@ -341,47 +345,29 @@ class _CharacterCard extends StatelessWidget {
                   PopupMenuButton<String>(
                     icon: Icon(
                       Icons.more_vert_rounded,
-                      color: theme.colorScheme.outline,
-                    ),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
+                      color: colors.onSurfaceVariant,
                     ),
                     itemBuilder: (_) => [
                       PopupMenuItem(
                         value: 'edit',
-                        child: Row(
-                          children: [
-                            Icon(Icons.edit_rounded, size: 20),
-                            SizedBox(width: 12),
-                            Text(strings.edit),
-                          ],
+                        child: _MenuRow(
+                          icon: Icons.edit_rounded,
+                          label: strings.edit,
                         ),
                       ),
                       PopupMenuItem(
                         value: 'export',
-                        child: Row(
-                          children: [
-                            Icon(Icons.file_upload_rounded, size: 20),
-                            SizedBox(width: 12),
-                            Text(strings.export),
-                          ],
+                        child: _MenuRow(
+                          icon: Icons.file_upload_rounded,
+                          label: strings.export,
                         ),
                       ),
                       PopupMenuItem(
                         value: 'delete',
-                        child: Row(
-                          children: [
-                            Icon(
-                              Icons.delete_rounded,
-                              size: 20,
-                              color: theme.colorScheme.error,
-                            ),
-                            const SizedBox(width: 12),
-                            Text(
-                              strings.delete,
-                              style: TextStyle(color: theme.colorScheme.error),
-                            ),
-                          ],
+                        child: _MenuRow(
+                          icon: Icons.delete_rounded,
+                          label: strings.delete,
+                          color: colors.error,
                         ),
                       ),
                     ],
@@ -405,20 +391,19 @@ class _CharacterCard extends StatelessWidget {
                             horizontal: 8,
                             vertical: 2,
                           ),
-                          decoration: BoxDecoration(
-                            color: theme.colorScheme.primaryContainer
-                                .withValues(alpha: 0.5),
-                            borderRadius: BorderRadius.circular(8),
+                          decoration: ShapeDecoration(
+                            color: colors.secondaryContainer,
+                            shape: AppShapes.badge,
                           ),
                           child: Text(
                             tag,
                             style: theme.textTheme.labelSmall?.copyWith(
-                              color: theme.colorScheme.onPrimaryContainer,
+                              color: colors.onSecondaryContainer,
                             ),
                           ),
                         ),
                       )
-                      .toList(),
+                      .toList(growable: false),
                 ),
               ],
               if (character.greeting.isNotEmpty) ...[
@@ -426,16 +411,14 @@ class _CharacterCard extends StatelessWidget {
                 Container(
                   width: double.infinity,
                   padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: theme.colorScheme.surfaceContainerHighest.withValues(
-                      alpha: 0.5,
-                    ),
-                    borderRadius: BorderRadius.circular(10),
+                  decoration: ShapeDecoration(
+                    color: colors.surfaceContainerHighest,
+                    shape: AppShapes.field,
                   ),
                   child: Text(
                     character.greeting,
                     style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
+                      color: colors.onSurfaceVariant,
                       fontStyle: FontStyle.italic,
                     ),
                     maxLines: 2,

@@ -1,67 +1,62 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:talk2u/l10n/generated/app_localizations.dart';
 import 'package:talk2u/src/l10n/provider_names.dart';
 import 'package:talk2u/src/rust/api/data_models.dart';
+import 'package:talk2u/src/settings/ui_preferences.dart';
 import 'package:talk2u/src/state/chat_state.dart';
+import 'package:talk2u/src/theme/app_shapes.dart';
 
 /// Bottom sheet with character context, dialogue style, provider and model.
 ///
 /// It rebuilds from [ChatState] itself, so provider/model/style changes are
 /// reflected without a StatefulBuilder. Closing the sheet is the caller's job
 /// for destructive actions (restart), while benign selections stay in place.
+///
+/// The sheet shape, drag handle and surface come from `BottomSheetThemeData`, so
+/// this function does not restate them; only the content layout lives here.
 Future<void> showChatOptionsSheet(
   BuildContext context, {
   required ChatState chatState,
   required VoidCallback onRestartStory,
+  UiPreferences? preferences,
 }) {
   final theme = Theme.of(context);
   final strings = AppLocalizations.of(context);
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-    ),
     builder: (sheetContext) {
       final maxHeight = MediaQuery.sizeOf(sheetContext).height * 0.85;
       return SafeArea(
         child: ConstrainedBox(
           constraints: BoxConstraints(maxHeight: maxHeight),
           child: SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 20),
             child: AnimatedBuilder(
-              animation: chatState,
+              animation: Listenable.merge([chatState, ?preferences]),
               builder: (context, _) => Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Center(
-                    child: Container(
-                      width: 40,
-                      height: 4,
-                      decoration: BoxDecoration(
-                        color: theme.colorScheme.outlineVariant,
-                        borderRadius: BorderRadius.circular(2),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
                   if (chatState.currentCharacter != null) ...[
                     _OptionSection(
                       title: chatState.currentCharacter!.name,
                       subtitle: chatState.currentCharacter!.description,
                     ),
+                    const SizedBox(height: 8),
                     const Divider(height: 24),
                   ],
                   if (chatState.currentConversationId != null)
                     ListTile(
+                      contentPadding: EdgeInsets.zero,
                       leading: Icon(
                         Icons.refresh_rounded,
                         color: theme.colorScheme.primary,
                       ),
                       title: Text(strings.restart),
                       subtitle: Text(strings.restartConversationSubtitle),
-                      contentPadding: EdgeInsets.zero,
                       onTap: () {
                         Navigator.pop(sheetContext);
                         onRestartStory();
@@ -70,9 +65,7 @@ Future<void> showChatOptionsSheet(
                   const Divider(height: 24),
                   Text(
                     strings.conversationStyle,
-                    style: theme.textTheme.titleSmall?.copyWith(
-                      fontWeight: FontWeight.w600,
-                    ),
+                    style: theme.textTheme.titleSmall,
                   ),
                   const SizedBox(height: 8),
                   Wrap(
@@ -106,42 +99,69 @@ Future<void> showChatOptionsSheet(
                     ],
                   ),
                   const Divider(height: 24),
-                  Text(
-                    strings.providerAndModel,
-                    style: theme.textTheme.titleSmall?.copyWith(
-                      fontWeight: FontWeight.w600,
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    value: preferences?.autoReadReplies ?? true,
+                    onChanged: preferences == null
+                        ? null
+                        : (value) =>
+                              unawaited(preferences.setAutoReadReplies(value)),
+                    secondary: Icon(
+                      Icons.record_voice_over_outlined,
+                      color: theme.colorScheme.primary,
+                    ),
+                    title: Text(strings.autoReadReplies),
+                    subtitle: Text(
+                      strings.autoReadRepliesSubtitle,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.outline,
+                      ),
                     ),
                   ),
+                  const Divider(height: 24),
+                  Text(
+                    strings.providerAndModel,
+                    style: theme.textTheme.titleSmall,
+                  ),
                   const SizedBox(height: 8),
-                  DropdownButtonFormField<String>(
-                    initialValue: chatState.selectedProviderId,
-                    isExpanded: true,
-                    decoration: InputDecoration(
-                      labelText: strings.apiProvider,
-                      border: const OutlineInputBorder(),
-                      prefixIcon: const Icon(Icons.hub_outlined),
+                  DropdownMenu<String>(
+                    key: ValueKey(chatState.selectedProviderId),
+                    initialSelection: chatState.selectedProviderId,
+                    enabled: !chatState.isStreaming,
+                    expandedInsets: EdgeInsets.zero,
+                    selectOnly: true,
+                    requestFocusOnTap: false,
+                    enableSearch: false,
+                    label: Text(strings.apiProvider),
+                    leadingIcon: const Icon(Icons.hub_outlined),
+                    menuStyle: const MenuStyle(
+                      shape: WidgetStatePropertyAll(AppShapes.overlay),
                     ),
-                    items: chatState.providers
+                    dropdownMenuEntries: chatState.providers
                         .map(
-                          (provider) => DropdownMenuItem(
+                          (provider) => DropdownMenuEntry<String>(
                             value: provider.id,
-                            child: Text(
+                            label: provider.isConfigured
+                                ? providerDisplayName(provider, strings)
+                                : strings.providerNotConfigured(
+                                    providerDisplayName(provider, strings),
+                                  ),
+                            leadingIcon: Icon(
                               provider.isConfigured
-                                  ? providerDisplayName(provider, strings)
-                                  : strings.providerNotConfigured(
-                                      providerDisplayName(provider, strings),
-                                    ),
-                              overflow: TextOverflow.ellipsis,
+                                  ? Icons.check_circle
+                                  : Icons.circle_outlined,
+                              size: 16,
+                              color: provider.isConfigured
+                                  ? theme.colorScheme.primary
+                                  : theme.colorScheme.outline,
                             ),
                           ),
                         )
                         .toList(growable: false),
-                    onChanged: chatState.isStreaming
-                        ? null
-                        : (value) {
-                            if (value == null) return;
-                            chatState.setSelectedProvider(value);
-                          },
+                    onSelected: (value) {
+                      if (value == null || chatState.isStreaming) return;
+                      chatState.setSelectedProvider(value);
+                    },
                   ),
                   const SizedBox(height: 12),
                   RadioGroup<String>(
@@ -196,7 +216,7 @@ class _OptionSection extends StatelessWidget {
           radius: 20,
           backgroundColor: theme.colorScheme.primaryContainer,
           child: Text(
-            title.characters.first,
+            title.isEmpty ? '?' : title.characters.first,
             style: TextStyle(
               fontSize: 18,
               fontWeight: FontWeight.w600,
@@ -253,17 +273,10 @@ class _StyleChip extends StatelessWidget {
       label: Text(label),
       selected: selected,
       onSelected: (_) => chatState.setDialogueStyle(style),
-      selectedColor: theme.colorScheme.primaryContainer,
-      checkmarkColor: theme.colorScheme.onPrimaryContainer,
       labelStyle: theme.textTheme.labelLarge?.copyWith(
         color: selected
-            ? theme.colorScheme.onPrimaryContainer
+            ? theme.colorScheme.onSecondaryContainer
             : theme.colorScheme.onSurfaceVariant,
-      ),
-      side: BorderSide(
-        color: selected
-            ? theme.colorScheme.primary
-            : theme.colorScheme.outlineVariant,
       ),
     );
   }
@@ -295,10 +308,10 @@ class _ModelOption extends StatelessWidget {
           if (supportsThinking) ...[
             const SizedBox(width: 8),
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-              decoration: BoxDecoration(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              decoration: ShapeDecoration(
                 color: theme.colorScheme.tertiaryContainer,
-                borderRadius: BorderRadius.circular(4),
+                shape: AppShapes.badge,
               ),
               child: Text(
                 strings.thinking,

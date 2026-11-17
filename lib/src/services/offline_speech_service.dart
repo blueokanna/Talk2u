@@ -125,7 +125,7 @@ class SpeechCapabilities {
 
 class OfflineSpeechService extends ChangeNotifier
     with WidgetsBindingObserver
-    implements CallSpeechPort {
+    implements CallSpeechPort, StreamingCallSpeechPort {
   OfflineSpeechService._() {
     WidgetsBinding.instance.addObserver(this);
     MossTtsService.instance.addListener(_handleMossState);
@@ -163,6 +163,7 @@ class OfflineSpeechService extends ChangeNotifier
   DateTime? _lastAnimationCueChangedAt;
   int _latestSpeechPosition = 0;
   final _selfEcho = SelfEchoTranscriptFilter();
+  _OfflineStreamingReply? _activeStreamingReply;
 
   Stream<String> get recognitionResults => _recognitionController.stream;
 
@@ -248,7 +249,59 @@ class OfflineSpeechService extends ChangeNotifier
       _speak(text, toCompletion: true);
 
   @override
-  Future<void> stopSpeaking() async {
+  StreamingReplySpeech beginStreamingSpeech() {
+    final previous = _activeStreamingReply;
+    // Detach, do not cancel: the new reply's `speakStream` call supersedes the
+    // old MOSS operation. Calling stop here would race with that new operation
+    // and could cut the first sentence of the replacement reply.
+    previous?.detach();
+    final reply = _OfflineStreamingReply(this);
+    _activeStreamingReply = reply;
+    return reply;
+  }
+
+  void _releaseStreamingReply(_OfflineStreamingReply reply) {
+    if (identical(_activeStreamingReply, reply)) {
+      _activeStreamingReply = null;
+    }
+  }
+
+  void _beginStreamingPlan() {
+    _stopAnimationTimeline();
+    lastError = null;
+    _spokenTextLength = 0;
+    speechEmotion = SpeechTextNormalizer.neutralEmotion;
+    animationCues = const [];
+    animationCue = 'neutral';
+    _activeAnimationCueIndex = -1;
+    animationCueRevision++;
+    notifyListeners();
+  }
+
+  void _applyStreamingPlan(String fullReply) {
+    final plan = prepareSpeech(fullReply);
+    if (plan.spokenText.isEmpty) return;
+    _spokenTextLength = plan.spokenText.length;
+    speechEmotion = plan.emotion;
+    _selfEcho.rememberSpoken(plan.spokenText);
+    animationCues = inferAnimationCues(fullReply);
+    animationCue = 'neutral';
+    _activeAnimationCueIndex = -1;
+    animationCueRevision++;
+    notifyListeners();
+  }
+
+  Future<void> _speakStream(Stream<String> text) async {
+    try {
+      await MossTtsService.instance.speakStream(text, toCompletion: true);
+    } catch (error) {
+      lastError = error.toString();
+      notifyListeners();
+      rethrow;
+    }
+  }
+
+  Future<void> _stopStreamingSpeech() async {
     _stopAnimationTimeline();
     await MossTtsService.instance.stopSpeaking();
     generating = false;
@@ -257,6 +310,17 @@ class OfflineSpeechService extends ChangeNotifier
     animationCue = 'neutral';
     animationCueRevision++;
     notifyListeners();
+  }
+
+  @override
+  Future<void> stopSpeaking() async {
+    final active = _activeStreamingReply;
+    _activeStreamingReply = null;
+    if (active != null) {
+      await active.cancel();
+    } else {
+      await _stopStreamingSpeech();
+    }
   }
 
   @override
@@ -655,5 +719,88 @@ class OfflineSpeechService extends ChangeNotifier
     _sherpaRecognitionSubscription?.cancel();
     _recognitionController.close();
     super.dispose();
+  }
+}
+
+/// One reply's text pipe into [MossTtsService.speakStream].
+///
+/// The controller is intentionally single-subscription: MOSS is the only
+/// consumer and the order of model deltas must be exact. Starting the speech
+/// future lazily on [append] avoids initialising the TTS runtime for an empty
+/// reply (for example a reply made only of emoji or a stage direction).
+class _OfflineStreamingReply implements StreamingReplySpeech {
+  _OfflineStreamingReply(this._owner);
+
+  final OfflineSpeechService _owner;
+  final StreamController<String> _text = StreamController<String>();
+  Future<void>? _speech;
+  bool _started = false;
+  bool _closed = false;
+
+  @override
+  void append(String text) {
+    if (_closed || text.isEmpty) return;
+    if (!_started) {
+      _started = true;
+      _owner._beginStreamingPlan();
+      _speech = _owner._speakStream(_text.stream);
+    }
+    _text.add(text);
+  }
+
+  @override
+  Future<void> finish(String fullReply) async {
+    if (_closed) {
+      final speech = _speech;
+      if (speech != null) await speech;
+      _owner._releaseStreamingReply(this);
+      return;
+    }
+    _closed = true;
+    _owner._applyStreamingPlan(fullReply);
+    await _text.close();
+    if (!_started) {
+      _owner._releaseStreamingReply(this);
+      return;
+    }
+    try {
+      await _speech;
+    } finally {
+      _owner._releaseStreamingReply(this);
+    }
+  }
+
+  /// Abandons this sink without touching the shared MOSS operation.
+  ///
+  /// Used when a replacement reply is about to start; the replacement's own
+  /// `speakStream` increments the MOSS operation and cancels the old audio.
+  void detach() {
+    _closed = true;
+    if (!_text.isClosed) unawaited(_text.close());
+    final speech = _speech;
+    if (speech != null) {
+      unawaited(speech.catchError((Object _) {}));
+    }
+    _owner._releaseStreamingReply(this);
+  }
+
+  @override
+  Future<void> cancel() async {
+    _closed = true;
+    if (!_text.isClosed) await _text.close();
+    // Stop playback before awaiting the speech future: otherwise cancellation
+    // would wait for every already-queued chunk to play first. This path also
+    // runs when generation has finished (the text controller is already
+    // closed) but the queued audio is still playing.
+    await _owner._stopStreamingSpeech();
+    final speech = _speech;
+    if (speech != null) {
+      try {
+        await speech;
+      } on Object catch (_) {
+        // A cancelled utterance is expected to unwind with an error.
+      }
+    }
+    _owner._releaseStreamingReply(this);
   }
 }

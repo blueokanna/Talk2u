@@ -290,11 +290,13 @@ mod tests {
             ..AppSettings::default()
         };
         let (provider, _) = ProviderRuntime::from_settings(&settings, "custom").unwrap();
-        assert!(provider
-            .request_headers()
-            .unwrap()
-            .get("authorization")
-            .is_none());
+        assert!(
+            provider
+                .request_headers()
+                .unwrap()
+                .get("authorization")
+                .is_none()
+        );
     }
 
     #[test]

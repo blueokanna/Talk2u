@@ -1249,6 +1249,9 @@ MossTtsQnnSession::SynthesisResult MossTtsQnnSession::Synthesize(
             decode_ = CreateSession("decode", ResolveModelFile(tts_dir_, decode_file_), true,
                                     config_.hardware_only);
             // QAIRT 2.48 V81 rejects CumulativeSum in this graph, so only the sampler uses ORT CPU.
+            // QAIRT 2.48 V81 rejects the sampler's CumulativeSum/dynamic-reshape
+            // graph; its control path stays on the ORT CPU EP. The transformer
+            // stages and the streaming codec are fully on HTP.
             sampler_ = CreateSession("sampler", ResolveModelFile(tts_dir_, sampler_file_), false,
                                      false);
             auto audio_tokens = RunDecode(std::move(prefill), max_frames, seed + index, check_cancelled);
@@ -1358,7 +1361,12 @@ void MossTtsQnnSession::WritePcm16(std::ostream& output, const std::vector<float
     std::array<char, 16384> bytes{};
     size_t byte_count = 0;
     for (const float sample : samples) {
-        const auto value = static_cast<int16_t>(std::lrint(std::clamp(sample, -1.0F, 1.0F) * 32767.0F));
+        // A diverged recurrent state can surface as NaN/Inf in the codec output.
+        // Writing that through lrint() is undefined and sounds like a click or
+        // broadband noise burst; silence is the only safe PCM16 value.
+        const float finite = std::isfinite(sample) ? sample : 0.0F;
+        const auto value =
+            static_cast<int16_t>(std::lrint(std::clamp(finite, -1.0F, 1.0F) * 32767.0F));
         bytes[byte_count++] = static_cast<char>(value & 0xFF);
         bytes[byte_count++] = static_cast<char>((static_cast<uint16_t>(value) >> 8U) & 0xFFU);
         if (byte_count == bytes.size()) {

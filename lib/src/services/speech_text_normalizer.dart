@@ -132,7 +132,10 @@ abstract final class SpeechTextNormalizer {
         continue;
       }
 
-      if (character == ' ' || character == '\t') {
+      if (character == ' ' ||
+          character == '\t' ||
+          character == '\u3000' ||
+          character == '\u00A0') {
         final next = _nextMeaningfulChar(text, index + width);
         if (next != null && '，。！？；：、,.!?;:）】」』'.contains(next)) {
           index += width;
@@ -404,6 +407,9 @@ abstract final class SpeechTextNormalizer {
       if (rune >= 0x0400 && rune <= 0x04FF) return true;
       if (rune >= 0x3040 && rune <= 0x30FF) return true;
       if (rune >= 0x3400 && rune <= 0x9FFF) return true;
+      // CJK Unified Ideographs Extension B-F. These are valid text, not emoji,
+      // and must not cause an otherwise Chinese reply to be treated as empty.
+      if (rune >= 0x20000 && rune <= 0x2FA1F) return true;
       if (rune >= 0xAC00 && rune <= 0xD7AF) return true;
       if (rune >= 0xF900 && rune <= 0xFAFF) return true;
     }
@@ -448,12 +454,17 @@ abstract final class SpeechTextNormalizer {
   }
 
   static bool _isInvisibleRune(int rune) =>
+      rune == 0x00AD || // soft hyphen
+      rune == 0x180E || // Mongolian vowel separator
       rune == 0x200B ||
       rune == 0x200C ||
       rune == 0x200E ||
       rune == 0x200F ||
       rune == 0x2060 ||
       rune == 0xFEFF ||
+      (rune >= 0x202A && rune <= 0x202E) || // bidi embedding/override
+      (rune >= 0x2066 && rune <= 0x2069) || // bidi isolates
+      rune == 0xFFFC || // object replacement character
       (rune >= 0xFE00 && rune <= 0xFE0F) ||
       (rune >= 0xE0100 && rune <= 0xE01EF) ||
       (rune >= 0x0000 && rune <= 0x0008) ||

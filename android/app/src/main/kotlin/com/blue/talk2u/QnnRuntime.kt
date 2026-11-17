@@ -102,6 +102,41 @@ internal object QnnRuntime {
         current
     }
 
+    /**
+     * Makes the packaged DSP libraries reachable through FastRPC.
+     *
+     * Two engines depend on this: QAIRT resolves `libQnnHtpV81Skel.so` through
+     * `ADSP_LIBRARY_PATH`, and llama.cpp's ggml-hexagon backend loads
+     * `libggml-htp-v81.so` the same way. Both must see the directory that holds
+     * the packaged `.so` files, so the path is built once and exported.
+     *
+     * Idempotent: repeated calls only rewrite the same value.
+     *
+     * @return the directory holding the DSP libraries, or null when the app has
+     *     no native library directory at all.
+     */
+    fun ensureAdspLibraryPath(context: Context): String? {
+        val nativeDirectory = runCatching {
+            File(context.applicationInfo.nativeLibraryDir)
+        }.getOrNull() ?: return null
+        if (!nativeDirectory.isDirectory) return null
+        val searchPath = buildList {
+            add(nativeDirectory.absolutePath)
+            Os.getenv("ADSP_LIBRARY_PATH")
+                ?.split(';')
+                ?.map(String::trim)
+                ?.filter(String::isNotEmpty)
+                ?.let(::addAll)
+            add("/vendor/dsp/cdsp")
+            add("/vendor/lib/rfsa/adsp")
+            add("/system/lib/rfsa/adsp")
+            add("/dsp")
+        }.distinct().joinToString(";")
+        runCatching { Os.setenv("ADSP_LIBRARY_PATH", searchPath, true) }
+            .onFailure { Log.w(LOG_TAG, "Unable to export ADSP_LIBRARY_PATH", it) }
+        return nativeDirectory.absolutePath
+    }
+
     private fun prepareBundledRuntime(context: Context): Status {
         val knownFastRpcDevices = listOf(
             "/dev/fastrpc-cdsp",
@@ -132,19 +167,7 @@ internal object QnnRuntime {
         } else {
             extractSkel(context, assetPath, skelName)
         }
-        val searchPath = buildList {
-            add(fastRpcDirectory.absolutePath)
-            Os.getenv("ADSP_LIBRARY_PATH")
-                ?.split(';')
-                ?.map(String::trim)
-                ?.filter(String::isNotEmpty)
-                ?.let(::addAll)
-            add("/vendor/dsp/cdsp")
-            add("/vendor/lib/rfsa/adsp")
-            add("/system/lib/rfsa/adsp")
-            add("/dsp")
-        }.distinct().joinToString(";")
-        Os.setenv("ADSP_LIBRARY_PATH", searchPath, true)
+        ensureAdspLibraryPath(context)
         System.loadLibrary("QnnSystem")
         System.loadLibrary("QnnHtp${arch.uppercase()}Stub")
         System.loadLibrary("QnnHtp")

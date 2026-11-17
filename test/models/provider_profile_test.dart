@@ -19,7 +19,7 @@ void main() {
     expect(profiles, hasLength(1));
     expect(profiles.single.apiUrl, 'device://geniex-qairt-npu');
     expect(profiles.single.chatModel, 'Qwen3-4B-Instruct-2507');
-    expect(profiles.single.maxOutputTokens, 256);
+    expect(profiles.single.maxOutputTokens, 3072);
   });
 
   test('removes the Android-only provider on unsupported platforms', () {

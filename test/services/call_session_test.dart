@@ -3,7 +3,29 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:talk2u/src/services/call_session.dart';
 
-class _FakePort implements CallSpeechPort {
+class _FakeStreamingSpeech implements StreamingReplySpeech {
+  _FakeStreamingSpeech(this.port);
+
+  final _FakePort port;
+
+  @override
+  void append(String text) => port.streamed.add(text);
+
+  @override
+  Future<void> finish(String fullReply) async {
+    port.streamFinishes++;
+    port.finishedReply = fullReply;
+    port.speaking = false;
+  }
+
+  @override
+  Future<void> cancel() async {
+    port.streamCancels++;
+    port.speaking = false;
+  }
+}
+
+class _FakePort implements CallSpeechPort, StreamingCallSpeechPort {
   _FakePort({this.echoCancellationVerified = false});
 
   @override
@@ -18,6 +40,10 @@ class _FakePort implements CallSpeechPort {
   final transcriptController = StreamController<String>.broadcast();
   final energyController = StreamController<double>.broadcast();
   final spoken = <String>[];
+  final streamed = <String>[];
+  int streamFinishes = 0;
+  int streamCancels = 0;
+  String? finishedReply;
   Completer<void>? playback;
 
   @override
@@ -85,6 +111,12 @@ class _FakePort implements CallSpeechPort {
     speaking = false;
     amplitude = 0;
     if (active != null && !active.isCompleted) active.complete();
+  }
+
+  @override
+  StreamingReplySpeech beginStreamingSpeech() {
+    speaking = true;
+    return _FakeStreamingSpeech(this);
   }
 
   @override
@@ -232,6 +264,38 @@ void main() {
     await Future.wait([reply, stopping]);
     expect(port.spoken, isEmpty);
     expect(session.phase, CallPhase.idle);
+  });
+
+  test('first generated sentence starts TTS before completion', () async {
+    build(withAec: false);
+    await session.start();
+    port.transcriptController.add('说点什么');
+    await Future<void>.delayed(Duration.zero);
+    expect(session.phase, CallPhase.thinking);
+
+    session.onResponseDelta('第一句已经完成。');
+    await Future<void>.delayed(Duration.zero);
+    expect(session.phase, CallPhase.speaking);
+    expect(port.streamed, ['第一句已经完成。']);
+    expect(port.listening, isFalse);
+    expect(port.spoken, isEmpty);
+
+    session.onResponseDelta('第二句还在生成。');
+    await session.onResponseCompleted('第一句已经完成。第二句还在生成。');
+    expect(port.finishedReply, '第一句已经完成。第二句还在生成。');
+    expect(port.streamFinishes, 1);
+    expect(session.phase, CallPhase.listening);
+  });
+
+  test('streaming speech is cancelled when the turn is interrupted', () async {
+    build(withAec: false);
+    await session.start();
+    port.transcriptController.add('开始');
+    await Future<void>.delayed(Duration.zero);
+    session.onResponseDelta('一句话。');
+    await session.interrupt();
+    expect(port.streamCancels, 1);
+    expect(session.phase, CallPhase.listening);
   });
 
   test('half-duplex closes the microphone while speaking', () async {

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:talk2u/l10n/generated/app_localizations.dart';
+import 'package:talk2u/src/theme/app_shapes.dart';
 
 /// Empty transcript placeholder shown before the first message.
 class ChatEmptyState extends StatelessWidget {
@@ -24,24 +25,34 @@ class ChatEmptyState extends StatelessWidget {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(
-                    Icons.chat_bubble_outline_rounded,
-                    size: 64,
-                    color: theme.colorScheme.outline.withValues(alpha: 0.5),
+                  // Material 3 Expressive gives an empty state one large shape
+                  // instead of a bare glyph; the container carries the colour
+                  // role, the icon stays on-surface.
+                  Container(
+                    width: 88,
+                    height: 88,
+                    decoration: ShapeDecoration(
+                      color: theme.colorScheme.primaryContainer,
+                      shape: AppShapes.surface,
+                    ),
+                    child: Icon(
+                      Icons.chat_bubble_outline_rounded,
+                      size: 40,
+                      color: theme.colorScheme.onPrimaryContainer,
+                    ),
                   ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 20),
                   Text(
                     strings.startNewConversation,
-                    style: theme.textTheme.titleMedium?.copyWith(
-                      color: theme.colorScheme.outline,
-                    ),
+                    style: theme.textTheme.titleMedium,
+                    textAlign: TextAlign.center,
                   ),
                   const SizedBox(height: 8),
                   Text(
                     strings.startNewConversationHint,
                     textAlign: TextAlign.center,
                     style: theme.textTheme.bodyMedium?.copyWith(
-                      color: theme.colorScheme.outline.withValues(alpha: 0.7),
+                      color: theme.colorScheme.onSurfaceVariant,
                     ),
                   ),
                   const SizedBox(height: 24),

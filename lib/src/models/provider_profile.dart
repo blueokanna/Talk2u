@@ -43,7 +43,7 @@ class ProviderProfile {
     apiUrl: 'device://geniex-qairt-npu',
     chatModel: 'Qwen3-4B-Instruct-2507',
     protocol: 'local',
-    maxOutputTokens: 256,
+    maxOutputTokens: 3072,
   );
 
   static List<ProviderProfile> withRuntimeDefaults(

@@ -225,6 +225,31 @@ void main() {
     expect(done, isTrue);
   });
 
+  test('streaming starts the first sentence before the text closes', () async {
+    final text = StreamController<String>();
+    final speech = service.speakStream(text.stream, toCompletion: true);
+    text.add('第一句已经完成。');
+    await _until(() => player.played.isNotEmpty);
+    expect(calls.where((value) => value == 'synthesize'), hasLength(1));
+
+    // The second sentence is still incomplete: it must not be synthesised yet.
+    text.add('第二句还没有');
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(calls.where((value) => value == 'synthesize'), hasLength(1));
+
+    text.add('结束。');
+    await _until(
+      () => calls.where((value) => value == 'synthesize').length == 2,
+    );
+    player.completed.add(null);
+    await _until(() => player.played.length == 2);
+    player.completed.add(null);
+    await text.close();
+    await speech;
+    expect(service.speaking, isFalse);
+    expect(service.generating, isFalse);
+  });
+
   test('native importStarted moves the card out of the picker stage', () async {
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;

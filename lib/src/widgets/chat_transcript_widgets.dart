@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:talk2u/src/rendering/motion_policy.dart';
+import 'package:talk2u/src/theme/app_motion.dart';
+import 'package:talk2u/src/theme/app_shapes.dart';
 
 /// Entrance animation for a transcript row.
 ///
 /// Kept out of the chat page so the page owns orchestration, not widget
-/// animation internals. Reduced motion is honoured through [AppMotionPolicy].
+/// animation internals. The curve and duration are the shared Material 3
+/// entering tokens, so a row arrives with the same physics as a page.
 class AnimatedMessageItem extends StatefulWidget {
   const AnimatedMessageItem({super.key, required this.child});
 
@@ -16,26 +19,18 @@ class AnimatedMessageItem extends StatefulWidget {
 
 class _AnimatedMessageItemState extends State<AnimatedMessageItem>
     with SingleTickerProviderStateMixin {
-  late AnimationController _controller;
-  late Animation<double> _fadeAnimation;
-  late Animation<Offset> _slideAnimation;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 350),
-    );
-    _fadeAnimation = CurvedAnimation(
-      parent: _controller,
-      curve: Curves.easeOut,
-    );
-    _slideAnimation = Tween<Offset>(
-      begin: const Offset(0, 0.15),
-      end: Offset.zero,
-    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic));
-  }
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: AppMotion.enter,
+  );
+  late final CurvedAnimation _progress = CurvedAnimation(
+    parent: _controller,
+    curve: AppMotion.emphasizedDecelerate,
+  );
+  late final Animation<Offset> _slide = Tween<Offset>(
+    begin: const Offset(0, 0.08),
+    end: Offset.zero,
+  ).animate(_progress);
 
   @override
   void didChangeDependencies() {
@@ -51,15 +46,17 @@ class _AnimatedMessageItemState extends State<AnimatedMessageItem>
 
   @override
   void dispose() {
+    _progress.dispose();
     _controller.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    if (!AppMotionPolicy.of(context).animate) return widget.child;
     return FadeTransition(
-      opacity: _fadeAnimation,
-      child: SlideTransition(position: _slideAnimation, child: widget.child),
+      opacity: _progress,
+      child: SlideTransition(position: _slide, child: widget.child),
     );
   }
 }
@@ -67,7 +64,8 @@ class _AnimatedMessageItemState extends State<AnimatedMessageItem>
 /// Three-dot "assistant is thinking" indicator.
 ///
 /// The ticker stops when reduced motion is requested, so an idle transcript does
-/// not keep a frame callback alive.
+/// not keep a frame callback alive. The dots are painted in the pill role from
+/// the shape scale, matching the bubble they preview.
 class TypingDots extends StatefulWidget {
   const TypingDots({super.key});
 
@@ -77,16 +75,10 @@ class TypingDots extends StatefulWidget {
 
 class _TypingDotsState extends State<TypingDots>
     with SingleTickerProviderStateMixin {
-  late AnimationController _controller;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1200),
-    );
-  }
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: AppMotion.emphasis,
+  );
 
   @override
   void didChangeDependencies() {
@@ -108,40 +100,41 @@ class _TypingDotsState extends State<TypingDots>
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: AnimatedBuilder(
-        animation: _controller,
-        builder: (context, _) {
-          return Row(
-            mainAxisSize: MainAxisSize.min,
-            children: List.generate(3, (i) {
-              final delay = i * 0.2;
-              final t = (_controller.value - delay).clamp(0.0, 1.0);
-              final scale = 0.5 + 0.5 * (1 - (2 * t - 1).abs());
-              return Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 2),
-                child: Transform.scale(
-                  scale: scale,
-                  child: Container(
-                    width: 8,
-                    height: 8,
-                    decoration: BoxDecoration(
-                      color: theme.colorScheme.primary.withValues(
-                        alpha: 0.4 + 0.6 * scale,
+    return Material(
+      color: theme.colorScheme.surfaceContainerHighest,
+      shape: AppShapes.pill,
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: AnimatedBuilder(
+          animation: _controller,
+          builder: (context, _) {
+            return Row(
+              mainAxisSize: MainAxisSize.min,
+              children: List.generate(3, (index) {
+                final delay = index * 0.2;
+                final t = (_controller.value - delay).clamp(0.0, 1.0);
+                final scale = 0.5 + 0.5 * (1 - (2 * t - 1).abs());
+                return Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 2),
+                  child: Transform.scale(
+                    scale: scale,
+                    child: Container(
+                      width: 8,
+                      height: 8,
+                      decoration: ShapeDecoration(
+                        color: theme.colorScheme.primary.withValues(
+                          alpha: 0.4 + 0.6 * scale,
+                        ),
+                        shape: const CircleBorder(),
                       ),
-                      shape: BoxShape.circle,
                     ),
                   ),
-                ),
-              );
-            }),
-          );
-        },
+                );
+              }),
+            );
+          },
+        ),
       ),
     );
   }

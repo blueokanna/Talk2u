@@ -3,6 +3,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:talk2u/l10n/generated/app_localizations.dart';
 import 'package:talk2u/src/models/character.dart';
 import 'package:talk2u/src/services/live2d_model_importer.dart';
+import 'package:talk2u/src/widgets/aurora_backdrop.dart';
 
 class CharacterEditPage extends StatefulWidget {
   final Character? character;
@@ -122,11 +123,11 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
 
   Future<void> _pickLive2dModel() async {
     final strings = AppLocalizations.of(context);
-    final result = await FilePicker.platform.pickFiles(
+    final file = await FilePicker.pickFile(
       type: FileType.custom,
       allowedExtensions: const ['zip'],
     );
-    final path = result?.files.single.path;
+    final path = file?.path;
     if (path == null) return;
     setState(() => _isImportingLive2d = true);
     try {
@@ -232,256 +233,239 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
     final theme = Theme.of(context);
     final strings = AppLocalizations.of(context);
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(
-          _isEditing ? strings.editCharacter : strings.createCharacter,
+    return AuroraBackdrop(
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(
+            _isEditing ? strings.editCharacter : strings.createCharacter,
+          ),
+          centerTitle: true,
         ),
-        centerTitle: true,
-      ),
-      body: Form(
-        key: _formKey,
-        child: ListView(
-          padding: const EdgeInsets.all(20),
-          children: [
-            _buildSectionCard(
-              theme,
-              children: [
-                _buildFieldLabel(theme, strings.characterName, required: true),
-                const SizedBox(height: 8),
-                TextFormField(
-                  controller: _nameController,
-                  maxLength: 10,
-                  decoration: _inputDecoration(strings.characterNameHint),
-                  validator: (v) => (v == null || v.trim().isEmpty)
-                      ? strings.characterNameRequired
-                      : null,
-                ),
-                const SizedBox(height: 16),
-                _buildFieldLabel(theme, strings.gender, required: true),
-                const SizedBox(height: 8),
-                _buildGenderSelector(theme),
-              ],
-            ),
-            const SizedBox(height: 16),
-            _buildSectionCard(
-              theme,
-              children: [
-                _buildFieldLabel(
-                  theme,
-                  strings.characterSetting,
-                  required: true,
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  strings.characterSettingHelp,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.outline,
+        body: Form(
+          key: _formKey,
+          child: ListView(
+            padding: const EdgeInsets.all(20),
+            children: [
+              _buildSectionCard(
+                children: [
+                  _buildFieldLabel(
+                    theme,
+                    strings.characterName,
+                    required: true,
                   ),
-                ),
-                const SizedBox(height: 8),
-                TextFormField(
-                  controller: _settingController,
-                  maxLength: 1200,
-                  maxLines: 6,
-                  minLines: 4,
-                  decoration: _inputDecoration(strings.characterSettingHint),
-                  validator: (v) => (v == null || v.trim().isEmpty)
-                      ? strings.characterSettingRequired
-                      : null,
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            _buildSectionCard(
-              theme,
-              children: [
-                _buildFieldLabel(theme, strings.characterDescription),
-                const SizedBox(height: 4),
-                Text(
-                  strings.characterDescriptionHelp,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.outline,
+                  const SizedBox(height: 8),
+                  TextFormField(
+                    controller: _nameController,
+                    maxLength: 10,
+                    decoration: _inputDecoration(strings.characterNameHint),
+                    validator: (v) => (v == null || v.trim().isEmpty)
+                        ? strings.characterNameRequired
+                        : null,
                   ),
-                ),
-                const SizedBox(height: 8),
-                TextFormField(
-                  controller: _descriptionController,
-                  maxLength: 1000,
-                  maxLines: 5,
-                  minLines: 3,
-                  decoration: _inputDecoration(
-                    strings.characterDescriptionHint,
+                  const SizedBox(height: 16),
+                  _buildFieldLabel(theme, strings.gender, required: true),
+                  const SizedBox(height: 8),
+                  _buildGenderSelector(),
+                ],
+              ),
+              const SizedBox(height: 16),
+              _buildSectionCard(
+                children: [
+                  _buildFieldLabel(
+                    theme,
+                    strings.characterSetting,
+                    required: true,
                   ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            _buildSectionCard(
-              theme,
-              children: [
-                _buildFieldLabel(theme, strings.characterGreeting),
-                const SizedBox(height: 8),
-                TextFormField(
-                  controller: _greetingController,
-                  maxLength: 200,
-                  maxLines: 4,
-                  minLines: 2,
-                  decoration: _inputDecoration(strings.characterGreetingHint),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            _buildSectionCard(
-              theme,
-              children: [
-                _buildFieldLabel(theme, strings.dialogueStyleExample),
-                const SizedBox(height: 4),
-                Text(
-                  strings.dialogueStyleHelp,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.outline,
+                  const SizedBox(height: 4),
+                  Text(
+                    strings.characterSettingHelp,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.outline,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 8),
-                TextFormField(
-                  controller: _dialogueExampleController,
-                  maxLength: 100,
-                  maxLines: 3,
-                  minLines: 2,
-                  decoration: _inputDecoration(strings.dialogueStyleHint),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            _buildSectionCard(
-              theme,
-              children: [
-                _buildFieldLabel(theme, strings.userName),
-                const SizedBox(height: 8),
-                TextFormField(
-                  controller: _userNameController,
-                  maxLength: 10,
-                  decoration: _inputDecoration(strings.userNameHint),
-                ),
-                const SizedBox(height: 16),
-                _buildFieldLabel(theme, strings.userPersona),
-                const SizedBox(height: 4),
-                Text(
-                  strings.userPersonaHelp,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.outline,
+                  const SizedBox(height: 8),
+                  TextFormField(
+                    controller: _settingController,
+                    maxLength: 1200,
+                    maxLines: 6,
+                    minLines: 4,
+                    decoration: _inputDecoration(strings.characterSettingHint),
+                    validator: (v) => (v == null || v.trim().isEmpty)
+                        ? strings.characterSettingRequired
+                        : null,
                   ),
-                ),
-                const SizedBox(height: 8),
-                TextFormField(
-                  controller: _userSettingController,
-                  maxLength: 500,
-                  maxLines: 4,
-                  minLines: 2,
-                  decoration: _inputDecoration(strings.userPersonaHint),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            _buildSectionCard(
-              theme,
-              children: [
-                _buildFieldLabel(theme, strings.live2dModel),
-                const SizedBox(height: 8),
-                TextFormField(
-                  controller: _live2dModelController,
-                  readOnly: true,
-                  decoration: _inputDecoration(strings.noLive2dModel).copyWith(
-                    prefixIcon: const Icon(Icons.view_in_ar_outlined),
-                    suffixIcon: _isImportingLive2d
-                        ? const Padding(
-                            padding: EdgeInsets.all(14),
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : IconButton(
-                            tooltip: strings.importLive2dModel,
-                            icon: const Icon(Icons.folder_open_outlined),
-                            onPressed: _pickLive2dModel,
-                          ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              _buildSectionCard(
+                children: [
+                  _buildFieldLabel(theme, strings.characterDescription),
+                  const SizedBox(height: 4),
+                  Text(
+                    strings.characterDescriptionHelp,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.outline,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 8),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: OutlinedButton.icon(
-                    onPressed: _isImportingLive2d ? null : _installBundledMao,
-                    icon: const Icon(Icons.download_for_offline_outlined),
-                    label: Text(strings.installMaoModel),
+                  const SizedBox(height: 8),
+                  TextFormField(
+                    controller: _descriptionController,
+                    maxLength: 1000,
+                    maxLines: 5,
+                    minLines: 3,
+                    decoration: _inputDecoration(
+                      strings.characterDescriptionHint,
+                    ),
                   ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            _buildSectionCard(
-              theme,
-              children: [
-                _buildFieldLabel(theme, strings.tags),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    ..._tags.map(
-                      (tag) => Chip(
-                        label: Text(tag),
-                        onDeleted: () => _removeTag(tag),
-                        deleteIconColor: theme.colorScheme.error,
-                        side: BorderSide(
-                          color: theme.colorScheme.outlineVariant,
+                ],
+              ),
+              const SizedBox(height: 16),
+              _buildSectionCard(
+                children: [
+                  _buildFieldLabel(theme, strings.characterGreeting),
+                  const SizedBox(height: 8),
+                  TextFormField(
+                    controller: _greetingController,
+                    maxLength: 200,
+                    maxLines: 4,
+                    minLines: 2,
+                    decoration: _inputDecoration(strings.characterGreetingHint),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              _buildSectionCard(
+                children: [
+                  _buildFieldLabel(theme, strings.dialogueStyleExample),
+                  const SizedBox(height: 4),
+                  Text(
+                    strings.dialogueStyleHelp,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.outline,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextFormField(
+                    controller: _dialogueExampleController,
+                    maxLength: 100,
+                    maxLines: 3,
+                    minLines: 2,
+                    decoration: _inputDecoration(strings.dialogueStyleHint),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              _buildSectionCard(
+                children: [
+                  _buildFieldLabel(theme, strings.userName),
+                  const SizedBox(height: 8),
+                  TextFormField(
+                    controller: _userNameController,
+                    maxLength: 10,
+                    decoration: _inputDecoration(strings.userNameHint),
+                  ),
+                  const SizedBox(height: 16),
+                  _buildFieldLabel(theme, strings.userPersona),
+                  const SizedBox(height: 4),
+                  Text(
+                    strings.userPersonaHelp,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.outline,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextFormField(
+                    controller: _userSettingController,
+                    maxLength: 500,
+                    maxLines: 4,
+                    minLines: 2,
+                    decoration: _inputDecoration(strings.userPersonaHint),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              _buildSectionCard(
+                children: [
+                  _buildFieldLabel(theme, strings.live2dModel),
+                  const SizedBox(height: 8),
+                  TextFormField(
+                    controller: _live2dModelController,
+                    readOnly: true,
+                    decoration: _inputDecoration(strings.noLive2dModel)
+                        .copyWith(
+                          prefixIcon: const Icon(Icons.view_in_ar_outlined),
+                          suffixIcon: _isImportingLive2d
+                              ? const Padding(
+                                  padding: EdgeInsets.all(14),
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : IconButton(
+                                  tooltip: strings.importLive2dModel,
+                                  icon: const Icon(Icons.folder_open_outlined),
+                                  onPressed: _pickLive2dModel,
+                                ),
+                        ),
+                  ),
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: OutlinedButton.icon(
+                      onPressed: _isImportingLive2d ? null : _installBundledMao,
+                      icon: const Icon(Icons.download_for_offline_outlined),
+                      label: Text(strings.installMaoModel),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              _buildSectionCard(
+                children: [
+                  _buildFieldLabel(theme, strings.tags),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      ..._tags.map(
+                        (tag) => Chip(
+                          label: Text(tag),
+                          onDeleted: () => _removeTag(tag),
                         ),
                       ),
-                    ),
-                    ActionChip(
-                      avatar: const Icon(Icons.add, size: 18),
-                      label: Text(strings.addTag),
-                      onPressed: () => _showAddTagDialog(theme),
-                      side: BorderSide(
-                        color: theme.colorScheme.outlineVariant,
-                        style: BorderStyle.solid,
+                      ActionChip(
+                        avatar: const Icon(Icons.add, size: 18),
+                        label: Text(strings.addTag),
+                        onPressed: _showAddTagDialog,
                       ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-            const SizedBox(height: 32),
-            FilledButton(
-              onPressed: _isSaving ? null : _save,
-              style: FilledButton.styleFrom(
-                minimumSize: const Size.fromHeight(48),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(24),
-                ),
+                    ],
+                  ),
+                ],
               ),
-              child: _isSaving
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: Colors.white,
-                      ),
-                    )
-                  : Text(strings.confirm),
-            ),
-            const SizedBox(height: 32),
-          ],
+              const SizedBox(height: 32),
+              FilledButton(
+                onPressed: _isSaving ? null : _save,
+                child: _isSaving
+                    ? SizedBox.square(
+                        dimension: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: theme.colorScheme.onPrimary,
+                        ),
+                      )
+                    : Text(strings.confirm),
+              ),
+              const SizedBox(height: 32),
+            ],
+          ),
         ),
       ),
     );
   }
 
-  Widget _buildSectionCard(ThemeData theme, {required List<Widget> children}) {
+  Widget _buildSectionCard({required List<Widget> children}) {
     return Card(
-      elevation: 0,
-      color: theme.colorScheme.surfaceContainerLow,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -517,7 +501,7 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
     );
   }
 
-  Widget _buildGenderSelector(ThemeData theme) {
+  Widget _buildGenderSelector() {
     final strings = AppLocalizations.of(context);
     return Row(
       children: CharacterGender.values.map((g) {
@@ -533,12 +517,6 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
             label: Text(label),
             selected: isSelected,
             onSelected: (_) => setState(() => _gender = g),
-            selectedColor: theme.colorScheme.primaryContainer,
-            side: BorderSide(
-              color: isSelected
-                  ? theme.colorScheme.primary
-                  : theme.colorScheme.outlineVariant,
-            ),
           ),
         );
       }).toList(),
@@ -546,14 +524,10 @@ class _CharacterEditPageState extends State<CharacterEditPage> {
   }
 
   InputDecoration _inputDecoration(String hint) {
-    return InputDecoration(
-      hintText: hint,
-      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-    );
+    return InputDecoration(hintText: hint);
   }
 
-  void _showAddTagDialog(ThemeData theme) {
+  void _showAddTagDialog() {
     _tagController.clear();
     final strings = AppLocalizations.of(context);
     showDialog(

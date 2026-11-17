@@ -4,8 +4,14 @@ import 'package:talk2u/src/services/call_session.dart';
 import 'package:talk2u/src/services/moss_tts_service.dart';
 import 'package:talk2u/src/services/offline_llm_service.dart';
 import 'package:talk2u/src/state/chat_state.dart';
+import 'package:talk2u/src/widgets/fluid_switcher.dart';
 
 /// One-line execution route summary: LLM backend, TTS backend, duplex mode.
+///
+/// The route is evidence, not decoration: an item only claims hardware when the
+/// native report proved it with a completed turn. When the route changes, the
+/// strip swaps through [FluidSwitcher] so a call starting or a backend becoming
+/// verified reads as a transition rather than a layout jump.
 class ChatExecutionStatus extends StatelessWidget {
   const ChatExecutionStatus({
     super.key,
@@ -27,7 +33,8 @@ class ChatExecutionStatus extends StatelessWidget {
       builder: (context, _) {
         final llm = OfflineLlmService.instance;
         final moss = MossTtsService.instance;
-        final colors = Theme.of(context).colorScheme;
+        final theme = Theme.of(context);
+        final colors = theme.colorScheme;
         final items = <({IconData icon, String label, Color color})>[];
 
         if (chatState.usesAndroidOfflineProvider) {
@@ -61,46 +68,52 @@ class ChatExecutionStatus extends StatelessWidget {
             color: fullDuplex ? colors.primary : colors.onSurfaceVariant,
           ));
         }
-        if (items.isEmpty) return const SizedBox.shrink();
-
-        final itemWidth = (MediaQuery.sizeOf(context).width - 24)
-            .clamp(0.0, 420.0)
-            .toDouble();
-        return ColoredBox(
-          color: colors.surfaceContainerLow,
-          child: SafeArea(
-            top: false,
-            bottom: false,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              child: Wrap(
-                spacing: 16,
-                runSpacing: 6,
-                children: items
-                    .map(
-                      (item) => SizedBox(
-                        width: itemWidth,
-                        child: Row(
-                          children: [
-                            Icon(item.icon, size: 16, color: item.color),
-                            const SizedBox(width: 6),
-                            Expanded(
-                              child: Text(
-                                item.label,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: Theme.of(context).textTheme.labelMedium
-                                    ?.copyWith(color: item.color),
+        final signature = items
+            .map((item) => '${item.icon.codePoint}:${item.label}')
+            .join('|');
+        return FluidSwitcher(
+          axis: Axis.vertical,
+          child: items.isEmpty
+              ? const SizedBox.shrink(key: ValueKey('route-empty'))
+              : Material(
+                  key: ValueKey('route-$signature'),
+                  color: colors.surfaceContainerLow,
+                  child: SafeArea(
+                    top: false,
+                    bottom: false,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          for (final item in items)
+                            Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 2),
+                              child: Row(
+                                children: [
+                                  Icon(item.icon, size: 16, color: item.color),
+                                  const SizedBox(width: 6),
+                                  Expanded(
+                                    child: Text(
+                                      item.label,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: theme.textTheme.labelMedium
+                                          ?.copyWith(color: item.color),
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
-                          ],
-                        ),
+                        ],
                       ),
-                    )
-                    .toList(growable: false),
-              ),
-            ),
-          ),
+                    ),
+                  ),
+                ),
         );
       },
     );

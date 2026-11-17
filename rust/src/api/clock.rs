@@ -9,10 +9,10 @@ use tzcraft::{Ticks, Zone, Zoned};
 /// the arithmetic type: 128-bit nanoseconds, floor semantics before the epoch,
 /// and a distinct `Duration` so instants and spans cannot be mixed.
 pub(crate) fn now_millis() -> i64 {
-    if let Ok(ticks) = Ticks::now() {
-        if let Ok(millis) = ticks.timestamp_millis() {
-            return millis;
-        }
+    if let Ok(ticks) = Ticks::now()
+        && let Ok(millis) = ticks.timestamp_millis()
+    {
+        return millis;
     }
     // A clock set before 1970 is the only way `Ticks::now` fails here; the
     // fallback keeps message ordering usable instead of stamping everything 0.

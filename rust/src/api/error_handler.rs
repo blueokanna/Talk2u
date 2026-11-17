@@ -224,67 +224,93 @@ mod tests {
 
     #[test]
     fn test_chat_error_is_retryable() {
-        assert!(ChatError::NetworkError {
-            message: "timeout".into()
-        }
-        .is_retryable());
-        assert!(ChatError::ApiError {
-            status: 500,
-            message: "err".into()
-        }
-        .is_retryable());
-        assert!(!ChatError::ApiError {
-            status: 400,
-            message: "bad".into()
-        }
-        .is_retryable());
-        assert!(!ChatError::ApiError {
-            status: 401,
-            message: "auth".into()
-        }
-        .is_retryable());
-        assert!(ChatError::RateLimitError {
-            retry_after_secs: 1
-        }
-        .is_retryable());
+        assert!(
+            ChatError::NetworkError {
+                message: "timeout".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            ChatError::ApiError {
+                status: 500,
+                message: "err".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !ChatError::ApiError {
+                status: 400,
+                message: "bad".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !ChatError::ApiError {
+                status: 401,
+                message: "auth".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            ChatError::RateLimitError {
+                retry_after_secs: 1
+            }
+            .is_retryable()
+        );
 
-        assert!(!ChatError::ValidationError {
-            message: "bad".into()
-        }
-        .is_retryable());
-        assert!(!ChatError::StorageError {
-            message: "io".into()
-        }
-        .is_retryable());
-        assert!(!ChatError::AuthError {
-            message: "denied".into()
-        }
-        .is_retryable());
-        assert!(ChatError::StreamError {
-            message: "broken".into()
-        }
-        .is_retryable());
+        assert!(
+            !ChatError::ValidationError {
+                message: "bad".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !ChatError::StorageError {
+                message: "io".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !ChatError::AuthError {
+                message: "denied".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            ChatError::StreamError {
+                message: "broken".into()
+            }
+            .is_retryable()
+        );
 
-        assert!(ChatError::GlmBusinessError {
-            code: "1302".into(),
-            message: "并发".into()
-        }
-        .is_retryable());
-        assert!(ChatError::GlmBusinessError {
-            code: "1303".into(),
-            message: "频率".into()
-        }
-        .is_retryable());
-        assert!(!ChatError::GlmBusinessError {
-            code: "1304".into(),
-            message: "限额".into()
-        }
-        .is_retryable());
-        assert!(!ChatError::GlmBusinessError {
-            code: "1113".into(),
-            message: "余额".into()
-        }
-        .is_retryable());
+        assert!(
+            ChatError::GlmBusinessError {
+                code: "1302".into(),
+                message: "并发".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            ChatError::GlmBusinessError {
+                code: "1303".into(),
+                message: "频率".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !ChatError::GlmBusinessError {
+                code: "1304".into(),
+                message: "限额".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !ChatError::GlmBusinessError {
+                code: "1113".into(),
+                message: "余额".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]

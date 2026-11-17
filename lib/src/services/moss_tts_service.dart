@@ -11,6 +11,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:talk2u/src/l10n/app_strings.dart';
 import 'package:talk2u/src/lexicon/moss_voice_catalog.dart';
 import 'package:talk2u/src/lexicon/speech_cue_lexicon.dart';
+import 'package:talk2u/src/services/speech_stream.dart';
 import 'package:talk2u/src/services/speech_text_normalizer.dart';
 
 export 'package:talk2u/src/lexicon/moss_voice_catalog.dart' show MossVoice;
@@ -38,6 +39,11 @@ class _MossAudio {
 
 class _MossCancelled implements Exception {
   const _MossCancelled();
+}
+
+/// Internal sentinel: the streaming text source has produced every chunk.
+class _MossStreamEnd implements Exception {
+  const _MossStreamEnd();
 }
 
 class _MossSynthesisOutcome {
@@ -157,6 +163,11 @@ class MossTtsService extends ChangeNotifier {
   final Map<File, int> _pendingOutputs = {};
   Future<void>? _nativeInitializationFuture;
   Future<void>? _stopFuture;
+  StreamSubscription<String>? _speechTextSubscription;
+  StreamController<String>? _speechBlocks;
+  StreamIterator<String>? _speechBlockIterator;
+  SpeechStreamSegmenter? _speechSegmenter;
+  bool _speechTextClosed = false;
   Future<void> _playerOperation = Future.value();
   bool _disposed = false;
   double _segmentProgressStart = 0;
@@ -471,11 +482,224 @@ class MossTtsService extends ChangeNotifier {
     if (toCompletion) await completion.future;
   }
 
+  /// Speaks a reply while it is still being generated.
+  ///
+  /// [textDeltas] carries raw model text. The first sentence is synthesised as
+  /// soon as its terminator arrives; later sentences are synthesised during
+  /// playback. If playback catches up before a sentence is complete, the
+  /// segmenter releases the clause up to the last comma instead of leaving a
+  /// silent gap. The stream is closed by the producer, not by this method.
+  Future<void> speakStream(
+    Stream<String> textDeltas, {
+    bool toCompletion = false,
+  }) async {
+    if (_disposed) return;
+    final operation = ++_operation;
+    await _stopCurrentSpeech();
+    if (operation != _operation || _disposed) return;
+    await initialize();
+    if (operation != _operation || _disposed) return;
+    if (!ready) throw StateError(AppStrings.current.mossImportFirst);
+    if (!runtimeInitialized) await _initializeNativeRuntime();
+    if (operation != _operation || _disposed) return;
+    final startup = Completer<void>();
+    _startupCompleter = startup;
+    final completion = Completer<void>();
+    _speechDoneCompleter = completion;
+    generating = true;
+    playbackAmplitude = 0;
+    playbackProgress = 0;
+    _segmentProgressStart = 0;
+    _segmentProgressEnd = 1;
+    _playbackDuration = Duration.zero;
+    _amplitudeEnvelope = const [];
+    lastError = null;
+    lastErrorCode = null;
+    notifyListeners();
+    unawaited(_runSpeechStream(textDeltas, operation, startup, completion));
+    await startup.future;
+    if (toCompletion) await completion.future;
+  }
+
   /// Resolves when the current utterance has finished playing (or was
   /// cancelled). [speak] deliberately resolves earlier, at first audio, so the
   /// caller can react to playback starting.
   Future<void> get speechCompletion =>
       _speechDoneCompleter?.future ?? Future<void>.value();
+
+  Future<void> _runSpeechStream(
+    Stream<String> textDeltas,
+    int operation,
+    Completer<void> startup,
+    Completer<void> completion,
+  ) async {
+    final segmenter = SpeechStreamSegmenter();
+    final blocks = StreamController<String>();
+    final iterator = StreamIterator<String>(blocks.stream);
+    _speechSegmenter = segmenter;
+    _speechBlocks = blocks;
+    _speechBlockIterator = iterator;
+    _speechTextClosed = false;
+
+    void emitSegments(Iterable<String> segments) {
+      for (final segment in segments) {
+        for (final chunk in splitMossText(segment, maxCharacters: 48)) {
+          if (!blocks.isClosed) blocks.add(chunk);
+        }
+      }
+    }
+
+    final subscription = textDeltas.listen(
+      (delta) {
+        if (operation != _operation) return;
+        emitSegments(segmenter.add(delta));
+      },
+      onError: (Object error, StackTrace stackTrace) {
+        if (!blocks.isClosed) blocks.addError(error, stackTrace);
+      },
+      onDone: () {
+        _speechTextClosed = true;
+        emitSegments(segmenter.flush());
+        if (!blocks.isClosed) unawaited(blocks.close());
+      },
+    );
+    _speechTextSubscription = subscription;
+
+    try {
+      if (!await iterator.moveNext()) {
+        if (!startup.isCompleted) startup.complete();
+        return;
+      }
+      var index = 0;
+      var current = await _synthesizeChunk(
+        iterator.current,
+        operation,
+        index++,
+      );
+      while (true) {
+        if (operation != _operation) throw const _MossCancelled();
+        final pendingNext = _MossPendingAudio(
+          _nextStreamAudio(iterator, operation, index++),
+        );
+        generating = true;
+        // Start a clause synthesis while the current sentence is still playing
+        // when generation is slower than playback. Waiting until playback ends
+        // would leave a gap the size of one native synthesis call.
+        Timer? clauseTimer;
+        if (!_speechTextClosed) {
+          clauseTimer = Timer.periodic(const Duration(milliseconds: 400), (_) {
+            if (operation != _operation || _speechTextClosed) return;
+            final clause = segmenter.takeClause();
+            if (clause != null) emitSegments(<String>[clause]);
+          });
+        }
+        try {
+          await _playAudio(current, operation, startup);
+        } finally {
+          clauseTimer?.cancel();
+        }
+        await _deleteAudio(current.file);
+        if (operation != _operation) throw const _MossCancelled();
+        // Playback is done. If the timer did not fire (very short sentence) and
+        // a clause is still pending, release it now.
+        if (!_speechTextClosed && segmenter.hasPending) {
+          final clause = segmenter.takeClause();
+          if (clause != null) emitSegments(<String>[clause]);
+        }
+        final outcome = await pendingNext.future;
+        if (operation != _operation) throw const _MossCancelled();
+        if (outcome.error is _MossStreamEnd) break;
+        if (outcome.error != null) {
+          Error.throwWithStackTrace(
+            outcome.error!,
+            outcome.stackTrace ?? StackTrace.current,
+          );
+        }
+        current = outcome.audio!;
+      }
+      if (operation != _operation) throw const _MossCancelled();
+      generating = false;
+      speaking = false;
+      playbackAmplitude = 0;
+      playbackProgress = 1;
+      _stopLipSyncClock();
+      notifyListeners();
+    } on PlatformException catch (error) {
+      if (operation != _operation || error.code == 'moss_cancelled') {
+        if (!startup.isCompleted) startup.complete();
+        return;
+      }
+      generating = false;
+      speaking = false;
+      lastError = error.message ?? error.code;
+      lastErrorCode = error.code;
+      notifyListeners();
+      if (!startup.isCompleted) {
+        startup.completeError(error, StackTrace.current);
+      }
+    } on _MossCancelled {
+      if (!startup.isCompleted) startup.complete();
+    } catch (error, stackTrace) {
+      if (operation != _operation) {
+        if (!startup.isCompleted) startup.complete();
+        return;
+      }
+      generating = false;
+      speaking = false;
+      lastError = error.toString();
+      lastErrorCode = 'moss_synthesis_failed';
+      notifyListeners();
+      if (!startup.isCompleted) startup.completeError(error, stackTrace);
+    } finally {
+      await subscription.cancel();
+      await iterator.cancel();
+      if (identical(_speechTextSubscription, subscription)) {
+        _speechTextSubscription = null;
+      }
+      if (identical(_speechBlocks, blocks)) _speechBlocks = null;
+      if (identical(_speechBlockIterator, iterator)) {
+        _speechBlockIterator = null;
+      }
+      if (identical(_speechSegmenter, segmenter)) _speechSegmenter = null;
+      if (!blocks.isClosed) await blocks.close();
+      if (identical(_startupCompleter, startup)) _startupCompleter = null;
+      if (identical(_speechDoneCompleter, completion)) {
+        _speechDoneCompleter = null;
+      }
+      if (!completion.isCompleted) completion.complete();
+      if (operation == _operation) {
+        generating = false;
+        speaking = false;
+        playbackAmplitude = 0;
+        _stopLipSyncClock();
+        notifyListeners();
+        if (operation == _operation && lastError != null) {
+          _operation++;
+          try {
+            await _stopCurrentSpeech();
+          } on Object catch (_) {
+            // Preserve the original synthesis/playback failure.
+          }
+        }
+      }
+      await _deletePendingOutputs(operation: operation);
+    }
+  }
+
+  /// Waits for the next text chunk, then synthesises it.
+  ///
+  /// Throws [_MossStreamEnd] after the producer closes the stream; wrapped in
+  /// [_MossPendingAudio] so an early synthesis failure is attached to a handler
+  /// while the previous chunk is still playing.
+  Future<_MossAudio> _nextStreamAudio(
+    StreamIterator<String> iterator,
+    int operation,
+    int index,
+  ) async {
+    if (!await iterator.moveNext()) throw const _MossStreamEnd();
+    if (operation != _operation) throw const _MossCancelled();
+    return _synthesizeChunk(iterator.current, operation, index);
+  }
 
   Future<void> _runSpeech(
     String text,
@@ -752,6 +976,21 @@ class MossTtsService extends ChangeNotifier {
 
   Future<void> _stopCurrentSpeechOnce() async {
     final outputs = _pendingOutputs.keys.toList(growable: false);
+    // Cancel the text side before the audio side: an unawaited producer must
+    // not enqueue a chunk after cancellation has completed.
+    final textSubscription = _speechTextSubscription;
+    _speechTextSubscription = null;
+    final blockIterator = _speechBlockIterator;
+    _speechBlockIterator = null;
+    final blocks = _speechBlocks;
+    _speechBlocks = null;
+    _speechSegmenter = null;
+    _speechTextClosed = true;
+    await textSubscription?.cancel();
+    await blockIterator?.cancel();
+    if (blocks != null && !blocks.isClosed) {
+      unawaited(blocks.close());
+    }
     final startup = _startupCompleter;
     _startupCompleter = null;
     if (startup != null && !startup.isCompleted) startup.complete();
@@ -860,6 +1099,11 @@ class MossTtsService extends ChangeNotifier {
     if (startup != null && !startup.isCompleted) startup.complete();
     final playback = _playbackCompleter;
     if (playback != null && !playback.isCompleted) playback.complete();
+    unawaited(_speechTextSubscription?.cancel());
+    unawaited(_speechBlockIterator?.cancel());
+    final blocks = _speechBlocks;
+    _speechBlocks = null;
+    if (blocks != null && !blocks.isClosed) unawaited(blocks.close());
     _completeSubscription?.cancel();
     _durationSubscription?.cancel();
     _positionSubscription?.cancel();

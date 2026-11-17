@@ -143,7 +143,7 @@ fn classify(device: &[IpAddr], walk: Option<&[IpAddr]>, rcode: u8) -> DnsVerdict
                 DnsVerdict::Suspicious
             } else {
                 DnsVerdict::Unverified
-            }
+            };
         }
     };
     if device.iter().chain(walk.iter()).any(is_suspicious) {

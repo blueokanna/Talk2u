@@ -13,6 +13,7 @@ import 'package:talk2u/src/services/accelerator_telemetry_service.dart';
 import 'package:talk2u/src/rendering/motion_policy.dart';
 import 'package:talk2u/src/rendering/avatar_frame_gate.dart';
 import 'package:talk2u/src/services/offline_speech_service.dart';
+import 'package:talk2u/src/theme/app_shapes.dart';
 import 'package:webview_cef/webview_cef.dart';
 import 'package:webview_windows/webview_windows.dart' as windows_webview;
 
@@ -100,12 +101,22 @@ class _Live2dAvatarState extends State<Live2dAvatar>
   bool _reducedMotion = false;
   bool get _active => _foreground && _tickerEnabled && widget.visible;
 
+  int? _lastBackgroundColor;
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     final policy = AppMotionPolicy.of(context);
     _tickerEnabled = policy.active;
     _reducedMotion = policy.reducedMotion;
+    final backgroundColor = Theme.of(context).colorScheme.surface.toARGB32();
+    if (_lastBackgroundColor != backgroundColor) {
+      _lastBackgroundColor = backgroundColor;
+      // The initial value travels in creationParams. A theme change while the
+      // platform view already exists must update the native clear colour, or the
+      // avatar keeps the old light background in dark mode (and vice versa).
+      _invoke('setBackgroundColor', {'value': backgroundColor});
+    }
     _syncRenderPolicy();
   }
 
@@ -594,16 +605,6 @@ class _Live2dAvatarState extends State<Live2dAvatar>
     return Map<String, dynamic>.from(value);
   }
 
-  String _usageValue(
-    Map<dynamic, dynamic>? metric,
-    AppLocalizations strings,
-    String unavailable,
-  ) {
-    final percent = metric?['percent'];
-    if (metric?['available'] != true || percent is! num) return unavailable;
-    return strings.percentValue(percent.toStringAsFixed(1));
-  }
-
   Future<void> _showDiagnostics() async {
     if (_diagnosticsLoading ||
         (_channel == null &&
@@ -614,79 +615,14 @@ class _Live2dAvatarState extends State<Live2dAvatar>
     final strings = AppLocalizations.of(context);
     setState(() => _diagnosticsLoading = true);
     try {
-      final raw = _channel != null
-          ? await _channel!.invokeMethod<String>('diagnostics')
-          : _windowsController != null
-          ? await _windowsController!.executeScript(
-              'Talk2UAvatar.diagnostics()',
-            )
-          : await _desktopController!.evaluateJavascript(
-              'Talk2UAvatar.diagnostics()',
-            );
-      final details = raw == null
-          ? _readyDetails ?? const {}
-          : _decodeDiagnostics(raw.toString(), strings);
-      if (!mounted) return;
-      final usage = details['resourceUsage'] as Map?;
-      final renderer = details['renderer'] as Map?;
-      final policy = details['rendererPolicy'] as Map?;
-      final platform = renderer?['platform'] as Map?;
-      final interop = platform?['vulkanInterop'] as Map?;
-      final backend =
-          policy?['actualBackend']?.toString() ??
-          renderer?['backend']?.toString() ??
-          strings.usageUnavailable;
-      final gpuDevice =
-          interop?['device']?.toString() ??
-          renderer?['renderer']?.toString() ??
-          strings.usageUnavailable;
-      final frameCount = details['frameCount']?.toString() ?? '0';
-      final accelerator = await AcceleratorTelemetryService.instance.sample();
+      final details = await _readDiagnostics(strings);
       if (!mounted) return;
       await showDialog<void>(
         context: context,
-        builder: (context) => AlertDialog(
-          title: Text(strings.live2dDiagnostics),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _DiagnosticRow(label: strings.renderBackend, value: backend),
-              _DiagnosticRow(label: strings.gpuDevice, value: gpuDevice),
-              _DiagnosticRow(label: strings.renderedFrames, value: frameCount),
-              _DiagnosticRow(
-                label: strings.cpuUsage,
-                value: _usageValue(
-                  usage?['cpu'] as Map?,
-                  strings,
-                  strings.usageUnavailable,
-                ),
-              ),
-              _DiagnosticRow(
-                label: strings.gpuUsage,
-                value: _usageValue(
-                  usage?['gpu'] as Map?,
-                  strings,
-                  strings.gpuUsageUnavailable,
-                ),
-              ),
-              _DiagnosticRow(
-                label: strings.npuUsage,
-                value:
-                    accelerator?.available != true ||
-                        accelerator?.percent == null
-                    ? strings.npuUsageUnavailable
-                    : strings.npuRecentWorkload(
-                        accelerator!.percent!.toStringAsFixed(1),
-                      ),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: Text(strings.close),
-            ),
-          ],
+        builder: (_) => _Live2dDiagnosticsDialog(
+          initialDetails: details,
+          strings: strings,
+          read: () => _readDiagnostics(strings),
         ),
       );
     } catch (error) {
@@ -697,6 +633,20 @@ class _Live2dAvatarState extends State<Live2dAvatar>
     } finally {
       if (mounted) setState(() => _diagnosticsLoading = false);
     }
+  }
+
+  Future<Map<String, dynamic>> _readDiagnostics(
+    AppLocalizations strings,
+  ) async {
+    final raw = _channel != null
+        ? await _channel!.invokeMethod<String>('diagnostics')
+        : _windowsController != null
+        ? await _windowsController!.executeScript('Talk2UAvatar.diagnostics()')
+        : await _desktopController!.evaluateJavascript(
+            'Talk2UAvatar.diagnostics()',
+          );
+    if (raw == null) return _readyDetails ?? const {};
+    return _decodeDiagnostics(raw.toString(), strings);
   }
 
   @override
@@ -736,7 +686,7 @@ class _Live2dAvatarState extends State<Live2dAvatar>
                 'reducedMotion': _reducedMotion,
                 'backgroundColor': Theme.of(
                   context,
-                ).scaffoldBackgroundColor.toARGB32(),
+                ).colorScheme.surface.toARGB32(),
               },
               creationParamsCodec: const StandardMessageCodec(),
             )
@@ -793,27 +743,38 @@ class _Live2dAvatarState extends State<Live2dAvatar>
           if (_error != null)
             Align(
               alignment: Alignment.bottomCenter,
-              child: Material(
-                color: Theme.of(context).colorScheme.errorContainer,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 4,
-                  ),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          _error!,
-                          style: Theme.of(context).textTheme.bodySmall,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Material(
+                  color: Theme.of(context).colorScheme.errorContainer,
+                  shape: AppShapes.field,
+                  clipBehavior: Clip.antiAlias,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 4,
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            _error!,
+                            style: Theme.of(context).textTheme.bodySmall
+                                ?.copyWith(
+                                  color: Theme.of(
+                                    context,
+                                  ).colorScheme.onErrorContainer,
+                                ),
+                          ),
                         ),
-                      ),
-                      IconButton(
-                        tooltip: strings.reloadLive2d,
-                        onPressed: _restartRenderer,
-                        icon: const Icon(Icons.refresh),
-                      ),
-                    ],
+                        IconButton(
+                          tooltip: strings.reloadLive2d,
+                          onPressed: _restartRenderer,
+                          icon: const Icon(Icons.refresh),
+                          color: Theme.of(context).colorScheme.onErrorContainer,
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -822,6 +783,150 @@ class _Live2dAvatarState extends State<Live2dAvatar>
       ),
     );
   }
+}
+
+class _Live2dDiagnosticsDialog extends StatefulWidget {
+  const _Live2dDiagnosticsDialog({
+    required this.initialDetails,
+    required this.strings,
+    required this.read,
+  });
+
+  final Map<String, dynamic> initialDetails;
+  final AppLocalizations strings;
+  final Future<Map<String, dynamic>> Function() read;
+
+  @override
+  State<_Live2dDiagnosticsDialog> createState() =>
+      _Live2dDiagnosticsDialogState();
+}
+
+class _Live2dDiagnosticsDialogState extends State<_Live2dDiagnosticsDialog> {
+  late Map<String, dynamic> _details = widget.initialDetails;
+  AcceleratorTelemetrySample? _accelerator =
+      AcceleratorTelemetryService.instance.latest;
+  Timer? _timer;
+  bool _refreshing = false;
+  bool _mounted = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) => _refresh());
+    _refresh();
+  }
+
+  @override
+  void dispose() {
+    _mounted = false;
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _refresh() async {
+    if (_refreshing) return;
+    _refreshing = true;
+    try {
+      final details = await widget.read();
+      final accelerator = await AcceleratorTelemetryService.instance.sample();
+      if (!_mounted || !mounted) return;
+      setState(() {
+        _details = details;
+        _accelerator = accelerator;
+      });
+    } catch (_) {
+      // Keep the last good sample; a transient platform-channel failure must
+      // not tear down a dialog the user is reading.
+    } finally {
+      _refreshing = false;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final strings = widget.strings;
+    final usage = _details['resourceUsage'] as Map?;
+    final renderer = _details['renderer'] as Map?;
+    final policy = _details['rendererPolicy'] as Map?;
+    final platform = renderer?['platform'] as Map?;
+    final interop = platform?['vulkanInterop'] as Map?;
+    final backend =
+        policy?['actualBackend']?.toString() ??
+        renderer?['backend']?.toString() ??
+        strings.usageUnavailable;
+    final gpuDevice =
+        interop?['device']?.toString() ??
+        renderer?['renderer']?.toString() ??
+        strings.usageUnavailable;
+    final frameCount = _details['frameCount']?.toString() ?? '0';
+    final accelerator = _accelerator;
+    return AlertDialog(
+      title: Text(strings.live2dDiagnostics),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  strings.live2dDiagnosticsAutoRefresh,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            ),
+            _DiagnosticRow(label: strings.renderBackend, value: backend),
+            _DiagnosticRow(label: strings.gpuDevice, value: gpuDevice),
+            _DiagnosticRow(label: strings.renderedFrames, value: frameCount),
+            _DiagnosticRow(
+              label: strings.cpuUsage,
+              value: _usageText(
+                usage?['cpu'] as Map?,
+                strings,
+                strings.usageUnavailable,
+              ),
+            ),
+            _DiagnosticRow(
+              label: strings.gpuUsage,
+              value: _usageText(
+                usage?['gpu'] as Map?,
+                strings,
+                strings.gpuUsageUnavailable,
+              ),
+            ),
+            _DiagnosticRow(
+              label: strings.npuUsage,
+              value:
+                  accelerator?.available != true || accelerator?.percent == null
+                  ? strings.npuUsageUnavailable
+                  : strings.npuRecentWorkload(
+                      accelerator!.percent!.toStringAsFixed(1),
+                    ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: Text(strings.close),
+        ),
+      ],
+    );
+  }
+}
+
+String _usageText(
+  Map<dynamic, dynamic>? metric,
+  AppLocalizations strings,
+  String unavailable,
+) {
+  final percent = metric?['percent'];
+  if (metric?['available'] != true || percent is! num) return unavailable;
+  return strings.percentValue(percent.toStringAsFixed(1));
 }
 
 class _DiagnosticRow extends StatelessWidget {

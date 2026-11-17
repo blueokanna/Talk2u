@@ -826,6 +826,12 @@ public:
         }
     }
 
+    void SetBackgroundColor(uint32_t backgroundColor) {
+        clearRed_ = static_cast<float>((backgroundColor >> 16U) & 0xffU) / 255.0F;
+        clearGreen_ = static_cast<float>((backgroundColor >> 8U) & 0xffU) / 255.0F;
+        clearBlue_ = static_cast<float>(backgroundColor & 0xffU) / 255.0F;
+    }
+
     void Prepare() {
         EnsureFramework(assets_);
         if (!model_) model_ = std::make_unique<NativeModel>(source_);
@@ -1234,6 +1240,17 @@ Java_com_blue_talk2u_Live2dNativeBridge_nativeCreate(
         Throw(environment, error.what());
         return 0;
     }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_blue_talk2u_Live2dNativeBridge_nativeSetBackgroundColor(
+    JNIEnv* environment,
+    jobject,
+    jlong handle,
+    jint backgroundColor) {
+    Invoke(environment, [&] {
+        FindSession(handle).SetBackgroundColor(static_cast<uint32_t>(backgroundColor));
+    });
 }
 
 extern "C" JNIEXPORT void JNICALL

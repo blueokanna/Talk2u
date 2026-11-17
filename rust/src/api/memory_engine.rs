@@ -915,17 +915,9 @@ impl MemoryEngine {
         let arousal = (pos_score + neg_score).min(1.0);
 
         let dominant = if pos_score > neg_score {
-            if pos_score > 0.7 {
-                "喜悦"
-            } else {
-                "轻松"
-            }
+            if pos_score > 0.7 { "喜悦" } else { "轻松" }
         } else if neg_score > pos_score {
-            if neg_score > 0.7 {
-                "悲伤"
-            } else {
-                "低落"
-            }
+            if neg_score > 0.7 { "悲伤" } else { "低落" }
         } else {
             "平静"
         };

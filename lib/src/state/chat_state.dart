@@ -81,6 +81,8 @@ class ChatState extends ChangeNotifier with WidgetsBindingObserver {
   String? _lastFailedContent;
   List<ConversationSummary> _conversations = [];
   StreamSubscription<ChatStreamEvent>? _streamSubscription;
+  final StreamController<ChatStreamEvent> _responseEvents =
+      StreamController<ChatStreamEvent>.broadcast(sync: true);
 
   Timer? _retryDoneTimer;
 
@@ -109,6 +111,16 @@ class ChatState extends ChangeNotifier with WidgetsBindingObserver {
   String? get currentConversationId => _currentConversationId;
   bool get enableThinking => _enableThinking;
   bool get isStreaming => _isStreaming;
+
+  /// Raw reply events for consumers that must react before persistence.
+  ///
+  /// The call screen uses this to start TTS on the first sentence instead of
+  /// waiting for the full reply to be saved and reloaded. The stream is
+  /// broadcast and carries no state of its own; late subscribers simply miss
+  /// earlier deltas, so consumers must read [currentStreamingContent] when they
+  /// attach during an active turn.
+  Stream<ChatStreamEvent> get responseEvents => _responseEvents.stream;
+
   String get currentStreamingContent {
     if (_streamingTextDirty) {
       _currentStreamingContent = _streamingBuffer.toString();
@@ -673,6 +685,11 @@ class ChatState extends ChangeNotifier with WidgetsBindingObserver {
     });
   }
 
+  void _emitResponseEvent(ChatStreamEvent event) {
+    if (_disposed || _responseEvents.isClosed) return;
+    _responseEvents.add(event);
+  }
+
   void appendStreamingContent(String delta) {
     if (delta.isEmpty) return;
     _streamingBuffer.write(delta);
@@ -687,6 +704,26 @@ class ChatState extends ChangeNotifier with WidgetsBindingObserver {
     _currentStreamingContent = content;
     _streamingTextDirty = false;
     _scheduleStreamFlush();
+  }
+
+  /// The on-device bridge reports whole snapshots, not deltas. Convert a
+  /// snapshot into the same event contract the cloud stream uses, so the call
+  /// screen can start TTS from the first completed sentence in both modes.
+  void _applyOfflineStreamingText(String text) {
+    if (_disposed || !_isStreaming || _generationWasCancelled) return;
+    final previous = currentStreamingContent;
+    if (text.startsWith(previous)) {
+      final delta = text.substring(previous.length);
+      if (delta.isNotEmpty) {
+        _emitResponseEvent(ChatStreamEvent.contentDelta(delta));
+      }
+    } else {
+      _emitResponseEvent(const ChatStreamEvent.retryReset());
+      if (text.isNotEmpty) {
+        _emitResponseEvent(ChatStreamEvent.contentDelta(text));
+      }
+    }
+    _replaceStreamingContent(text);
   }
 
   void appendThinkingContent(String delta) {
@@ -725,6 +762,7 @@ class ChatState extends ChangeNotifier with WidgetsBindingObserver {
         }
         if (_currentConversationId != conversationId) return;
 
+        _emitResponseEvent(event);
         try {
           event.when(
             contentDelta: (delta) {
@@ -980,21 +1018,51 @@ class ChatState extends ChangeNotifier with WidgetsBindingObserver {
   /// has to change the prompt: the rejected answer is quoted back with an
   /// explicit instruction not to repeat it, which is the same contract the
   /// cloud path gets from `build_regeneration_directive`.
-  List<OfflineChatMessage> _buildOfflinePrompt({String? avoidRepeat}) {
+  ({List<OfflineChatMessage> messages, int maxOutputTokens})
+  _buildOfflinePrompt({String? avoidRepeat}) {
     // Qwen3 runs in a 4096-token window, so the prompt is budgeted in tokens
-    // (≈1.5 per CJK glyph) rather than characters.
-    const promptTokenBudget =
-        OfflineLlmService.contextSize - OfflineLlmService.maxOutputTokens - 256;
-    var remainingTokens = promptTokenBudget;
-    final systemMessages = _messages
+    // (≈1.5 per CJK glyph) rather than characters. The output budget is then
+    // computed from the actual prompt: a short turn can produce a long reply,
+    // while a full history still reserves at least 512 output tokens.
+    const promptTokenBudget = OfflineLlmService.contextSize - 1024 - 128;
+    final quoted = avoidRepeat?.trim() ?? '';
+    final rewriteDirective = quoted.isEmpty
+        ? null
+        : offlineRewriteDirective(String.fromCharCodes(quoted.runes.take(600)));
+    // Reserve the rewrite instruction before history so a regeneration cannot
+    // push the total prompt past the context window.
+    var remainingTokens =
+        promptTokenBudget -
+        (rewriteDirective == null
+            ? 0
+            : _estimateOfflineTokens(rewriteDirective));
+    final rawSystemMessages = _messages
         .where((message) => message.role == MessageRole.system)
         .map(
           (message) =>
               OfflineChatMessage(role: 'system', content: message.content),
         )
         .toList(growable: false);
-    for (final message in systemMessages) {
-      remainingTokens -= _estimateOfflineTokens(message.content);
+    final systemMessages = <OfflineChatMessage>[];
+    for (final message in rawSystemMessages) {
+      final tokens = _estimateOfflineTokens(message.content);
+      if (tokens <= remainingTokens) {
+        systemMessages.add(message);
+        remainingTokens -= tokens;
+      } else if (systemMessages.isEmpty && remainingTokens > 64) {
+        // A single oversized persona must not starve the entire prompt. Keep
+        // its beginning (identity, tone) and drop the tail.
+        systemMessages.add(
+          OfflineChatMessage(
+            role: 'system',
+            content: _headByTokenBudget(message.content, remainingTokens),
+          ),
+        );
+        remainingTokens = 0;
+        break;
+      } else {
+        break;
+      }
     }
 
     final recent = <OfflineChatMessage>[];
@@ -1025,20 +1093,18 @@ class ChatState extends ChangeNotifier with WidgetsBindingObserver {
     }
 
     final messages = [...systemMessages, ...recent.reversed];
-    final quoted = avoidRepeat?.trim() ?? '';
-    if (quoted.isNotEmpty) {
-      final runes = quoted.runes.toList(growable: false);
-      final excerpt = runes.length <= 600
-          ? quoted
-          : String.fromCharCodes(runes.take(600));
+    if (rewriteDirective != null) {
       messages.add(
-        OfflineChatMessage(
-          role: 'system',
-          content: offlineRewriteDirective(excerpt),
-        ),
+        OfflineChatMessage(role: 'system', content: rewriteDirective),
       );
     }
-    return messages;
+    final promptTokens = messages.fold<int>(
+      0,
+      (total, message) => total + _estimateOfflineTokens(message.content),
+    );
+    final outputTokens = (OfflineLlmService.contextSize - promptTokens - 128)
+        .clamp(512, OfflineLlmService.maxOutputTokens);
+    return (messages: messages, maxOutputTokens: outputTokens);
   }
 
   static int _estimateOfflineTokens(String text) {
@@ -1047,6 +1113,7 @@ class ChatState extends ChangeNotifier with WidgetsBindingObserver {
     for (final rune in text.runes) {
       final isCjk =
           (rune >= 0x3400 && rune <= 0x9FFF) ||
+          (rune >= 0x20000 && rune <= 0x2FA1F) ||
           (rune >= 0x3040 && rune <= 0x30FF) ||
           (rune >= 0xAC00 && rune <= 0xD7AF);
       if (isCjk) {
@@ -1056,6 +1123,27 @@ class ChatState extends ChangeNotifier with WidgetsBindingObserver {
       }
     }
     return (cjk * 1.5).ceil() + (other / 4).ceil() + 4;
+  }
+
+  /// Keeps the first part of a long system prompt.
+  ///
+  /// Identity and tone instructions sit at the front; truncating the tail is
+  /// safer than dropping the whole persona when a character card is huge.
+  static String _headByTokenBudget(String text, int tokenBudget) {
+    if (tokenBudget <= 0) return '';
+    final runes = text.runes.toList(growable: false);
+    var low = 0;
+    var high = runes.length;
+    while (low < high) {
+      final mid = (low + high + 1) ~/ 2;
+      final candidate = String.fromCharCodes(runes.sublist(0, mid));
+      if (_estimateOfflineTokens(candidate) <= tokenBudget) {
+        low = mid;
+      } else {
+        high = mid - 1;
+      }
+    }
+    return String.fromCharCodes(runes.sublist(0, low));
   }
 
   /// Keeps the newest part of a long message without splitting a surrogate
@@ -1088,12 +1176,12 @@ class ChatState extends ChangeNotifier with WidgetsBindingObserver {
         streamToken == _streamToken &&
         _currentConversationId == conversationId;
     try {
+      final prompt = _buildOfflinePrompt(avoidRepeat: avoidRepeat);
       final response = await OfflineLlmService.instance.generate(
-        _buildOfflinePrompt(avoidRepeat: avoidRepeat),
+        prompt.messages,
+        maxTokens: prompt.maxOutputTokens,
         onText: (text) {
-          if (isCurrent() && _isStreaming && !_generationWasCancelled) {
-            _replaceStreamingContent(text);
-          }
+          if (isCurrent()) _applyOfflineStreamingText(text);
         },
       );
       if (!isCurrent() || _generationWasCancelled) return;
@@ -1107,7 +1195,10 @@ class ChatState extends ChangeNotifier with WidgetsBindingObserver {
       }
 
       if (isCurrent() && !_generationWasCancelled) {
-        _replaceStreamingContent(response);
+        _applyOfflineStreamingText(response);
+        if (!_generationWasCancelled) {
+          _emitResponseEvent(const ChatStreamEvent.done());
+        }
         endStreaming();
         final applied = await loadConversation(conversationId);
         if (!applied || !isCurrent() || _generationWasCancelled) return;
@@ -1119,6 +1210,7 @@ class ChatState extends ChangeNotifier with WidgetsBindingObserver {
         if (isCurrent()) {
           final partial = _currentStreamingContent.trim();
           _generationWasCancelled = true;
+          _emitResponseEvent(const ChatStreamEvent.generationCancelled());
           endStreaming();
           if (partial.isNotEmpty) {
             await rust_api.addAssistantMessageWithModel(
@@ -1146,6 +1238,7 @@ class ChatState extends ChangeNotifier with WidgetsBindingObserver {
         _errorMessage = error is OfflineLlmFailure
             ? '$error'
             : AppStrings.current.offlineGenerateFailed('$error');
+        _emitResponseEvent(ChatStreamEvent.error(_errorMessage!));
         notifyListeners();
       }
     }
@@ -1263,6 +1356,7 @@ class ChatState extends ChangeNotifier with WidgetsBindingObserver {
     _cancelExistingSubscription();
     _streamFlushTimer?.cancel();
     _retryDoneTimer?.cancel();
+    unawaited(_responseEvents.close());
     super.dispose();
   }
 

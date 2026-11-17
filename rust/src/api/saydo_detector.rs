@@ -32,16 +32,16 @@ impl SayDoDetector {
         while i < chars.len() {
             if chars[i] == open {
                 let start = i + 1;
-                if start < chars.len() {
-                    if let Some(end_offset) = chars[start..].iter().position(|&c| c == close) {
-                        let inner = &chars[start..start + end_offset];
-                        let content_chars = inner.iter().filter(|c| !c.is_whitespace()).count();
-                        if content_chars >= min_len {
-                            return true;
-                        }
-                        i = start + end_offset + 1;
-                        continue;
+                if start < chars.len()
+                    && let Some(end_offset) = chars[start..].iter().position(|&c| c == close)
+                {
+                    let inner = &chars[start..start + end_offset];
+                    let content_chars = inner.iter().filter(|c| !c.is_whitespace()).count();
+                    if content_chars >= min_len {
+                        return true;
                     }
+                    i = start + end_offset + 1;
+                    continue;
                 }
             }
             i += 1;

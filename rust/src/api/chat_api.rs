@@ -10,7 +10,7 @@ use super::data_models::*;
 use super::error_handler::ChatError;
 use super::knowledge_store::KnowledgeStore;
 use super::memory_engine::MemoryEngine;
-use super::network_diagnosis::{diagnose, EndpointDiagnosis};
+use super::network_diagnosis::{EndpointDiagnosis, diagnose};
 use super::provider::ProviderRuntime;
 use super::streaming_handler::StreamingHandler;
 
@@ -424,13 +424,12 @@ pub async fn validate_api_key(
         Ok(Ok(_)) => Err(format!("{model} 返回了空响应")),
         Ok(Err(error)) => {
             let message = error.to_string();
-            if matches!(error, ChatError::NetworkError { .. }) {
-                if let Some(hint) = diagnose(&api_url)
+            if matches!(error, ChatError::NetworkError { .. })
+                && let Some(hint) = diagnose(&api_url)
                     .await
                     .and_then(EndpointDiagnosis::into_hint)
-                {
-                    return Err(format!("{message}；{hint}"));
-                }
+            {
+                return Err(format!("{message}；{hint}"));
             }
             Err(message)
         }

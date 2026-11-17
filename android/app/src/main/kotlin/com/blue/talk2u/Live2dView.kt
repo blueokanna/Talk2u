@@ -88,6 +88,7 @@ internal object Live2dNativeBridge {
     external fun nativeSurfaceDestroyed(handle: Long)
     external fun nativeDrawFrame(handle: Long): Boolean
     external fun nativeSetRenderPolicy(handle: Long, active: Boolean, reducedMotion: Boolean)
+    external fun nativeSetBackgroundColor(handle: Long, backgroundColor: Int)
     external fun nativeSetGaze(handle: Long, x: Float, y: Float)
     external fun nativeSetMouth(handle: Long, value: Float)
     external fun nativeSetSpeaking(handle: Long, value: Boolean)
@@ -435,7 +436,7 @@ private class Live2dView(
     private val mainHandler = Handler(Looper.getMainLooper())
     private val channel = MethodChannel(messenger, "talk2u/live2d_$viewId")
     private val modelPath = validateModelPath(creationParams["modelPath"] as? String)
-    private val backgroundColor =
+    @Volatile private var backgroundColor =
             (creationParams["backgroundColor"] as? Number)?.toInt() ?: 0xffffffff.toInt()
     private val cues = loadCues(modelPath)
     private val resourceUsageSampler = ResourceUsageSampler().also { it.sample() }
@@ -503,6 +504,23 @@ private class Live2dView(
                 reducedMotion = call.argument<Boolean>("reducedMotion") == true
                 applyRenderPolicy()
                 result.success(null)
+            }
+            "setBackgroundColor" -> {
+                // StandardMessageCodec delivers a Dart int as a Java Long on
+                // Android; reading it as Int throws ClassCastException.
+                val color = call.argument<Number>("value")?.toInt()
+                if (color == null) {
+                    result.error("invalid_background", "A background colour is required", null)
+                    return
+                }
+                backgroundColor = color
+                // The native clear colour is applied on the render thread, so
+                // the JNI call must be queued there as well. enqueue() also
+                // requests a frame, which matters under reduced motion where
+                // the renderer is not continuously drawing.
+                enqueue(result) { handle ->
+                    Live2dNativeBridge.nativeSetBackgroundColor(handle, color)
+                }
             }
             "setGaze" -> enqueue(result) { handle ->
                 Live2dNativeBridge.nativeSetGaze(

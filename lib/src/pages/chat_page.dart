@@ -16,6 +16,11 @@ import 'package:talk2u/src/services/camera_observation_service.dart';
 import 'package:talk2u/src/rendering/motion_policy.dart';
 import 'package:talk2u/src/services/offline_speech_service.dart';
 import 'package:talk2u/src/services/live2d_model_importer.dart';
+import 'package:talk2u/src/services/normal_speech.dart';
+import 'package:talk2u/src/settings/ui_preferences.dart';
+import 'package:talk2u/src/theme/app_motion.dart';
+import 'package:talk2u/src/theme/app_shapes.dart';
+import 'package:talk2u/src/widgets/fluid_switcher.dart';
 import 'package:talk2u/src/widgets/live2d_avatar.dart';
 import 'package:talk2u/src/widgets/chat_execution_status.dart';
 import 'package:talk2u/src/widgets/camera_observation_banner.dart';
@@ -30,9 +35,42 @@ class ChatPage extends StatefulWidget {
   State<ChatPage> createState() => _ChatPageState();
 }
 
+/// First visible glyph of a name, or `?` when the profile has none. Imported
+/// characters are not required to carry a name, and `.characters.first` on an
+/// empty string throws, so every avatar goes through this helper.
+String _characterInitial(String name) {
+  final trimmed = name.trim();
+  return trimmed.isEmpty ? '?' : trimmed.characters.first;
+}
+
 class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   final _scrollController = ScrollController();
-  late AnimationController _fabController;
+  StreamSubscription<ChatStreamEvent>? _responseEventSubscription;
+  late final NormalReplySpeech _normalSpeech = NormalReplySpeech(
+    create: OfflineSpeechService.instance.beginStreamingSpeech,
+    autoRead: () =>
+        mounted &&
+        (_uiPreferences?.autoReadReplies ?? true) &&
+        OfflineSpeechService.instance.capabilities.offlineTts,
+  );
+
+  /// Preferences are provided by the app shell. Widget tests mount the chat
+  /// page without that provider, so a missing preference must not crash TTS.
+  UiPreferences? get _uiPreferences {
+    try {
+      return context.read<UiPreferences>();
+    } on ProviderNotFoundException {
+      return null;
+    }
+  }
+
+  // Unbounded on purpose: the Expressive spring overshoots slightly, and a
+  // bounded controller would clip that overshoot and turn the spring into a
+  // plateau. The build clamps the painted scale instead.
+  late final AnimationController _fabController = AnimationController.unbounded(
+    vsync: this,
+  );
+  bool _fabHiding = false;
   bool _showScrollToBottom = false;
   bool _showTranscript = false;
   bool _isImportingLive2d = false;
@@ -52,6 +90,8 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   );
   StreamSubscription<CameraObservationState>? _cameraSubscription;
   bool _routeVisible = true;
+  ModalRoute<dynamic>? _route;
+  Animation<double>? _routeSecondary;
   String? _observedConversationId;
 
   void _handleCameraState(CameraObservationState state) {
@@ -97,10 +137,6 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   void initState() {
     super.initState();
     _cameraSubscription = _camera.states.listen(_handleCameraState);
-    _fabController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 200),
-    );
     _scrollController.addListener(_onScroll);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<ChatState>().initialize();
@@ -110,9 +146,17 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    final visible = ModalRoute.of(context)?.isCurrent ?? true;
-    if (_routeVisible && !visible) unawaited(_camera.stop());
-    _routeVisible = visible;
+    final route = ModalRoute.of(context);
+    if (!identical(_route, route)) {
+      _routeSecondary?.removeListener(_handleRouteAnimation);
+      _route = route;
+      _routeSecondary = route?.secondaryAnimation;
+      _routeSecondary?.addListener(_handleRouteAnimation);
+    }
+    final routeVisible =
+        _route == null || _route!.isCurrent || _isCoveredByPopup;
+    if (!routeVisible && _routeVisible) unawaited(_camera.stop());
+    _routeVisible = routeVisible;
     final chatState = context.read<ChatState>();
     if (identical(_chatState, chatState)) return;
     _chatState?.removeListener(_handleChatStateChanged);
@@ -120,6 +164,10 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     _observedConversationId = chatState.currentConversationId;
     _handledResponseRevision = chatState.completedResponseRevision;
     chatState.addListener(_handleChatStateChanged);
+    _responseEventSubscription?.cancel();
+    _responseEventSubscription = chatState.responseEvents.listen(
+      _handleResponseEvent,
+    );
     _callSession ??= CallSession(
       port: OfflineSpeechService.instance,
       onSend: chatState.sendMessage,
@@ -153,6 +201,65 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     }
   }
 
+  void _handleResponseEvent(ChatStreamEvent event) {
+    final session = _callSession;
+    if (session != null && session.active) {
+      event.when(
+        contentDelta: (delta) {
+          if (delta.isNotEmpty) session.onResponseDelta(delta);
+        },
+        thinkingDelta: (_) {},
+        retryReset: () => unawaited(session.onResponseReset()),
+        generationCancelled: () => unawaited(session.onResponseReset()),
+        done: () => unawaited(
+          session.onResponseStreamDone(
+            _chatState?.currentStreamingContent ?? '',
+          ),
+        ),
+        error: (_) => session.onResponseFailed(),
+      );
+      return;
+    }
+    event.when(
+      contentDelta: _appendNormalSpeech,
+      thinkingDelta: (_) {},
+      retryReset: () => unawaited(_cancelNormalSpeech()),
+      generationCancelled: () => unawaited(_cancelNormalSpeech()),
+      done: () => unawaited(
+        _finishNormalSpeech(_chatState?.currentStreamingContent ?? ''),
+      ),
+      error: (_) => unawaited(_cancelNormalSpeech()),
+    );
+  }
+
+  /// Normal chat keeps the same sentence pipeline as call mode, but without a
+  /// microphone lifecycle. Auto-read starts on the first delta; the speaker
+  /// button can also start it manually from the partial text.
+  void _appendNormalSpeech(String delta) => _normalSpeech.append(delta);
+
+  Future<void> _finishNormalSpeech(String fullReply) async {
+    try {
+      await _normalSpeech.finish(fullReply);
+    } on Object catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            AppLocalizations.of(context).offlineTtsUnavailable('$error'),
+          ),
+        ),
+      );
+    }
+  }
+
+  Future<void> _cancelNormalSpeech() async {
+    try {
+      await _normalSpeech.cancel();
+    } on Object catch (_) {
+      // A cancelled reply has no audio left to preserve.
+    }
+  }
+
   void _handleChatStateChanged() {
     final chatState = _chatState;
     if (chatState == null) return;
@@ -163,6 +270,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       // Creating the first conversation during a call is normal. Switching
       // an existing conversation must not carry its microphone turn forward.
       if (previousId != null) {
+        unawaited(_cancelNormalSpeech());
         unawaited(_callSession?.stop());
         unawaited(_camera.stop());
       }
@@ -184,7 +292,8 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     if (session == null || !session.active) return;
     if (chatState.errorMessage != null &&
         !chatState.isStreaming &&
-        session.phase == CallPhase.thinking) {
+        (session.phase == CallPhase.thinking ||
+            session.phase == CallPhase.speaking)) {
       session.onResponseFailed();
     }
     if (chatState.completedResponseRevision <= _handledResponseRevision) {
@@ -216,13 +325,40 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     final isNearBottom = _isUserNearBottom();
     _autoFollow = isNearBottom;
     if (!isNearBottom && !_showScrollToBottom) {
-      setState(() => _showScrollToBottom = true);
-      _fabController.forward();
+      _setFabVisible(true);
     } else if (isNearBottom && _showScrollToBottom) {
-      _fabController.reverse().then((_) {
-        if (mounted) setState(() => _showScrollToBottom = false);
-      });
+      _setFabVisible(false);
     }
+  }
+
+  /// Shows or hides the jump-to-bottom action with the Expressive spring.
+  ///
+  /// The hide path keeps the button mounted until the spring settles; removing
+  /// it immediately would make the exit invisible.
+  void _setFabVisible(bool visible) {
+    final animate = AppMotionPolicy.of(context).animate;
+    if (visible) {
+      _fabHiding = false;
+      setState(() => _showScrollToBottom = true);
+      if (animate) {
+        AppMotion.springTo(_fabController, 1);
+      } else {
+        _fabController.value = 1;
+      }
+      return;
+    }
+    if (_fabHiding) return;
+    _fabHiding = true;
+    if (!animate) {
+      _fabController.value = 0;
+      _fabHiding = false;
+      setState(() => _showScrollToBottom = false);
+      return;
+    }
+    AppMotion.springTo(_fabController, 0).whenComplete(() {
+      _fabHiding = false;
+      if (mounted) setState(() => _showScrollToBottom = false);
+    });
   }
 
   bool _isUserNearBottom() {
@@ -233,6 +369,10 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
 
   @override
   void dispose() {
+    _routeSecondary?.removeListener(_handleRouteAnimation);
+    unawaited(_responseEventSubscription?.cancel());
+    _responseEventSubscription = null;
+    unawaited(_cancelNormalSpeech());
     unawaited(_cameraSubscription?.cancel());
     unawaited(_camera.dispose());
     _cameraState.dispose();
@@ -258,8 +398,8 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       if (animate) {
         _scrollController.animateTo(
           _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOutCubic,
+          duration: AppMotion.swap,
+          curve: AppMotion.emphasizedDecelerate,
         );
       } else {
         _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
@@ -268,6 +408,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   }
 
   void _handleSend(String content) {
+    unawaited(_cancelNormalSpeech());
     unawaited(OfflineSpeechService.instance.stopSpeaking());
     context.read<ChatState>().sendMessage(content);
     _autoFollow = true;
@@ -275,6 +416,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   }
 
   void _handleRetry() {
+    unawaited(_cancelNormalSpeech());
     unawaited(OfflineSpeechService.instance.stopSpeaking());
     context.read<ChatState>().retryLastMessage();
     _autoFollow = true;
@@ -320,6 +462,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       if (!speech.capabilities.offlineStt || !speech.capabilities.offlineTts) {
         throw StateError(strings.continuousCallRequiresSpeech);
       }
+      await _cancelNormalSpeech();
       if (speech.speaking || speech.generating) await speech.stopSpeaking();
       if (speech.listening) await speech.stopListening();
       await _chatState?.stopGeneration();
@@ -342,6 +485,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       return;
     }
     final speech = OfflineSpeechService.instance;
+    await _cancelNormalSpeech();
     if (speech.speaking || speech.generating) await speech.stopSpeaking();
     if (_chatState?.isStreaming == true) await _chatState!.stopGeneration();
     _avatarController.perform('calm');
@@ -364,8 +508,25 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
 
   Future<void> _speakLastReply(ChatState state) async {
     final speech = OfflineSpeechService.instance;
-    if (speech.speaking || speech.generating) {
-      await speech.stopSpeaking();
+    if (_normalSpeech.active || speech.speaking || speech.generating) {
+      await _cancelNormalSpeech();
+      if (speech.speaking || speech.generating) await speech.stopSpeaking();
+      return;
+    }
+    if (state.isStreaming) {
+      final strings = AppLocalizations.of(context);
+      try {
+        if (!speech.capabilities.offlineTts) await speech.initialize();
+        if (!speech.capabilities.offlineTts) {
+          throw StateError(strings.noOfflineTtsVoice);
+        }
+        _normalSpeech.startManual(state.currentStreamingContent);
+      } on Object catch (error) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(strings.offlineTtsUnavailable('$error'))),
+        );
+      }
       return;
     }
     String? reply;
@@ -399,11 +560,11 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
 
   Future<void> _importLive2dModel() async {
     final strings = AppLocalizations.of(context);
-    final result = await FilePicker.platform.pickFiles(
+    final file = await FilePicker.pickFile(
       type: FileType.custom,
       allowedExtensions: const ['zip'],
     );
-    final archivePath = result?.files.single.path;
+    final archivePath = file?.path;
     if (archivePath == null || !mounted) return;
     setState(() => _isImportingLive2d = true);
     try {
@@ -502,6 +663,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
         context,
         chatState: chatState,
         onRestartStory: _confirmRestartStory,
+        preferences: _uiPreferences,
       ),
     );
   }
@@ -533,12 +695,31 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     );
   }
 
+  void _handleRouteAnimation() {
+    if (!mounted) return;
+    final visible = _route == null || _route!.isCurrent || _isCoveredByPopup;
+    if (visible == _routeVisible) return;
+    if (!visible) unawaited(_camera.stop());
+    setState(() => _routeVisible = visible);
+  }
+
+  /// A dialog or bottom sheet does not animate the page below it. Keeping the
+  /// Live2D view mounted under a popup is what lets the diagnostics dialog show
+  /// a live frame counter; a full page route animates `secondaryAnimation` and
+  /// is treated as a real cover.
+  bool get _isCoveredByPopup => _routeSecondary?.value == 0;
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final strings = AppLocalizations.of(context);
 
     return Scaffold(
+      // The Live2D platform view is opaque, so the chat route has no aurora
+      // behind it. An explicit surface keeps the app bar, the status bar and the
+      // area revealed during a route transition from falling through to the
+      // window background.
+      backgroundColor: theme.colorScheme.surface,
       resizeToAvoidBottomInset: false,
       onDrawerChanged: (isOpened) {
         if (isOpened) FocusManager.instance.primaryFocus?.unfocus();
@@ -556,7 +737,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                       radius: 14,
                       backgroundColor: theme.colorScheme.primaryContainer,
                       child: Text(
-                        state.currentCharacter!.name.characters.first,
+                        _characterInitial(state.currentCharacter!.name),
                         style: TextStyle(
                           fontSize: 12,
                           fontWeight: FontWeight.w600,
@@ -594,8 +775,6 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
           },
         ),
         centerTitle: true,
-        elevation: 0,
-        scrolledUnderElevation: 1,
         actions: [
           Consumer<ChatState>(
             builder: (context, state, _) => AnimatedBuilder(
@@ -719,20 +898,26 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
             children: [
               TickerMode(
                 enabled: _routeVisible,
-                child: RepaintBoundary(
-                  child: Live2dAvatar(
-                    key: ValueKey(modelPath),
-                    modelPath: modelPath,
-                    controller: _avatarController,
-                    onTap: _handleAvatarTap,
+                child: Offstage(
+                  // A pushed route must not keep painting the Live2D platform
+                  // view through a translucent page. Offstage stops the platform
+                  // view from being painted as soon as the chat route stops being
+                  // current, so the settings transition shows the aurora and not
+                  // a frozen avatar under the new page.
+                  offstage: !_routeVisible,
+                  child: RepaintBoundary(
+                    child: Live2dAvatar(
+                      key: ValueKey(modelPath),
+                      modelPath: modelPath,
+                      controller: _avatarController,
+                      onTap: _handleAvatarTap,
+                    ),
                   ),
                 ),
               ),
               AnimatedPadding(
-                duration: AppMotionPolicy.of(
-                  context,
-                ).duration(const Duration(milliseconds: 160)),
-                curve: Curves.easeOutCubic,
+                duration: AppMotion.of(context, AppMotion.swap),
+                curve: AppMotion.emphasizedDecelerate,
                 padding: EdgeInsets.only(bottom: keyboardInset),
                 child: Column(
                   children: [
@@ -818,23 +1003,8 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                               ),
                             ),
                           ),
-                          AnimatedSwitcher(
-                            duration: AppMotionPolicy.of(
-                              context,
-                            ).duration(const Duration(milliseconds: 240)),
-                            switchInCurve: Curves.easeOutCubic,
-                            switchOutCurve: Curves.easeInCubic,
-                            transitionBuilder: (child, animation) =>
-                                FadeTransition(
-                                  opacity: animation,
-                                  child: SlideTransition(
-                                    position: Tween<Offset>(
-                                      begin: const Offset(0, 0.04),
-                                      end: Offset.zero,
-                                    ).animate(animation),
-                                    child: child,
-                                  ),
-                                ),
+                          FluidSwitcher(
+                            axis: Axis.vertical,
                             child: !_showTranscript
                                 ? const SizedBox.shrink(key: ValueKey('hidden'))
                                 : Align(
@@ -872,12 +1042,15 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                             Positioned(
                               right: 16,
                               bottom: 12,
-                              child: ScaleTransition(
-                                scale: _fabController,
+                              child: AnimatedBuilder(
+                                animation: _fabController,
                                 child: FloatingActionButton.small(
                                   onPressed: () => _scrollToBottom(),
-                                  elevation: 2,
                                   child: const Icon(Icons.keyboard_arrow_down),
+                                ),
+                                builder: (context, child) => Transform.scale(
+                                  scale: _fabController.value.clamp(0.0, 1.06),
+                                  child: child,
                                 ),
                               ),
                             ),
@@ -886,9 +1059,15 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                     ),
                     ValueListenableBuilder<CameraObservationState>(
                       valueListenable: _cameraState,
-                      builder: (context, state, _) => CameraObservationBanner(
-                        state: state,
-                        onClose: () => unawaited(_camera.stop()),
+                      builder: (context, state, _) => FluidSwitcher(
+                        axis: Axis.vertical,
+                        child: CameraObservationBanner(
+                          key: ValueKey(
+                            'camera-${state.status}-${state.faceDetected}',
+                          ),
+                          state: state,
+                          onClose: () => unawaited(_camera.stop()),
+                        ),
                       ),
                     ),
                     ChatExecutionStatus(
@@ -939,12 +1118,14 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   Widget _buildTranscriptPanel(ChatState chatState) {
     final theme = Theme.of(context);
     final strings = AppLocalizations.of(context);
-    return ColoredBox(
-      color: theme.colorScheme.surface.withValues(alpha: 0.94),
+    return Material(
+      color: theme.colorScheme.surfaceContainerLow,
+      shape: AppShapes.sheet,
+      clipBehavior: Clip.antiAlias,
       child: Column(
         children: [
           SizedBox(
-            height: 44,
+            height: 48,
             child: Row(
               children: [
                 const SizedBox(width: 16),

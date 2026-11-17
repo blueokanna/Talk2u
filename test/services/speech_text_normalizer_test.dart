@@ -64,6 +64,18 @@ void main() {
       expect(plan.spokenText, isEmpty);
     });
 
+    test('never sends zero-width or bidi controls to the vocoder', () {
+      final plan = SpeechTextNormalizer.prepare(
+        '你\u200B好\u202E，\u00AD这是\u2066测试\uFFFC。',
+      );
+      expect(plan.spokenText, '你好，这是测试。');
+    });
+
+    test('treats full-width and non-breaking spaces as spaces', () {
+      final plan = SpeechTextNormalizer.prepare('你好\u3000世界\u00A0再见。');
+      expect(plan.spokenText, '你好 世界 再见。');
+    });
+
     test('cleans streaming transcripts without touching normal words', () {
       expect(SpeechTextNormalizer.cleanTranscript(' 你好 😊 世界 \n'), '你好 世界');
     });

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:talk2u/l10n/generated/app_localizations.dart';
 import 'package:talk2u/src/services/camera_observation_service.dart';
+import 'package:talk2u/src/theme/app_shapes.dart';
 
 /// Status strip for the opt-in camera observation feature.
 ///
@@ -36,22 +37,39 @@ class CameraObservationBanner extends StatelessWidget {
     };
     if (label == null) return const SizedBox.shrink();
     final theme = Theme.of(context);
-    return Material(
-      color: theme.colorScheme.surfaceContainer,
-      child: Row(
-        children: [
-          const SizedBox(width: 12),
-          const Icon(Icons.videocam_outlined, size: 18),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(label, maxLines: 3, overflow: TextOverflow.ellipsis),
-          ),
-          IconButton(
-            tooltip: strings.cameraObservationClose,
-            onPressed: onClose,
-            icon: const Icon(Icons.close, size: 18),
-          ),
-        ],
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+      child: Material(
+        color: theme.colorScheme.secondaryContainer,
+        shape: AppShapes.field,
+        clipBehavior: Clip.antiAlias,
+        child: Row(
+          children: [
+            const SizedBox(width: 12),
+            Icon(
+              Icons.videocam_outlined,
+              size: 18,
+              color: theme.colorScheme.onSecondaryContainer,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                label,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSecondaryContainer,
+                ),
+              ),
+            ),
+            IconButton(
+              tooltip: strings.cameraObservationClose,
+              onPressed: onClose,
+              icon: const Icon(Icons.close, size: 18),
+              color: theme.colorScheme.onSecondaryContainer,
+            ),
+          ],
+        ),
       ),
     );
   }

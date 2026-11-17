@@ -19,8 +19,8 @@ Talk2U 是一个 Flutter + Rust 的本地角色聊天应用。聊天记录、角
 | Qwen | 已实现 | DashScope OpenAI-compatible SSE |
 | 自定义 URL | 已实现 | OpenAI-compatible；API Key 可留空，支持 HTTP(S) 完整地址 |
 | 跨平台继续同一对话 | 已实现 | conversation 与供应商解耦，切换供应商不创建新会话 |
-| 本地记忆/知识检索 | 已实现 | Rust 本地文件存储、短期上下文、长期摘要、知识事实检索；system 上下文按 token 预算完整保留 |
-| Android 端侧 LLM | 已实现 | `ai-hub-models/Qwen3-4B-Instruct-2507`（QAIRT w4a16，GenieX SDK 0.3.17）；QNN HTP/NPU 执行，4096 token 窗口内按 token 预算裁剪历史，单次输出上限 1024 token |
+| 本地记忆/知识检索 | 已实现 | Rust 本地文件存储、短期上下文、长期摘要、知识事实检索；system 上下文按 token 预算保留，超长人设从尾部裁剪 |
+| Android 端侧 LLM | 已实现 | 去审查 `huihui-ai/Huihui-Qwen3-4B-Instruct-2507-abliterated` 的编译产物，以及上游 `Qwen/Qwen3-4B-Instruct-2507`（QAIRT w4a16 → NPU，或 GGUF → Hexagon NPU；Q4_0/Q8_0 为纯 HTP）；GenieX SDK 0.3.17，4096 token 窗口内按 token 预算裁剪历史；输出预算由实际 prompt 动态计算（512–3072 token），不再固定占 1024 |
 | 离线 STT | 已实现 | Android SM8850 上使用 sherpa-onnx + SenseVoice 2024-07-17 INT8 QNN context，提供 ASR/LID/SER/AED |
 | 持续语音通话 | Android 有条件实现 | `CallSession` 状态机；确认硬件 AEC 后全双工，否则半双工；参考信号双讲检测 + 文本自回音过滤；可语音/点按打断 |
 | 重新生成 | 已实现 | 旧回复不进入新 prompt，附带“禁止复用开头/句式/收尾”的显式指令，并以 temperature/top_p 0.95 重新采样；成功后原位替换旧消息 |
@@ -32,7 +32,7 @@ Talk2U 是一个 Flutter + Rust 的本地角色聊天应用。聊天记录、角
 | 肢体动作/表情 | 已实现，取决于模型 | 语境、emoji 与舞台指示生成 cue；同一情绪在多个等价表演间轮换，并在说话开始时维持主导情绪表情 |
 | 次级动态 | 已实现 | Native renderer 在标准参数上叠加缓慢视线漂移、头部微摆与说话时的身体起伏；缺失参数会自动跳过 |
 | 舞台指示静音 | 已实现 | `（哈哈大笑）`、`*挥手*` 等动作不送入 MOSS，但仍影响 Live2D cue；解释性括号保留朗读 |
-| Android 离线 TTS | 有条件实现 | 导入 SM8850/HTP v81 部署包后，prefill/decode/codec 使用 QNN HTP，sampler 使用 ORT CPU；不回退系统 TTS；朗读前过滤 emoji、Markdown、代码、URL 与空行 |
+| Android 离线 TTS | 有条件实现 | 导入 SM8850/HTP v81 部署包后，prefill/decode 使用 QNN HTP，sampler/codec 使用 ORT CPU；不回退系统 TTS；朗读前过滤 emoji、Markdown、代码、URL 与空行 |
 | Android 离线 STT | 已实现 | SenseVoice INT8 支持中文、英文及自动语言识别；模型由应用下载、校验和管理 |
 | Android NNAPI 设备诊断 | 已实现 | 枚举设备名、版本、类型和 feature level；CPU 类型不会计为加速设备 |
 | 原生 Vulkan/OpenGL ES 预检 | 已实现 | NDK C++ 真实创建 Vulkan instance/device；失败时真实创建 EGL OpenGL ES 3/2 context |
@@ -65,7 +65,7 @@ Rust 核心现在按“一件事一个 crate”划分，每个依赖只有唯一
 | --- | --- | --- |
 | `courierust` | 唯一出站 HTTP/TLS 实现：SSE 增量解析、重试与去重、Android 信任锚加载 | `rust/src/api/transport.rs` |
 | `rustglm` | 只提供智谱的“契约”：模型能力表、`thinking` 与流式分片的线上类型；它的 HTTP 客户端刻意不用，原因见智谱一节 | `rust/src/api/model_policy.rs` |
-| `rustbinary` | 对话落盘封包（`T2UB` magic + 版本号 + 有界解码），旧格式只读迁移 | `rust/src/api/storage_codec.rs` |
+| `rustbinary` | 对话落盘封包（`T2UB` magic + 版本号 + 有界解码），旧格式只读迁移；v2 增加 zlib 压缩 | `rust/src/api/storage_codec.rs` |
 | `tzcraft` | 全局时间源：128 位纳秒 `Ticks`，向下取整语义，跨平台一致 | `rust/src/api/clock.rs` |
 | `recurse-x` | 独立递归 DNS：与设备解析器交叉验证，区分劫持与链路故障 | `rust/src/api/network_diagnosis.rs` |
 | `nextjson` | 持久化结构的序列化 derive | `rust/src/api/data_models.rs` |
@@ -82,9 +82,9 @@ Flutter UI
   ├─ 默认全屏 Live2D；对话记录按需展开；文字输入常驻
   ├─ AndroidView -> GLSurfaceView -> Cubism Native C++/OpenGL ES
   ├─ Windows -> WebView2；Linux -> CEF
-  ├─ Android GenieX SDK -> QAIRT QNN HTP/NPU -> Qwen3-4B-Instruct-2507 w4a16
+  ├─ Android GenieX SDK -> QAIRT QNN HTP/NPU，或 llama.cpp -> Hexagon NPU -> Qwen3-4B（去审查或上游）
   ├─ sherpa-onnx Kotlin/JNI + SenseVoice QNN -> SM8850 HTP 端侧 STT
-  ├─ MOSS-TTS Native JNI -> QNN HTP(prefill/decode/codec) + ORT CPU(sampler)
+  ├─ MOSS-TTS Native JNI -> QNN HTP(prefill/decode) + ORT CPU(sampler/codec)
   └─ MethodChannel -> MOSS 部署包导入、QNN 探测与 WAV 合成
              |
 flutter_rust_bridge
@@ -104,7 +104,44 @@ Rust core
 
 供应商只决定“下一次请求发到哪里”。conversation ID、角色 system prompt、用户/助手消息、摘要和知识事实都不属于某个供应商，因此可以从 DeepSeek 切换到 OpenAI 或 Anthropic 后继续同一上下文。
 
-为避免上下文无限膨胀，请求层最多选择最近 20 条历史消息，并把长期信息交给摘要和知识检索层。历史文件不会因为这个窗口被删除。
+为避免上下文无限膨胀，请求层按 token 预算选择最近历史（最多 200 条，云端上限 80K token），更早的信息交给长期摘要、事实分层与知识检索；历史文件本身不会因为这个窗口被删除。
+
+### 本地存储与长上下文
+
+- `T2UB` v2 先用 `rustbinary` 生成紧凑二进制，再按实际收益选择 zlib 封装；头部记录解压后长度，解码时同时受 64 MiB 上限和声明长度校验，压缩炸弹不会进入反序列化。v1 文件保持只读兼容，首次写入自动升级。
+- 每个对话旁的 `.t2ui` 是派生摘要缓存（标题、最后一句预览、模型、时间）。会话列表只读这个几十字节的文件，不再为了显示一行预览而解压全部消息；缓存缺失或损坏时回退到完整解码并重建。
+- `MemoryEngine` 的长期摘要、事实层级和检索仍然独立于对话文件：历史窗口被裁剪不等于历史被删除，后续轮次可以直接继续同一 conversation。
+- 端侧 Qwen 的 transformer KV cache 由 GenieX 持有，应用无法读取或复用；这里优化的是 prompt 预算、上下文选择和落盘成本，不把它包装成“KV cache 复用”。当前 native 会话每轮仍由运行时管理 KV 生命周期。
+
+### 长回复不静默截断
+
+- 端侧 Qwen 不再固定预留 1024 token：每轮按 `4096 - 实际 prompt - 128` 计算输出预算，短上下文最多 3072 token，长上下文仍保底 512 token；超长 system prompt 从尾部裁剪，不会挤掉最近的用户问题。
+- 云端在收到 `finish_reason: "length"`（OpenAI-compatible）或 `stop_reason: "max_tokens"`（Anthropic）时，Rust 会自动发起最多 2 次续写：把已生成内容末尾最多 3000 字作为 assistant 前缀，附一条“从截断处继续、不要重复”的系统指令和一次仅存在于请求中的“继续。”，再把新增 delta 接到同一条回复。续写消息不落盘，最终只发一个 `Done`。
+- 续写失败不会丢弃已经拿到的长回复；达到 64K 字符或连续两次没有增长也会停止，避免无限循环。单次输出的硬上限仍然由云端模型与 `max_tokens` 决定，不能诚实地宣称“无限长度”。
+
+## 设计系统：Material 3 Expressive
+
+界面只使用 Material 3 / Material 3 Expressive 组件。完整规则见 [docs/design_system.md](docs/design_system.md)，实现集中在三处：
+
+- `lib/src/theme/app_shapes.dart`：M3 shape scale（4 / 8 / 12 / 16 / 28 / stadium），语义角色（`surface`、`overlay`、`field`、`sheet`、`drawer`、`fab`、`pill`、`badge`、气泡）全部使用 `RoundedSuperellipseBorder`；页面里不再出现手写圆角。
+- `lib/src/theme/app_motion.dart`：直接引用 Flutter 导出的 `Durations` 与 `Easing`，共享轴页面转场前进 400 ms、返回 300 ms；`FluidSwitcher` 负责同一页面内的内容穿梭；减弱动效时直接渲染终值。
+- `lib/src/rendering/aurora_engine.dart` + `lib/src/widgets/aurora_backdrop.dart`：整个 App 共用一个 `Ticker`，相位以 30 Hz 广播；极光层在主题/尺寸稳定后一次性光栅化为 `ui.Image`（逻辑尺寸 55%），之后每帧只做一次平移 blit；主题动画期间用 180 ms 去抖避免逐帧重建；后台与减弱动效时停表并停在 30% 的确定性相位。
+
+组件层面：思考面板用 M3 Expressive 的 `Expansible`，消息动作用 `ActionChip`，模型安装动作用 `MenuAnchor`，底部面板拖拽条交给 `BottomSheetThemeData`，不再手写装饰。
+
+设置页的端侧模型卡片同时列出 `Qwen/Qwen3-4B-Instruct-2507` 与去审查衍生版，上游排在前：上游 checkpoint 保留 AI Hub 下载，两者都可以导入 QAIRT 或 GGUF。安装目标由用户显式选择，不再用一个“the model”条目掩盖上游模型。
+
+验证：`dart analyze lib test`、`flutter test`。`test/rendering/design_system_test.dart` 锁定 shape scale 数值、30 Hz 通知上限、减弱动效停表，以及 `FluidSwitcher` 在切换前后的图层数量。
+
+## 依赖策略
+
+Dart 直接依赖跟随最新稳定版（`dart pub outdated` 的 direct dependencies 为空），但有三个明确的钉子：
+
+- `flutter_rust_bridge` 固定 `2.13.0`：`lib/src/rust/**` 与 `rust/src/frb_generated.rs` 由同一版本的生成器产出，运行时还会校验版本；升级必须整条链一起重生成，不能只改 pubspec。
+- `intl` 保持 `any`：版本由 `flutter_localizations` 决定，手写约束只会和 Flutter SDK 打架。
+- 原 `flutter_markdown` 已停止维护，改用其维护分支 `flutter_markdown_plus 1.0.12`，`MarkdownBody`/`MarkdownStyleSheet` API 不变。
+
+Rust 直接依赖同样取最新稳定版；`cargo update` 负责传递依赖。`jni = 0.22.4` 是精确钉子（JNI ABI），`libc` 只用于 Android 的被动 GGML 探针。没有 `dependency_overrides`：传递依赖的版本是 pub/cargo 求解器在 Flutter SDK 与插件约束下算出的结果，不靠覆盖强行抬高。
 
 ## 仓库目录
 
@@ -359,30 +396,33 @@ http://192.168.1.20:11434/v1/chat/completions
 
 ## 端侧离线 AI 与语音模型
 
-模型权重不打入 APK。SenseVoice 与 Qwen3-4B-Instruct-2507 由应用按需下载并校验；MOSS 使用经过验证的 HTP v81 目录，由 Android 目录选择器导入并逐文件校验。
+模型权重不打入 APK。两个预设都保留：去审查的 `huihui-ai/Huihui-Qwen3-4B-Instruct-2507-abliterated`（仓库只发布 safetensors，因此安装的是由它编译出的**产物**）与上游 `Qwen/Qwen3-4B-Instruct-2507`（保留原来的 AI Hub QAIRT 下载路径）。SenseVoice 由应用按需下载并校验；MOSS 使用经过验证的 HTP v81 目录，由 Android 目录选择器导入并逐文件校验。
 
-| 用途 | 平台 | 模型 | 下载大小 |
+| 用途 | 平台 | 模型 | 体积 |
 | --- | --- | --- | ---: |
-| 离线对话 | Android SM8850/SM8750 | `ai-hub-models/Qwen3-4B-Instruct-2507` QAIRT w4a16（4 个分片 + tokenizer） | 约 2.9 GiB |
+| 离线对话 | Android，QAIRT | 任一预设编译为 QAIRT w4a16（QnnHtp，4096 context）→ Hexagon NPU | 约 2.5–3.5 GiB |
+| 离线对话 | Android，llama.cpp | 任一权重的 GGUF，但只接受 Q4_0/Q8_0（纯 HTP）；导入器拒绝 K-quant/IQ-quant → Hexagon NPU；`auto` 先 NPU，失败回退 CPU，不走 GPU | 约 2.5–4.3 GiB |
 | 离线 STT | Android SM8850/HTP v81 | SenseVoice 2024-07-17 INT8 QNN 10 秒 context | 162,023,574 B |
 | 离线 TTS | Android SM8850/HTP v81 | MOSS-TTS-Nano 100M QNN 部署包 + Audio Tokenizer | 684.4 MiB（13 文件） |
 
-Qwen3-4B-Instruct-2507 模型卡声明 Apache-2.0，权重由 Qualcomm AI Hub 的 `ai-hub-models/Qwen3-4B-Instruct-2507` 提供，精度 `w4a16`；`sherpa-onnx` 与 MOSS 模型也需分别遵守各自许可。QAIRT/QNN 二进制受 Qualcomm SDK 条款约束，不由仓库重新分发。
+去审查模型继承基座 `Qwen/Qwen3-4B-Instruct-2507` 的 Apache-2.0；分发前仍需复核该衍生仓库的模型卡。QAIRT/QNN 二进制受 Qualcomm SDK 条款约束，不由仓库重新分发；仓库既不分发量化后的 GGUF，也不分发 NPU context binary。
 
 ### 端侧 LLM 硬件后端
 
 | 平台/芯片 | 当前推理后端 | 当前状态 |
 | --- | --- | --- |
-| Android SM8850/SM8750 | GenieX SDK → QAIRT QNN HTP/NPU | 首次生成成功后 `activeBackendVerified=true` 才显示为已验证 |
-| 其他 Android SoC | 无端侧 LLM 后端 | 芯片代号无法映射到 AI Hub 目标时直接报错，不退化成 CPU 伪报 |
+| Android SM8850/SM8750 + QAIRT 包 | GenieX SDK → QAIRT QNN HTP/NPU | 会话以 `ComputeUnitValue.NPU` 创建，且首轮返回 profiling 后才标为已验证 |
+| Android SM8850/SM8750 + GGUF | GenieX SDK → llama.cpp → Hexagon NPU（`ggml-hexagon`） | `compute_unit=npu`（SDK 解析为 `HTP0`）+ `nGpuLayers=-1`；只安装 Q4_0/Q8_0，导入时校验，保证整个图走 HTP |
+| Android + GGUF（无 HTP 后端） | NPU 不可用 → CPU 回退 | `auto` 先尝试 NPU；HTP 未注册时销毁 NPU 会话、记录原因并打开 CPU 会话，界面标注 CPU |
+| 其他 Android SoC | NPU 不可用 → CPU 回退；`cpu`/`gpu` 可显式指定 | 自动路径要求 HTP v81；CPU 会话不会被标为硬件加速 |
 | iPhone/iPad | 无端侧 LLM 后端 | 当前接入只覆盖 Android |
 | Windows x64/ARM64 | 无端侧 LLM 后端 | 未实现 DirectML/CUDA/Vulkan/CPU 本地推理，当前只能使用联网平台 |
 | Linux x64/ARM64 | 无端侧 LLM 后端 | 未实现 CUDA/Vulkan/ROCm/CPU 本地推理，当前只能使用联网平台 |
 | macOS | 无端侧 LLM 后端 | 当前只能使用联网平台 |
 
-Android 设置页通过 GenieX `ModelManagerWrapper.pullFlow` 断点下载固定版本部署包（`ModelPullInput` 带 `chipset=SM8850`，精度 `w4a16`），安装后由应用校验 `metadata.json` 的精度、`genie_config.json` 的 4096 上下文与 tokenizer 文件，再用 `LlmWrapper` 以 `ComputeUnitValue.NPU` 创建会话。下载/加载/生成分别映射为 `qwen3_download_*`、`qwen3_load_failed`、`qwen3_generate_failed` 错误码。
+Android 设置页把两个预设分别列出：上游 `Qwen/Qwen3-4B-Instruct-2507` 保留 AI Hub 下载，两个预设都可以导入 QAIRT 或 GGUF。导入走 Storage Access Framework：`importQairtBundle` 接收 ZIP（`genie_config.json` + context binaries），`importGguf` 接收单个 GGUF。两者都先复制到 `staging/`、校验副本、再原子替换，取消或校验失败不会破坏已安装的产物。校验规则：QAIRT 要求 `QnnHtp`、`w4a16`、4096 context、tokenizer 与 ctx-bin 全部存在且不越界；GGUF 由 Rust 解析头部并要求 `general.architecture=qwen3`，**且 `general.file_type` 必须是 Q4_0 或 Q8_0**。K-quant/IQ-quant 会在导入时被拒绝并说明原因，而不是先让用户装上一个仍会偷偷把张量放到 CPU 的模型。`Huihui-Qwen3-4B-Instruct-2507-abliterated` 在 `mradermacher` 镜像只发布了 Q8_0（4,280,405,792 B）与 K-quant，没有官方 Q4_0；可直接使用 Q8_0，或用 `llama-quantize --allow-requantize --pure` 从它派生纯 Q4_0（2,269,269,792 B，方法见 `docs/on_device_llm.md`）。NPU 会话无法建立时，`auto` 回退 CPU 并标注；失败码为 `qwen3_import_failed` / `qwen3_import_cancelled` / `qwen3_gguf_quantization` / `qwen3_load_failed` / `qwen3_generate_failed`。
 
-提示词不依赖 SDK 的 Jinja 渲染：GenieX 0.3.17 对 AI Hub 的 Qwen3 包调用 `applyChatTemplate` 会返回空串（旧版本每轮都失败为 `empty Qwen3 chat template`），因此 `Qwen3Prompt.kt` 直接按模型自带 `sample_prompt.txt` 的 ChatML 格式构造 `<|im_start|>role\ncontent<|im_end|>\n` 并以 `<|im_start|>assistant\n` 结尾，同时剥离用户输入里的控制标记，避免越权插入轮次；`Qwen3PromptTest` 固定这四种行为。逐 token 结果通过 `generateStreamFlow` 经 MethodChannel 流式送回 Flutter。
+提示词不依赖 SDK 的 Jinja 渲染：GenieX 0.3.17 对 Qwen3 包调用 `applyChatTemplate` 会返回空串。ChatML 现在由 Rust 构造（`rust/src/api/chatml.rs`，经 JNI 调用）：`<|im_start|>role\ncontent<|im_end|>\n` 并以 `<|im_start|>assistant\n` 结尾，剥离内容里全部 `<|...|>` 控制标记，提示词上限 1 MiB；回复若泄漏控制标记则直接拒绝。NPU 与 GPU 共用同一实现，因为两者是同一份 Qwen3 权重。流式文本按 50 ms 合并后经 MethodChannel 送回 Flutter，上千 token 的回复只有几十帧，而不是每个 token 复制一次整串。
 
 Android 不调用系统 on-device STT/TTS。MOSS 仅从带完整清单的 SM8850/HTP v81 包创建原生 session。SenseVoice 使用官方 SM8850 QNN context binary，通过 sherpa-onnx Kotlin/JNI API 的 `provider=qnn` 和 `QnnConfig` 加载；初始化或 HTP 执行失败会直接报错，不回退并伪报 QNN。
 
@@ -391,6 +431,20 @@ Android 不调用系统 on-device STT/TTS。MOSS 仅从带完整清单的 SM8850
 Android 使用与参考工程一致的 ONNX Runtime `1.26.0/API 26` core 和 QNN Plugin EP `2.4.0` 同构产物。Gradle 对 ORT core、Plugin EP 和 C API 头文件执行固定 SHA-256 校验，禁止混用 ABI。QAIRT host 库和 HTP skel 来自本机合法安装的 SDK；只有经过验证的部署才会创建 QNN session。prefill/decode 使用 QNN HTP，sampler/codec 使用 ORT CPU 多线程且不会伪报为 NPU。APK 中存在 QNN 库或 provider 可枚举，都不单独构成硬件执行证据；必须完成真机图执行验证。
 
 MOSS 初始化会生成或复用 QNN context cache，合成时依次加载 prefill、decode/sampler、codec 并及时释放，以控制移动设备峰值内存。界面只有在真实合成返回有效 WAV 和 provider 计划后才显示已执行验证。
+
+### 流式朗读：句子级流水线
+
+通话模式和普通聊天都不再等整段回复保存完才开口。`ChatState.responseEvents` 把模型增量原样广播出去；通话模式交给 `CallSession`，普通聊天交给 `NormalReplySpeech`。`SpeechStreamSegmenter` 在 Dart 侧完成分句，`MossTtsService.speakStream` 边合成边播放：
+
+- 第一个完整句子（`。 ！ ？ ! ? …`，英文 `.` 仅在后面是空白/结尾且不属于小数、URL 或邮箱时成立）一到就开始合成，后续句子在第一句播放期间预取。
+- 如果当前音频已经播完、下一句还没生成完，段切分器退到最后一个逗号/顿号/分号处释放一个从句，避免静音空洞；从句结束后如果整句仍未完成，再按同样的规则继续。
+- 括号内的问号/感叹号不算句末；Markdown 围栏代码整块丢弃，围栏标记即使被拆成两个 delta 也不会把代码读出来。
+- emoji、零宽字符、bidi 控制符、全角空格和软连字符在进入 MOSS 前剥离或折叠；纯 emoji 片段不会触发空合成。
+- 所有切分索引都按 rune 计数，非 BMP 字符（emoji、CJK 扩展 B）不会因为 UTF-16 代理对而被截断。
+- 普通聊天默认开启“自动朗读回复”，在对话选项里可以关闭；关闭后仍可在生成过程中点朗读按钮，从当前已经生成的部分开始，后续句子继续接上。手动朗读已完成的回复保持一次性路径。
+- 通话模式忽略该开关（它有自己的麦克风/回合计时器），但两者共用同一个分句器、合成队列和取消语义。
+
+实现集中在 `lib/src/services/speech_stream.dart`、`normal_speech.dart`、`moss_tts_service.dart` 的 `speakStream` 与 `call_session.dart` 的流式 TTS 状态；`speech_stream_test.dart`、`normal_speech_test.dart` 和 `call_session_test.dart` 固定分句、逗号回退、围栏丢弃、非 BMP 边界、自动朗读/手动启动，以及“首句先于完成开始”的行为。
 
 ### 内存压力回收（Dart + Native）
 
@@ -403,7 +457,7 @@ Android 的 `onTrimMemory` 现在会真正回收 Dart 侧可回收的部分，�
 
 实测（PLK110，冷启动后静止）：`dumpsys meminfo` 的 TOTAL PSS 约 425 MB，其中 Native Heap 约 110 MB、Unknown 约 135 MB、Other mmap 约 79 MB、`.so` 约 56 MB。静止状态下执行 `adb shell am send-trim-memory com.blue.talk2u RUNNING_LOW` 前后差异小于 1 MB——因为此时并没有解码图片或缓存 WAV 可回收。这个回收通路针对的是长会话与后台压力场景，不应宣称"降低了静止内存"。
 
-QAIRT 2.48 的静态化流程固定 recurrent KV 容量。V81 无法接受 sampler 的 `QNN_CumulativeSum`，因此 sampler 明确使用 ORT CPU；streaming codec 使用部署包中的固定形状 QNN HTP 图。原始动态 ONNX 不会直接送入 Android QNN runtime。
+QAIRT 2.48 的静态化流程固定 recurrent KV 容量。V81 无法接受 sampler 的 `QNN_CumulativeSum`，因此 sampler 明确使用 ORT CPU；streaming codec 的 QNN 图虽能运行，但在 PLK110 上会产生逐帧累积的嘶哑/噪声，已退回 ORT CPU 以保证音质。原始动态 ONNX 不会直接送入 Android QNN runtime。
 
 通过 `TALK2U_QNN_SDK_ROOT` 打包合法取得的 QAIRT 运行库；`TALK2U_QNN_ORT_AAR` 仅用于覆盖默认 ORT core AAR，QNN Plugin EP 仍由 Qualcomm Maven 包提供：
 
@@ -446,7 +500,7 @@ python tools/check_moss_package.py C:\Downloads\moss-qnn-v81-streaming.zip `
 
 华为 Mate 10 Pro 当前不接入许可受限的 HiAI DDK 二进制，也不使用通用 NNAPI 代替 Qualcomm QNN，因此 MOSS 在该设备上不可用。
 
-端侧 Qwen LLM 使用独立的 GenieX/QAIRT 会话：它与 MOSS 共用 QNN HTP 运行时，但不共享 session，也不会因为 MOSS 合成成功就继承"已验证"状态。两者的验证证据分别来自 `activeBackend=geniex-qairt-npu` + `activeBackendVerified=true`，以及 MOSS 的 `provider=QNN_HTP(prefill,decode)+ORT_CPU(sampler,codec)` 实际合成。Windows/Linux 尚未接入本项目的端侧 LLM 后端。
+端侧 Qwen LLM 使用独立的 GenieX 会话：它与 MOSS 共用 QNN HTP 运行时，但不共享 session，也不会因为 MOSS 合成成功就继承"已验证"状态。QAIRT 的验证证据来自会话以 NPU 创建且一轮生成返回 profiling；GGUF 的验证证据额外要求 Rust 侧的被动 GGML 探针确认 `HTP` 后端已在当前进程注册（`RTLD_NOLOAD` 打开已映射的 `libggml.so`，不重复加载）。GGUF 的 `activeBackend` 是 `geniex-llamacpp-npu`，GPU 是 `geniex-llamacpp-gpu`，CPU 是 `geniex-llamacpp-cpu` 且不会被标为硬件加速。Windows/Linux 尚未接入本项目的端侧 LLM 后端。
 
 ## Live2D Cubism 5 模型与 Core
 
@@ -821,9 +875,9 @@ Pop-Location
 pwsh tools/run_quality_checks.ps1
 ```
 
-`tools` 下的 26 项主机侧测试全部只用 Python 标准库：ELF/ZIP 16 KB 审计 10 项，MOSS 部署包审计 16 项（目录与 ZIP、缺失/截断/SHA-256、越界路径、清单重写与拒绝改写、命令行退出码、真实仓库清单）。Flutter 侧当前 159 项。
+`tools` 下的 26 项主机侧测试全部只用 Python 标准库：ELF/ZIP 16 KB 审计 10 项，MOSS 部署包审计 16 项（目录与 ZIP、缺失/截断/SHA-256、越界路径、清单重写与拒绝改写、命令行退出码、真实仓库清单）。Flutter 侧当前 201 项。
 
-Android 侧现在也有纯 JVM 单测（`android/app/src/test/kotlin`），共 20 项：芯片代号解析（`ChipsetTest` 7）、ZIP/SAF 路径越界防护（`SafeRelativePathTest` 5）、MOSS 清单校验（`MossDeploymentParserTest` 8，覆盖 schema、provider plan、重复/穿越路径、大小与 SHA-256、必需文件、文件数上限）。它们不依赖设备，也不需要 Cubism SDK；在 CI 或没有许可 SDK 的机器上用以下命令即可运行：
+Android 侧现在也有纯 JVM 单测（`android/app/src/test/kotlin`），共 32 项：芯片代号解析（`ChipsetTest` 7）、ZIP/SAF 路径越界防护（`SafeRelativePathTest` 5）、MOSS 清单校验（`MossDeploymentParserTest` 8，覆盖 schema、provider plan、重复/穿越路径、大小与 SHA-256、必需文件、文件数上限）、GGUF 量化识别（`GgufFileTypeTest` 2）与 QAIRT 包校验（`QairtBundleValidatorTest` 10）。它们不依赖设备，也不需要 Cubism SDK；在 CI 或没有许可 SDK 的机器上用以下命令即可运行：
 
 ```powershell
 cd android
@@ -846,7 +900,7 @@ flutter_rust_bridge_codegen generate --no-deps-check --no-auto-upgrade-dependenc
 
 `ChatStreamEvent` 现在是类型化枚举：`contentDelta` / `thinkingDelta` / `retryReset` / `generationCancelled` / `done` / `error`。重试清空与用户取消不再通过 `__RETRY_RESET__`、`__GENERATION_CANCELLED__` 这类字符串哨兵传递，Dart 侧也不需要再做子串匹配。
 
-Rust 测试覆盖供应商鉴权/请求转换、Anthropic 和 OpenAI-compatible SSE、跨模型上下文、记忆、知识、错误重试和 Discord 分片，并新增三类一致性回归：传输层 `Done` 不能被提前转发、取消后旧回复不能写入新轮次、并发写入只能有一个赢家。Flutter 测试覆盖聊天状态竞态、语音/MOSS 生命周期与取消、PCM 采集、摄像头观察竞态、动效策略和动作 cue 推断。Python 用例保证 16 KB 检查器在坏 ELF、4 KB 对齐、错误 ABI 和缺失输入上会失败关闭，而不是放行。
+Rust 测试覆盖供应商鉴权/请求转换、Anthropic 和 OpenAI-compatible SSE、跨模型上下文、记忆、知识、错误重试和 Discord 分片，并新增三类一致性回归：传输层 `Done` 不能被提前转发、取消后旧回复不能写入新轮次、并发写入只能有一个赢家；`T2UB` 压缩/解压上限、摘要 sidecar 与压缩炸弹拒绝也有独立用例。Flutter 测试覆盖聊天状态竞态、语音/MOSS 生命周期与取消、流式分句与逗号回退、PCM 采集、摄像头观察竞态、动效策略和动作 cue 推断。Python 用例保证 16 KB 检查器在坏 ELF、4 KB 对齐、错误 ABI 和缺失输入上会失败关闭，而不是放行。
 
 这些门禁已固化在 `.github/workflows/quality.yml`：Rust 执行 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all-targets`；Flutter 执行格式检查、`flutter analyze`、`flutter test`，并运行桌面 RAF 门控测试与 `tools` 下的主机侧审计器；`android-unit` 在无 Cubism SDK 的情况下跑 `:app:testDebugUnitTest`。Android 打包仍留在发布清单中，因为它依赖外部许可的 Cubism/QNN 产物和真机。
 
@@ -862,7 +916,7 @@ Flutter 版本在 workflow 里固定为 `3.47.9`：`flutter analyze` 的规则�
 - Qwen、MOSS 与 SenseVoice 的失败状态改为稳定错误码（`lastErrorCode`），设置页通过 `serviceErrorText` 映射到 ARB；未知原生错误才回退到原始详情。`service_error_text_test.dart` 锁定已知错误码的英文文案不含 CJK。
 - 语言数据与模型输入不放进 ARB：情感/cue 词表在 `lib/src/lexicon`（`emotion_lexicon.dart`、`speech_cue_lexicon.dart`、`moss_voice_catalog.dart`），角色系统提示词与离线重写指令在 `lib/src/prompts/persona_prompts.dart`。它们是“喂给模型/用于匹配的中文数据”，不是界面文案，翻译它们只会改变人设的推理语言。
 - 内置 provider 名称（如 `android-offline`）在磁盘上保持稳定英文标识，显示时经 `lib/src/l10n/provider_names.dart` 本地化，避免持久化配置把某一种语言写死。
-- Kotlin 侧的用户可见错误详情也已统一为英文（`MainActivity`、`GenieXRuntime`、`ModelStore`、`Chipset`），并补齐 `live2d_import_failed`、`invalid_*`、`activity_destroyed` 等错误码到 ARB 的映射；唯一保留的中文是 `moc3` 参数名 `嘴巴开合`，它是模型元数据而不是文案，代码里已加注释说明。
+- Kotlin 侧的用户可见错误详情也已统一为英文（`MainActivity`、`OnDeviceLlmRuntime`、`OnDeviceModel`、`ModelStore`、`Chipset`），并补齐 `live2d_import_failed`、`invalid_*`、`activity_destroyed`、`qwen3_import_*` 等错误码到 ARB 的映射；唯一保留的中文是 `moc3` 参数名 `嘴巴开合`，它是模型元数据而不是文案，代码里已加注释说明。
 
 - 消息气泡只在“已完成”的消息上渲染 Markdown；流式阶段用纯文本，避免每个 token 重建 AST。
 - 完成态 Markdown 按 `content + ThemeData 实例 + TextScaler` 缓存 widget 实例，父级每 48 ms 重绘时不会重复解析历史消息；`message_bubble_cache_test.dart` 用构建计数验证这一点。
@@ -903,7 +957,7 @@ tar -tf .\build\app\outputs\apk\debug\app-debug.apk
 - [ ] `女生：（哈哈大笑）你说的太好了！` 只朗读“你说的太好了！”，同时触发 happy cue。
 - [ ] 持续通话能完成“监听 -> 最终识别 -> 生成 -> 朗读 -> 恢复监听”至少 20 轮，结束后麦克风和播报均停止。
 - [ ] Qwen 首轮真实生成后显示 `Qualcomm QNN HTP/NPU`，未验证时不能进入端侧对话。
-- [ ] MOSS 实际合成后只显示 `QNN_HTP`；“候选”、NNAPI 名称或库存在不能作为硬件验收通过。
+- [ ] MOSS 实际合成后显示 `QNN_HTP(prefill,decode)+ORT_CPU(sampler,codec)`，且只有 prefill/decode 被标为 HTP；“候选”、NNAPI 名称或库存在不能作为硬件验收通过。
 - [ ] NNAPI 诊断不把类型为 CPU 的设备列为非 CPU 加速设备。
 - [ ] 明确配置的 motion/expression 能被触发。
 - [ ] 开启飞行模式后，已安装的 TTS 仍能朗读。

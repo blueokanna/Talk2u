@@ -1,6 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:talk2u/l10n/generated/app_localizations.dart';
 
+/// The composer at the bottom of the chat.
+///
+/// It is a Material 3 surface, not a decorated [Container]: the divider, the
+/// filled text field and the send action all come from the theme, so the input
+/// matches every other field in the app and the send button keeps its Material
+/// ink and tap target.
 class ChatInput extends StatefulWidget {
   final bool isStreaming;
   final ValueChanged<String> onSend;
@@ -37,12 +43,14 @@ class _ChatInputState extends State<ChatInput> {
   @override
   void initState() {
     super.initState();
-    _controller.addListener(() {
-      final hasText = _controller.text.trim().isNotEmpty;
-      if (hasText != _hasText) {
-        setState(() => _hasText = hasText);
-      }
-    });
+    _controller.addListener(_handleTextChanged);
+  }
+
+  void _handleTextChanged() {
+    final hasText = _controller.text.trim().isNotEmpty;
+    if (hasText != _hasText) {
+      setState(() => _hasText = hasText);
+    }
   }
 
   @override
@@ -59,7 +67,9 @@ class _ChatInputState extends State<ChatInput> {
 
   @override
   void dispose() {
-    _controller.dispose();
+    _controller
+      ..removeListener(_handleTextChanged)
+      ..dispose();
     _focusNode.dispose();
     super.dispose();
   }
@@ -77,81 +87,79 @@ class _ChatInputState extends State<ChatInput> {
     final theme = Theme.of(context);
     final strings = AppLocalizations.of(context);
 
-    return Container(
-      padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surface,
-        border: Border(
-          top: BorderSide(
-            color: theme.colorScheme.outlineVariant.withValues(alpha: 0.5),
-            width: 0.5,
-          ),
-        ),
-      ),
+    return Material(
+      color: theme.colorScheme.surfaceContainerLow,
       child: SafeArea(
         top: false,
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.end,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            IconButton(
-              tooltip: widget.voiceEnabled
-                  ? strings.offlineVoiceInput
-                  : strings.offlineVoiceUnavailable,
-              onPressed:
-                  widget.voiceEnabled &&
-                      (!widget.isStreaming || widget.allowVoiceDuringStreaming)
-                  ? widget.onVoiceInput
-                  : null,
-              icon: Icon(
-                widget.isListening ? Icons.mic : Icons.mic_none_outlined,
-                color: widget.isListening ? theme.colorScheme.error : null,
-              ),
-            ),
-            Expanded(
-              child: TextField(
-                controller: _controller,
-                focusNode: _focusNode,
-                maxLines: widget.maxLines,
-                minLines: 1,
-                textInputAction: TextInputAction.newline,
-                onSubmitted: (_) => _handleSend(),
-                decoration: InputDecoration(
-                  hintText: widget.isStreaming
-                      ? strings.aiResponding
-                      : strings.messageHint,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(24),
-                    borderSide: BorderSide.none,
+            const Divider(height: 1),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 8, 12, 8),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  IconButton(
+                    tooltip: widget.voiceEnabled
+                        ? strings.offlineVoiceInput
+                        : strings.offlineVoiceUnavailable,
+                    onPressed:
+                        widget.voiceEnabled &&
+                            (!widget.isStreaming ||
+                                widget.allowVoiceDuringStreaming)
+                        ? widget.onVoiceInput
+                        : null,
+                    icon: Icon(
+                      widget.isListening ? Icons.mic : Icons.mic_none_outlined,
+                      color: widget.isListening
+                          ? theme.colorScheme.error
+                          : null,
+                    ),
                   ),
-                  filled: true,
-                  fillColor: theme.colorScheme.surfaceContainerHighest,
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 10,
+                  Expanded(
+                    child: TextField(
+                      controller: _controller,
+                      focusNode: _focusNode,
+                      maxLines: widget.maxLines,
+                      minLines: 1,
+                      textInputAction: TextInputAction.newline,
+                      onSubmitted: (_) => _handleSend(),
+                      style: theme.textTheme.bodyMedium,
+                      decoration: InputDecoration(
+                        hintText: widget.isStreaming
+                            ? strings.aiResponding
+                            : strings.messageHint,
+                        filled: true,
+                        fillColor: theme.colorScheme.surfaceContainerHighest,
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 10,
+                        ),
+                      ),
+                    ),
                   ),
-                  isDense: true,
-                ),
-                style: theme.textTheme.bodyMedium,
-              ),
-            ),
-            const SizedBox(width: 6),
-            IconButton.filled(
-              tooltip: widget.isStreaming
-                  ? strings.stopGenerating
-                  : strings.send,
-              onPressed: widget.isStreaming
-                  ? widget.onStop
-                  : (_hasText ? _handleSend : null),
-              icon: Icon(
-                widget.isStreaming
-                    ? Icons.stop_rounded
-                    : Icons.arrow_upward_rounded,
-                size: 22,
-              ),
-              style: IconButton.styleFrom(
-                backgroundColor: theme.colorScheme.primary,
-                foregroundColor: theme.colorScheme.onPrimary,
-                fixedSize: const Size(40, 40),
+                  const SizedBox(width: 6),
+                  IconButton.filled(
+                    tooltip: widget.isStreaming
+                        ? strings.stopGenerating
+                        : strings.send,
+                    onPressed: widget.isStreaming
+                        ? widget.onStop
+                        : (_hasText ? _handleSend : null),
+                    icon: Icon(
+                      widget.isStreaming
+                          ? Icons.stop_rounded
+                          : Icons.arrow_upward_rounded,
+                      size: 22,
+                    ),
+                    style: IconButton.styleFrom(
+                      backgroundColor: theme.colorScheme.primary,
+                      foregroundColor: theme.colorScheme.onPrimary,
+                      fixedSize: const Size(40, 40),
+                    ),
+                  ),
+                ],
               ),
             ),
           ],

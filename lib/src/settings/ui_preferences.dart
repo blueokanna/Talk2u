@@ -24,6 +24,11 @@ class UiPreferences extends ChangeNotifier {
   AppColorTheme colorTheme = AppColorTheme.teal;
   AppLanguage language = AppLanguage.system;
 
+  /// Normal chat reads each reply as it streams. Call mode has its own
+  /// lifecycle and ignores this flag; turning it off leaves the manual speaker
+  /// button untouched.
+  bool autoReadReplies = true;
+
   Locale? get locale => switch (language) {
     AppLanguage.system => null,
     AppLanguage.zh => const Locale('zh'),
@@ -60,6 +65,13 @@ class UiPreferences extends ChangeNotifier {
     await _write();
   }
 
+  Future<void> setAutoReadReplies(bool value) async {
+    if (autoReadReplies == value) return;
+    autoReadReplies = value;
+    notifyListeners();
+    await _write();
+  }
+
   Future<void> _read() async {
     if (!await _file.exists()) return;
     try {
@@ -77,10 +89,12 @@ class UiPreferences extends ChangeNotifier {
         (item) => item.name == value['language'],
         orElse: () => AppLanguage.system,
       );
+      autoReadReplies = value['autoReadReplies'] as bool? ?? true;
     } on Object {
       themeMode = ThemeMode.system;
       colorTheme = AppColorTheme.teal;
       language = AppLanguage.system;
+      autoReadReplies = true;
     }
   }
 
@@ -88,10 +102,11 @@ class UiPreferences extends ChangeNotifier {
     await _file.parent.create(recursive: true);
     await _file.writeAsString(
       jsonEncode({
-        'schemaVersion': 1,
+        'schemaVersion': 2,
         'themeMode': themeMode.name,
         'colorTheme': colorTheme.name,
         'language': language.name,
+        'autoReadReplies': autoReadReplies,
       }),
       flush: true,
     );

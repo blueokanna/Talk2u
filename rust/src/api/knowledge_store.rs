@@ -442,10 +442,10 @@ impl KnowledgeStore {
         } else if let Some(start) = json_text.find('{') {
             if let Some(end) = json_text.rfind('}') {
                 let obj_str = &json_text[start..=end];
-                if let Ok(obj) = serde_json::from_str::<serde_json::Value>(obj_str) {
-                    if let Some(arr) = obj.get("facts").and_then(|v| v.as_array()) {
-                        return Self::parse_fact_array(arr, turn);
-                    }
+                if let Ok(obj) = serde_json::from_str::<serde_json::Value>(obj_str)
+                    && let Some(arr) = obj.get("facts").and_then(|v| v.as_array())
+                {
+                    return Self::parse_fact_array(arr, turn);
                 }
                 obj_str
             } else {

@@ -92,6 +92,32 @@ void main() {
     });
   });
 
+  test(
+    'responseEvents exposes the exact deltas the call TTS consumes',
+    () async {
+      state.startStreaming();
+      final received = <ChatStreamEvent>[];
+      final subscription = state.responseEvents.listen(received.add);
+      final events = StreamController<ChatStreamEvent>();
+      state.listenToChatStreamForTest(events.stream, 'same');
+      events.add(const ChatStreamEvent.contentDelta('第一句。'));
+      events.add(const ChatStreamEvent.contentDelta('第二句'));
+      events.add(const ChatStreamEvent.retryReset());
+      events.add(const ChatStreamEvent.contentDelta('重来。'));
+      events.add(const ChatStreamEvent.done());
+      await Future<void>.delayed(Duration.zero);
+      await subscription.cancel();
+      await events.close();
+      expect(received.length, 5);
+      expect(
+        received.whereType<ChatStreamEvent_ContentDelta>().map((e) => e.field0),
+        ['第一句。', '第二句', '重来。'],
+      );
+      expect(received[2], isA<ChatStreamEvent_RetryReset>());
+      expect(received.last, isA<ChatStreamEvent_Done>());
+    },
+  );
+
   group('mobile memory behaviour', () {
     test('streaming deltas keep message views stable', () async {
       state.startStreaming();

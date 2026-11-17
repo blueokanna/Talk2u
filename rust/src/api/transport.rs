@@ -470,13 +470,13 @@ mod tests {
     /// which is why the assertion is a handshake and not a wall-clock estimate.
     #[tokio::test]
     async fn frames_arrive_before_the_response_is_complete() {
+        use courierust::Bytes;
         use courierust::courierust_body::Body as ServerBody;
         use courierust::courierust_http::header::{HeaderName, HeaderValue};
         use courierust::courierust_http::request::Request;
         use courierust::courierust_http::response::Response;
         use courierust::courierust_server::{Server, ServerConfig};
-        use courierust::Bytes;
-        use std::sync::mpsc::{channel, RecvTimeoutError};
+        use std::sync::mpsc::{RecvTimeoutError, channel};
         use std::sync::{Arc, Mutex};
 
         let (received_first, first_was_received) = channel::<()>();

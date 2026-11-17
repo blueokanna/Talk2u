@@ -127,18 +127,18 @@ impl DiscordBridge {
 
     async fn load_or_create_state(&self) -> Result<BridgeState, String> {
         let state_path = self.state_path();
-        if let Ok(contents) = fs::read_to_string(&state_path) {
-            if let Ok(mut state) = serde_json::from_str::<BridgeState>(&contents) {
-                if let Some(conversation_id) = &self.conversation_override {
-                    state.conversation_id = conversation_id.clone();
-                    self.ensure_conversation(&state.conversation_id)?;
-                    self.save_state(&state)?;
-                } else if self.ensure_conversation(&state.conversation_id).is_err() {
-                    state.conversation_id = self.create_conversation()?;
-                    self.save_state(&state)?;
-                }
-                return Ok(state);
+        if let Ok(contents) = fs::read_to_string(&state_path)
+            && let Ok(mut state) = serde_json::from_str::<BridgeState>(&contents)
+        {
+            if let Some(conversation_id) = &self.conversation_override {
+                state.conversation_id = conversation_id.clone();
+                self.ensure_conversation(&state.conversation_id)?;
+                self.save_state(&state)?;
+            } else if self.ensure_conversation(&state.conversation_id).is_err() {
+                state.conversation_id = self.create_conversation()?;
+                self.save_state(&state)?;
             }
+            return Ok(state);
         }
 
         let conversation_id = if let Some(id) = &self.conversation_override {
@@ -233,10 +233,10 @@ impl DiscordBridge {
                 thinking_model,
                 enable_thinking,
                 move |event| {
-                    if let ChatStreamEvent::Error(message) = event {
-                        if let Ok(mut slot) = error_slot.lock() {
-                            *slot = Some(message);
-                        }
+                    if let ChatStreamEvent::Error(message) = event
+                        && let Ok(mut slot) = error_slot.lock()
+                    {
+                        *slot = Some(message);
                     }
                 },
             )
